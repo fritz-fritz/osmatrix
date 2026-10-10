@@ -5,6 +5,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import { CLIENTS, expectedMcpArgs, validatePlugin } from "../scripts/validate-plugins.mjs";
+import { unpinnedUses } from "../scripts/validate-workflows.mjs";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
 const { version } = JSON.parse(await readFile(path.join(root, "package.json"), "utf8"));
@@ -62,4 +63,14 @@ test("plugin validation catches unusable listings, escaping paths, missing files
   } finally {
     await rm(temp, { recursive: true, force: true });
   }
+});
+
+test("workflow actions must be pinned to commit SHAs with a version comment", () => {
+  const sha = "3d3c42e5aac5ba805825da76410c181273ba90b1";
+  assert.deepEqual(unpinnedUses(`      - uses: actions/checkout@${sha} # v7.0.1`), []);
+  assert.deepEqual(unpinnedUses("      - uses: ./.github/actions/local"), []);
+  assert.match(unpinnedUses("      - uses: actions/checkout@v7")[0], /full commit SHA/);
+  assert.match(unpinnedUses("        uses: actions/checkout@main")[0], /full commit SHA/);
+  assert.match(unpinnedUses(`      - uses: actions/checkout@${sha}`)[0], /vX.Y.Z/);
+  assert.match(unpinnedUses("      - uses: docker://alpine:3")[0], /digest/);
 });

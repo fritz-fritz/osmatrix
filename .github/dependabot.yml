@@ -1,0 +1,29 @@
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    # Supply-chain cooldown: a version must be a week old before it's proposed. Platform default is 3 days.
+    cooldown:
+      default-days: 7
+    groups:
+      npm-minor-patch:
+        update-types:
+          - minor
+          - patch
+
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    cooldown:
+      default-days: 7
+    # Workflows pin actions to full commit SHAs with a "# vX.Y.Z" comment; Dependabot updates both.
+    groups:
+      github-actions-minor-patch:
+        update-types:
+          - minor
+          - patch

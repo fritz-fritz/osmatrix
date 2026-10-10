@@ -14,19 +14,19 @@ jobs:
   plugins:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 24
       - name: Skills identical across clients, manifest versions match package.json
         run: npm run validate
       - name: Claude plugin + marketplace manifests
         run: |
-          npx -y @anthropic-ai/claude-code@latest plugin validate --strict claude
-          npx -y @anthropic-ai/claude-code@latest plugin validate --strict .claude-plugin/marketplace.json
+          npx -y @anthropic-ai/claude-code@2.1.288 plugin validate --strict claude
+          npx -y @anthropic-ai/claude-code@2.1.288 plugin validate --strict .claude-plugin/marketplace.json
       - name: Codex manifests (Agent Plugins 1.0.0 schemas)
         run: |
-          npm i --no-save ajv@8 ajv-formats@3
+          npm i --no-save ajv@8.20.0 ajv-formats@3.0.1
           node -e '
             const Ajv=require("ajv/dist/2020").default, f=require("ajv-formats"), fs=require("fs");
             const ajv=new Ajv({strict:false,allErrors:true}); f(ajv); let bad=0;
@@ -38,7 +38,7 @@ jobs:
         # CI=true makes the skills CLI colorize its output; strip ANSI codes before matching.
         env:
           NO_COLOR: "1"
-        run: npx -y skills@latest add . --list | sed 's/\x1b\[[0-9;]*m//g' | grep -q "Found 1 skill"
+        run: npx -y skills@1.7.0 add . --list | sed 's/\x1b\[[0-9;]*m//g' | grep -q "Found 1 skill"
       - name: Bundled plugins build, validate, and their MCP servers start (Claude, Cursor, Codex)
         run: |
           npm ci
@@ -46,7 +46,7 @@ jobs:
           for c in claude cursor codex; do
             OSMATRIX_TEST_PLUGIN_ROOT="$PWD/artifacts/$c/osmatrix" node --test test/mcp.test.ts
           done
-          npx -y @anthropic-ai/claude-code@latest plugin validate --strict artifacts/.claude-plugin/marketplace.json
+          npx -y @anthropic-ai/claude-code@2.1.288 plugin validate --strict artifacts/.claude-plugin/marketplace.json
 
   unit:
     runs-on: ${{ matrix.os }}
@@ -55,8 +55,8 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 24
       - run: npm ci
@@ -85,8 +85,8 @@ jobs:
     env:
       OSMATRIX_HOME: ${{ github.workspace }}/.osmatrix-home
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 24
       - run: npm ci && npm run build
@@ -109,3 +109,18 @@ jobs:
       - name: Clean up the guest (matters when this job runs locally under act)
         if: always()
         run: node dist/cli.js destroy ubuntu --yes
+
+  # Single required check for rulesets and Dependabot auto-merge: passes only when every job above
+  # succeeded, so new jobs are covered without editing branch protection.
+  ci-gate:
+    name: CI Gate
+    needs: [plugins, unit, integration]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: All CI jobs passed
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          echo "job results: $RESULTS"
+          for r in $RESULTS; do [ "$r" = success ] || { echo "::error::a required CI job did not succeed ($r)"; exit 1; }; done

@@ -39,7 +39,7 @@
     "dev": "node src/cli.ts",
     "prepack": "npm run build",
     "sync": "node scripts/sync-skills.mjs",
-    "validate": "node scripts/sync-skills.mjs --check && node scripts/validate-skills.mjs && node scripts/validate-plugins.mjs",
+    "validate": "node scripts/sync-skills.mjs --check && node scripts/validate-skills.mjs && node scripts/validate-plugins.mjs && node scripts/validate-workflows.mjs",
     "package:plugins": "npm run validate && node scripts/package-plugins.mjs",
     "codeql": "node scripts/codeql.mjs",
     "check": "npm run typecheck && npm test && npm run validate",
