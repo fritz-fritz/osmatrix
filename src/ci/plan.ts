@@ -15,6 +15,8 @@ export interface Leg {
   runsOn: string[];
   /** runs-on labels of jobs this leg transitively needs (act runs them in the same environment). */
   needsLabels: string[];
+  /** Jobs this leg's job directly needs. */
+  needs: string[];
   /** "host" = act on the host docker (Linux legs); otherwise a guest name. */
   target?: string;
   targetOs?: string;
@@ -225,6 +227,7 @@ export function plan(repo: string, cfg: Config, filter: PlanFilter = {}): Plan {
           skip,
           warnings: lw,
           needsLabels: [],
+          needs: [],
         });
       }
     }
@@ -237,7 +240,8 @@ export function plan(repo: string, cfg: Config, filter: PlanFilter = {}): Plan {
     };
     const needsOf = (jobId: string): string[] => {
       const n = jobs[jobId]?.needs;
-      return typeof n === "string" ? [n] : Array.isArray(n) ? (n as string[]) : [];
+      // A copy: callers mutate the result (the traversal below pops from it).
+      return typeof n === "string" ? [n] : Array.isArray(n) ? [...(n as string[])] : [];
     };
     for (const leg of wfLegs) {
       const seenJobs = new Set<string>();
@@ -249,6 +253,7 @@ export function plan(repo: string, cfg: Config, filter: PlanFilter = {}): Plan {
         stack.push(...needsOf(j));
       }
       leg.needsLabels = [...new Set([...seenJobs].flatMap(labelsOf))].filter((l) => !l.includes("${{"));
+      leg.needs = needsOf(leg.job);
     }
     // needs: across OS boundaries can't be honored when legs run in separate environments.
     for (const leg of wfLegs) {
@@ -271,5 +276,18 @@ export function plan(repo: string, cfg: Config, filter: PlanFilter = {}): Plan {
         return keys.some((k) => only.includes(k.toLowerCase()));
       })
     : legs;
+
+  // act -j <job> also runs the job's needs. When every needed job already runs as its own leg in
+  // this run (typical for gate / fan-in jobs such as "CI Gate"), running the dependent job would
+  // repeat all of them, on the wrong OS for Windows/macOS legs. Skip it unless asked for by name.
+  if (!filter.job) {
+    for (const leg of filtered) {
+      if (leg.skip || !leg.needs.length) continue;
+      const covered = leg.needs.every((n) => filtered.some((o) => o !== leg && o.workflow === leg.workflow && o.job === n && !o.skip));
+      if (covered) {
+        leg.skip = `its needs (${leg.needs.join(", ")}) already run as legs here; act would repeat them. Run it alone with --job ${leg.job}`;
+      }
+    }
+  }
   return { repo, legs: filtered, warnings };
 }
