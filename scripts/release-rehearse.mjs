@@ -29,3 +29,13 @@ const r = spawnSync(process.execPath, [join(root, "src", "cli.ts"), "ci", "run",
 });
 rmSync(dir, { recursive: true, force: true });
 process.exitCode = r.status ?? 1;
+
+// Preview the generated release notes (grouped by .github/release.yml) for PRs merged on GitHub's
+// main since the latest release. Best effort: needs the gh CLI, signed in.
+const notes = spawnSync(
+  "gh",
+  ["api", "repos/{owner}/{repo}/releases/generate-notes", "-f", `tag_name=v${version}`, "-f", "target_commitish=main", "--jq", ".body"],
+  { cwd: root, encoding: "utf8", shell: process.platform === "win32" },
+);
+if (notes.status === 0) console.error(`\nRelease notes preview for v${version} (PRs merged on main so far):\n\n${notes.stdout.trim()}`);
+else console.error(`\n(no release notes preview: ${(notes.stderr || notes.error?.message || "gh failed").trim()})`);

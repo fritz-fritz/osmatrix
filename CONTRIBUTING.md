@@ -8,7 +8,7 @@ osmatrix is MIT-licensed, and its copyright is held by "osmatrix contributors". 
 
 ## Reporting issues
 
-- **Bugs and feature requests:** open an issue at https://github.com/fritz-fritz/osmatrix/issues. Include your host OS, the output of `osmatrix doctor`, the guest involved, and the command or tool call that failed. CI run logs from `.osmatrix/runs/<id>/` help a lot.
+- **Bugs and feature requests:** open an issue at https://github.com/fritz-fritz/osmatrix/issues and pick the bug report or feature request form; it asks for your host OS, the output of `osmatrix doctor`, the guest involved, and the command or tool call that failed. CI run logs from `.osmatrix/runs/<id>/` help a lot.
 - **Security vulnerabilities:** please don't open a public issue. Report them privately through GitHub's [security advisory form](https://github.com/fritz-fritz/osmatrix/security/advisories/new).
 
 ## Development setup
@@ -98,7 +98,9 @@ The workflow must run while checks are still pending: GitHub refuses to enable a
 
 ## Pull requests
 
-1. Fork, branch from `main`, and keep each PR focused on one change.
+1. Fork, branch from `main`, and keep each PR focused on one change. Release notes list PRs by title, so a fix bundled into an unrelated PR is hard to find.
+   Start the branch name with its type: `fix`, `feat`, `docs`, `ci`, `chore` or `security`, followed by `/`, `-` or `_`. A leading name segment is fine, so the defaults of coding agents work: `fix/login`, `claude/fix-login-x7k2`, `cursor/feat-guest-3f9a` and `copilot/fix-123` are all recognized. The type labels the PR (`bug`, `enhancement`, `documentation`, `ci`, `chore`, `security`), and the label decides its section in the release notes ([`.github/release.yml`](.github/release.yml)).
+   If the PR closes an issue (write `Fixes #12` in the description), it also gets that issue's type labels (`bug`, `enhancement`, `breaking` and so on), so a fix for an issue filed as a bug report is labeled `bug` whatever the branch is called. Maintainers add `breaking` by hand, and `skip-release-notes` leaves a PR out. A label removed by hand stays removed on later pushes; add it back by hand to undo that.
 2. Before you push, run `npm run verify` (or at least `npm run check` and `npm run ci:local:linux`); see [Checks before you push](#checks-before-you-push).
 3. Describe what changed, why, and how you tested it, including which host OS and guests.
 

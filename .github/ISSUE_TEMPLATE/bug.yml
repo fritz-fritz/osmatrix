@@ -1,0 +1,52 @@
+name: Bug report
+description: Something in osmatrix doesn't work as expected.
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you ran (CLI command or MCP tool call), what you expected, and what happened instead.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: osmatrix version
+      description: Output of `osmatrix --version`.
+    validations:
+      required: true
+  - type: dropdown
+    id: host
+    attributes:
+      label: Host OS
+      options:
+        - Linux
+        - Windows (WSL2)
+        - macOS (Apple Silicon)
+        - Other
+    validations:
+      required: true
+  - type: dropdown
+    id: guest
+    attributes:
+      label: Guest involved
+      multiple: true
+      options:
+        - ubuntu
+        - windows
+        - macos
+        - ssh guest
+        - none (host only, e.g. ci plan)
+  - type: textarea
+    id: doctor
+    attributes:
+      label: osmatrix doctor
+      description: Output of `osmatrix doctor`.
+      render: text
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Relevant output, or CI run logs from `.osmatrix/runs/<id>/`. Remove anything secret.
+      render: text

@@ -1,0 +1,34 @@
+# Labels for PRs (workflows/labeler.yml), which group the release notes (release.yml).
+# Mostly from the branch name's type word: fix, feat, docs, ci, chore or security, followed by
+# /, - or _. It may come after one leading segment, because coding agents and some people prefix
+# branches with a name: fix/login, claude/fix-login-x7k2, cursor/feat-guest-3f9a, copilot/fix-123
+# and fritz/docs/readme all count. That leading segment can't itself be a type word, so
+# ci/fix-labeler is ci, not bug.
+# workflows/labeler.yml also copies these labels (and `breaking`) from the issues a PR closes.
+# `breaking` and `skip-release-notes` are otherwise applied by hand. Rules for labels removed from a
+# PR by hand are dropped for that PR, so they aren't re-added.
+
+bug:
+  - head-branch: ['^(?:(?!(?:fix|bugfix|hotfix|feat|feature|docs?|ci|chore|security)/)[^/]+/)?(?:fix|bugfix|hotfix)(?:[/_-]|$)']
+
+enhancement:
+  - head-branch: ['^(?:(?!(?:fix|bugfix|hotfix|feat|feature|docs?|ci|chore|security)/)[^/]+/)?(?:feat|feature)(?:[/_-]|$)']
+
+security:
+  - head-branch: ['^(?:(?!(?:fix|bugfix|hotfix|feat|feature|docs?|ci|chore|security)/)[^/]+/)?security(?:[/_-]|$)']
+
+documentation:
+  - head-branch: ['^(?:(?!(?:fix|bugfix|hotfix|feat|feature|docs?|ci|chore|security)/)[^/]+/)?docs?(?:[/_-]|$)']
+  # Only top-level Markdown changed (skills/ is product content, not docs).
+  - changed-files:
+      - any-glob-to-all-files: ['*.md']
+
+ci:
+  - head-branch: ['^(?:(?!(?:fix|bugfix|hotfix|feat|feature|docs?|ci|chore|security)/)[^/]+/)?ci(?:[/_-]|$)']
+  # Every changed file is CI or release tooling. One brace glob, because any-glob-to-all-files needs
+  # a single glob to match all files (separate globs would miss a PR touching ci.yml and scripts/).
+  - changed-files:
+      - any-glob-to-all-files: ['{.github/workflows/**,.github/ci-tools/**,.github/dependabot.yml,.github/labeler.yml,.github/release.yml,scripts/**}']
+
+chore:
+  - head-branch: ['^(?:(?!(?:fix|bugfix|hotfix|feat|feature|docs?|ci|chore|security)/)[^/]+/)?chore(?:[/_-]|$)']
