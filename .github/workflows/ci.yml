@@ -1,6 +1,9 @@
 name: ci
 on:
+  # Once per commit: pushes to main and pull requests. Tags don't re-run CI; release.yml waits for
+  # this workflow to have passed on the tagged commit instead.
   push:
+    branches: [main]
   pull_request:
 
 # Least privilege: CI only reads the repository.

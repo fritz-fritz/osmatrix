@@ -42,6 +42,7 @@ Set `OSMATRIX_HOME=/some/dir` to keep experiments apart from your real guests: c
 | `npm run ci:local:linux` | only the Linux legs (Docker only, no VMs needed) |
 | `npm run release:rehearse` | `release.yml` as if `v<version>` were pushed; publishing is a dry run |
 | `npm run verify` | `check` + `codeql` + `ci:local`, the full pre-push gate |
+| `npm run release:tag` | maintainers: tag and push `v<version>`, only after the pushed commit's GitHub checks passed |
 
 osmatrix runs its own CI locally, so a passing `npm run verify` (or `ci:local:linux` when you have no VMs) means GitHub CI should pass too. Guests you can't run on your host are fine to skip; GitHub CI covers all three OSes.
 

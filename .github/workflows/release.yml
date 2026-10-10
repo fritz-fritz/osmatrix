@@ -16,14 +16,32 @@ on:
   push:
     tags: ["v[0-9]+.[0-9]+.[0-9]+*"]
 
-permissions:
-  contents: write # create the release
-  id-token: write # npm trusted publishing + attestations
-  attestations: write
+permissions: {} # granted per job below
 
 jobs:
-  release:
+  # Nothing irreversible (npm publish, immutable release) happens until the tagged commit has passed
+  # ci.yml and every other check (e.g. CodeQL). If they fail, delete the tag, fix, and re-tag.
+  checks:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+      checks: read
+    steps:
+      - uses: actions/checkout@v7
+      - name: Wait for the commit's CI and checks to pass
+        if: ${{ !env.ACT }} # local rehearsals run against uncommitted work; there are no GitHub checks
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/checks.mjs "$GITHUB_SHA" --wait --timeout 2700 --exclude-run "$GITHUB_RUN_ID"
+
+  release:
+    needs: checks
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # create the release
+      id-token: write # npm trusted publishing + attestations
+      attestations: write
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7

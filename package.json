@@ -46,7 +46,8 @@
     "ci:local": "node src/cli.ts ci run --repo . -W ci.yml --wait",
     "ci:local:linux": "node src/cli.ts ci run --repo . -W ci.yml --only linux --wait",
     "release:rehearse": "node scripts/release-rehearse.mjs",
-    "verify": "npm run check && npm run codeql && npm run ci:local"
+    "verify": "npm run check && npm run codeql && npm run ci:local",
+    "release:tag": "node scripts/release-tag.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.32.1",
