@@ -15,7 +15,9 @@
     "assets/macos",
     "README.md",
     "skills",
-    "LICENSE"
+    "LICENSE",
+    "!**/__pycache__",
+    "!**/*.pyc"
   ],
   "engines": {
     "node": ">=22.18"
