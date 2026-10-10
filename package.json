@@ -1,6 +1,6 @@
 {
   "name": "osmatrix",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Local Ubuntu/Windows/macOS environments and GitHub Actions matrix runs (via act) for coding agents. CLI + MCP server + skill.",
   "license": "MIT",
   "type": "module",
