@@ -1,0 +1,26 @@
+# Labels for PRs (workflows/labeler.yml), which group the release notes (release.yml).
+# Mostly from the branch prefix, so name branches fix/…, feat/…, docs/…, ci/…, chore/… or security/….
+# `breaking` and `skip-release-notes` are applied by hand.
+
+bug:
+  - head-branch: ['^(fix|bugfix|hotfix)/']
+
+enhancement:
+  - head-branch: ['^(feat|feature)/']
+
+security:
+  - head-branch: ['^security/']
+
+documentation:
+  - head-branch: ['^docs?/']
+  # Only top-level Markdown changed (skills/ is product content, not docs).
+  - changed-files:
+      - any-glob-to-all-files: ['*.md']
+
+ci:
+  - head-branch: ['^ci/']
+  - changed-files:
+      - any-glob-to-all-files: ['.github/workflows/**', '.github/ci-tools/**', '.github/dependabot.yml', 'scripts/**']
+
+chore:
+  - head-branch: ['^chore/']

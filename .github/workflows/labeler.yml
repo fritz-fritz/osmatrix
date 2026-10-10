@@ -1,0 +1,23 @@
+# Label PRs from their branch prefix and changed files (.github/labeler.yml); the labels group
+# GitHub's generated release notes (.github/release.yml).
+#
+# pull_request_target so PRs from forks can be labeled too. That's safe here because nothing from
+# the PR is checked out or run: the action reads the PR's branch name and file list through the API
+# and the config from the base branch. Changes to labeler.yml therefore take effect after merging.
+
+name: Labeler
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+
+permissions: {}
+
+jobs:
+  label:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/labeler@bf12e9b00b37c5c0ca2b87b79b2daf7891dbda13 # v7.0.0

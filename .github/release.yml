@@ -1,0 +1,24 @@
+# Sections for GitHub's generated release notes (`gh release create --generate-notes` in
+# workflows/release.yml). A PR is listed under the first category whose labels it carries.
+# Labels come from the branch prefix (labeler.yml), Dependabot, or by hand (`breaking`).
+changelog:
+  exclude:
+    labels:
+      - skip-release-notes
+  categories:
+    - title: Breaking changes
+      labels: [breaking]
+    - title: Security
+      labels: [security]
+    - title: Features
+      labels: [enhancement]
+    - title: Fixes
+      labels: [bug]
+    - title: Documentation
+      labels: [documentation]
+    - title: CI and tooling
+      labels: [ci, chore]
+    - title: Dependencies
+      labels: [dependencies]
+    - title: Other changes
+      labels: ["*"]

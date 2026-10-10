@@ -180,7 +180,7 @@ Every release is one immutable version. The tag is `v<x.y.z>`, matching `osmatri
 To release:
 
 1. Bump the version with `npm version patch --no-git-tag-version` (or `minor` / `major`; a breaking CLI/MCP change means a new major), then run `npm run sync` to stamp it into the three plugin manifests and the major-version pin into their MCP configs.
-2. Run `npm run verify` and `npm run release:rehearse`. The rehearsal runs `release.yml` locally as if `v<version>` had been pushed, with an `npm publish --dry-run` in place of attestation, publishing and the GitHub release (they need GitHub's OIDC token). It refuses a version that's already on npm.
+2. Run `npm run verify` and `npm run release:rehearse`. The rehearsal runs `release.yml` locally as if `v<version>` had been pushed, with an `npm publish --dry-run` in place of attestation, publishing and the GitHub release (they need GitHub's OIDC token). It refuses a version that's already on npm, and ends with a preview of the release notes.
 3. Commit and push `main`, and let GitHub CI run.
 4. Run `npm run release:tag` (add `--wait` to wait for CI). It creates and pushes the tag only if `HEAD` is pushed, the version and tag are unused, and the commit's CI and other checks, such as CodeQL, have passed. So a tag isn't spent on a commit that can't be released.
 
@@ -189,7 +189,7 @@ When the tag lands, [`release.yml`](.github/workflows/release.yml):
    - validates, tests and builds the bundled plugins;
    - attests build provenance for the npm tarball and the plugin archives;
    - publishes that same tarball to npm with trusted publishing and provenance;
-   - creates the GitHub release with all four files attached.
+   - creates the GitHub release with all four files attached. Its notes are GitHub's generated list of merged PRs, grouped by label as set in [`.github/release.yml`](.github/release.yml); see "Pull requests" in [CONTRIBUTING.md](CONTRIBUTING.md#pull-requests) for how PRs get their labels.
 
 If the checks fail after tagging, nothing has been published, so you can delete the tag, fix, and tag again.
 
