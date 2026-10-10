@@ -20,25 +20,21 @@ jobs:
           node-version: 24
       - name: Skills identical across clients, manifest versions match package.json
         run: npm run validate
+      - name: Install CI tools (pinned by .github/ci-tools/package-lock.json, updated by Dependabot)
+        run: |
+          npm ci --prefix .github/ci-tools --no-audit --no-fund
+          echo "$GITHUB_WORKSPACE/.github/ci-tools/node_modules/.bin" >> "$GITHUB_PATH"
       - name: Claude plugin + marketplace manifests
         run: |
-          npx -y @anthropic-ai/claude-code@2.1.288 plugin validate --strict claude
-          npx -y @anthropic-ai/claude-code@2.1.288 plugin validate --strict .claude-plugin/marketplace.json
+          claude plugin validate --strict claude
+          claude plugin validate --strict .claude-plugin/marketplace.json
       - name: Codex manifests (Agent Plugins 1.0.0 schemas)
-        run: |
-          npm i --no-save ajv@8.20.0 ajv-formats@3.0.1
-          node -e '
-            const Ajv=require("ajv/dist/2020").default, f=require("ajv-formats"), fs=require("fs");
-            const ajv=new Ajv({strict:false,allErrors:true}); f(ajv); let bad=0;
-            for (const [s,file] of [["plugin","codex/plugin.json"],["mcp","codex/mcp.json"]]) {
-              const schema=JSON.parse(require("child_process").execSync(`curl -fsSL https://agent-plugins.org/schemas/1.0.0/${s}.schema.json`));
-              const v=ajv.compile(schema); if(!v(JSON.parse(fs.readFileSync(file)))){bad=1;console.error(file,v.errors)} else console.log(file,"valid");
-            } process.exit(bad)'
+        run: node scripts/validate-codex-schemas.mjs
       - name: skills.sh discovers exactly one skill
         # CI=true makes the skills CLI colorize its output; strip ANSI codes before matching.
         env:
           NO_COLOR: "1"
-        run: npx -y skills@1.7.0 add . --list | sed 's/\x1b\[[0-9;]*m//g' | grep -q "Found 1 skill"
+        run: skills add . --list | sed 's/\x1b\[[0-9;]*m//g' | grep -q "Found 1 skill"
       - name: Bundled plugins build, validate, and their MCP servers start (Claude, Cursor, Codex)
         run: |
           npm ci
@@ -46,7 +42,7 @@ jobs:
           for c in claude cursor codex; do
             OSMATRIX_TEST_PLUGIN_ROOT="$PWD/artifacts/$c/osmatrix" node --test test/mcp.test.ts
           done
-          npx -y @anthropic-ai/claude-code@2.1.288 plugin validate --strict artifacts/.claude-plugin/marketplace.json
+          claude plugin validate --strict artifacts/.claude-plugin/marketplace.json
 
   unit:
     runs-on: ${{ matrix.os }}

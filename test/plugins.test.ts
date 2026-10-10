@@ -73,4 +73,7 @@ test("workflow actions must be pinned to commit SHAs with a version comment", ()
   assert.match(unpinnedUses("        uses: actions/checkout@main")[0], /full commit SHA/);
   assert.match(unpinnedUses(`      - uses: actions/checkout@${sha}`)[0], /vX.Y.Z/);
   assert.match(unpinnedUses("      - uses: docker://alpine:3")[0], /digest/);
+  assert.match(unpinnedUses("        run: npx -y @anthropic-ai/claude-code@2.1.0 plugin validate")[0], /ci-tools/);
+  assert.match(unpinnedUses("          npm i --no-save ajv@8 ajv-formats@3")[0], /ci-tools/);
+  assert.deepEqual(unpinnedUses("          npm ci --prefix .github/ci-tools"), []);
 });

@@ -14,6 +14,19 @@ updates:
           - minor
           - patch
 
+  # Tools the workflows run (plugin validators, skills.sh CLI, ajv), pinned by their own lockfile.
+  - package-ecosystem: npm
+    directory: "/.github/ci-tools"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    cooldown:
+      default-days: 7
+    groups:
+      ci-tools:
+        patterns:
+          - "*"
+
   - package-ecosystem: github-actions
     directory: "/"
     schedule:

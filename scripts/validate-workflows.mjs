@@ -1,7 +1,9 @@
 #!/usr/bin/env node
-// Every GitHub Action a workflow uses must be pinned to a full commit SHA with a version comment
-// (`owner/repo@<40 hex> # vX.Y.Z`), which Dependabot keeps updated. Tags and branches can be moved
-// by whoever controls the action's repository; a commit SHA can't.
+// Supply-chain rules for workflows, all kept current by Dependabot:
+// - every GitHub Action is pinned to a full commit SHA with a version comment
+//   (`owner/repo@<40 hex> # vX.Y.Z`); tags and branches can be moved, a commit SHA can't;
+// - npm tools come from .github/ci-tools (exact versions + lockfile integrity), never `npx -y`
+//   or `npm install <pkg>@<version>`, which Dependabot can't see.
 import { readdirSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -20,6 +22,13 @@ export function unpinnedUses(text, file = "workflow") {
     }
     if (!/^[\w.-]+\/[\w./-]+@[0-9a-f]{40}$/.test(ref)) problems.push(`${file}:${i + 1}: action must be pinned to a full commit SHA: ${ref}`);
     else if (!comment || !/^v?\d/.test(comment)) problems.push(`${file}:${i + 1}: add a "# vX.Y.Z" comment so Dependabot can track ${ref.split("@")[0]}`);
+  });
+  // Tools must come from .github/ci-tools (lockfile + Dependabot), not ad-hoc npx/npm installs.
+  text.split("\n").forEach((line, i) => {
+    if (/^\s*#/.test(line)) return;
+    if (/\bnpx\s+(-y|--yes)\b|\bnpx\s+[@\w./-]+@|\bnpm\s+(i|install|add)\s+(--no-save\s+)?[@\w./-]+@/.test(line)) {
+      problems.push(`${file}:${i + 1}: install CI tools via .github/ci-tools (so Dependabot updates them), not npx/npm install: ${line.trim()}`);
+    }
   });
   return problems;
 }
