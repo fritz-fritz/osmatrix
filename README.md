@@ -8,7 +8,7 @@
 [![license](https://img.shields.io/github/license/fritz-fritz/osmatrix)](LICENSE)
 [![Socket Security](https://badge.socket.dev/npm/package/osmatrix)](https://socket.dev/npm/package/osmatrix)
 
-<center><img src="assets/social-preview.svg" alt="osmatrix social card" width="50%"></center>
+<p align="center"><img src="assets/social-preview.svg" alt="osmatrix social card" width="65%"></p>
 
 Local **Ubuntu, Windows and macOS** environments plus **local GitHub Actions matrix runs** for coding agents (Claude Code, Cursor, Codex) and for humans. It's one CLI that also serves as an MCP server, and it ships with an agent skill.
 
