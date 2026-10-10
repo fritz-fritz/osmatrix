@@ -1,26 +1,30 @@
 # Labels for PRs (workflows/labeler.yml), which group the release notes (release.yml).
-# Mostly from the branch prefix, so name branches fix/…, feat/…, docs/…, ci/…, chore/… or security/….
+# Mostly from the branch name's type word: fix, feat, docs, ci, chore or security, followed by
+# /, - or _. It may come after one leading segment, because coding agents and some people prefix
+# branches with a name: fix/login, claude/fix-login-x7k2, cursor/feat-guest-3f9a, copilot/fix-123
+# and fritz/docs/readme all count. That leading segment can't itself be a type word, so
+# ci/fix-labeler is ci, not bug.
 # `breaking` and `skip-release-notes` are applied by hand.
 
 bug:
-  - head-branch: ['^(fix|bugfix|hotfix)/']
+  - head-branch: ['^(?:(?!(?:fix|bugfix|hotfix|feat|feature|docs?|ci|chore|security)/)[^/]+/)?(?:fix|bugfix|hotfix)(?:[/_-]|$)']
 
 enhancement:
-  - head-branch: ['^(feat|feature)/']
+  - head-branch: ['^(?:(?!(?:fix|bugfix|hotfix|feat|feature|docs?|ci|chore|security)/)[^/]+/)?(?:feat|feature)(?:[/_-]|$)']
 
 security:
-  - head-branch: ['^security/']
+  - head-branch: ['^(?:(?!(?:fix|bugfix|hotfix|feat|feature|docs?|ci|chore|security)/)[^/]+/)?security(?:[/_-]|$)']
 
 documentation:
-  - head-branch: ['^docs?/']
+  - head-branch: ['^(?:(?!(?:fix|bugfix|hotfix|feat|feature|docs?|ci|chore|security)/)[^/]+/)?docs?(?:[/_-]|$)']
   # Only top-level Markdown changed (skills/ is product content, not docs).
   - changed-files:
       - any-glob-to-all-files: ['*.md']
 
 ci:
-  - head-branch: ['^ci/']
+  - head-branch: ['^(?:(?!(?:fix|bugfix|hotfix|feat|feature|docs?|ci|chore|security)/)[^/]+/)?ci(?:[/_-]|$)']
   - changed-files:
       - any-glob-to-all-files: ['.github/workflows/**', '.github/ci-tools/**', '.github/dependabot.yml', 'scripts/**']
 
 chore:
-  - head-branch: ['^chore/']
+  - head-branch: ['^(?:(?!(?:fix|bugfix|hotfix|feat|feature|docs?|ci|chore|security)/)[^/]+/)?chore(?:[/_-]|$)']
