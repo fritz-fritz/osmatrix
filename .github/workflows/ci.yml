@@ -3,6 +3,10 @@ on:
   push:
   pull_request:
 
+# Least privilege: CI only reads the repository.
+permissions:
+  contents: read
+
 jobs:
   plugins:
     runs-on: ubuntu-latest

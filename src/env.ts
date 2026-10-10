@@ -149,7 +149,8 @@ export async function spawnBackground(name: string, command: string, opts: { cwd
       `$r = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ CommandLine = "\`"$exe\`" -NoProfile -NonInteractive -EncodedCommand ${encoded}"; CurrentDirectory = $d }; ` +
       `if ($r.ReturnValue -ne 0) { throw "Win32_Process.Create failed: $($r.ReturnValue)" }; ` +
       `Write-Output "$($r.ProcessId) $(Join-Path $d '${logName}')"`;
-    if (ep.shell === "cmd") script = `powershell -NoProfile -Command "${script.replace(/"/g, '\\"')}"`;
+    // From cmd, hand PowerShell the script base64-encoded: no cmd/PowerShell quoting to get wrong.
+    if (ep.shell === "cmd") script = `powershell -NoProfile -NonInteractive -EncodedCommand ${Buffer.from(script, "utf16le").toString("base64")}`;
   } else {
     // setsid (Linux) makes the pid a process-group leader so the whole tree can be stopped; macOS lacks it.
     const launcher = `if command -v setsid >/dev/null 2>&1; then exec setsid sh -c ${quotePosix(command)}; else exec sh -c ${quotePosix(command)}; fi`;

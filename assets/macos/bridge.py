@@ -5,10 +5,24 @@ Runs inside the dockur container. The guest polls GET /next for a command, runs 
 output to /result. The host drives it with `docker exec <ctr> python3 bridge.py run '<cmd>'`.
 Only reachable from the guest (container-internal port, never published).
 """
-import http.server, json, os, sys, time, urllib.request
+import http.server, json, os, re, sys, time, urllib.request
 
 PORT = int(os.environ.get("OSMATRIX_BRIDGE_PORT", "8099"))
 DIR = "/tmp/osmatrix-bridge"
+
+
+FILE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
+
+
+def safe_file(name):
+    """Resolve a /file/<name> request to a regular file directly inside DIR/files, or None."""
+    if not FILE_NAME.fullmatch(name):
+        return None
+    root = os.path.realpath(os.path.join(DIR, "files"))
+    path = os.path.realpath(os.path.join(root, name))
+    if os.path.dirname(path) != root or not os.path.isfile(path):
+        return None
+    return path
 
 
 def serve():
@@ -33,9 +47,10 @@ def serve():
                     return self._send(200, open(q, "rb").read())
                 return self._send(204)
             if self.path.startswith("/file/"):
-                f = os.path.join(DIR, "files", os.path.basename(self.path[6:]))
-                if os.path.exists(f):
-                    return self._send(200, open(f, "rb").read())
+                f = safe_file(self.path[len("/file/"):])
+                if f:
+                    with open(f, "rb") as fh:
+                        return self._send(200, fh.read())
             self._send(404)
 
         def do_POST(self):
