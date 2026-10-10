@@ -5,7 +5,8 @@
 # and fritz/docs/readme all count. That leading segment can't itself be a type word, so
 # ci/fix-labeler is ci, not bug.
 # workflows/labeler.yml also copies these labels (and `breaking`) from the issues a PR closes.
-# `breaking` and `skip-release-notes` are otherwise applied by hand.
+# `breaking` and `skip-release-notes` are otherwise applied by hand. Rules for labels removed from a
+# PR by hand are dropped for that PR, so they aren't re-added.
 
 bug:
   - head-branch: ['^(?:(?!(?:fix|bugfix|hotfix|feat|feature|docs?|ci|chore|security)/)[^/]+/)?(?:fix|bugfix|hotfix)(?:[/_-]|$)']

@@ -1,11 +1,17 @@
 # Label PRs for GitHub's generated release notes (.github/release.yml):
-# - from the branch name and changed files (.github/labeler.yml);
+# - from the branch name and changed files (.github/labeler.yml), on every push so a later commit
+#   that changes which files are touched is still caught;
 # - from the issues the PR closes (`Fixes #12`, or linked under Development), copying only labels
 #   that pick a release-notes section, so a fix for an issue filed as a bug report lands under Fixes.
 #
+# A label someone removed by hand stays removed: neither step re-adds a label whose most recent
+# event on the PR is a removal (this workflow never removes labels, so removals are deliberate).
+# Adding it back by hand makes it eligible again.
+#
 # pull_request_target so PRs from forks can be labeled too. That's safe here because nothing from
-# the PR is checked out or run: the branch name, file list and linked issues are read through the
-# API, and the config comes from the base branch. Changes to labeler.yml take effect after merging.
+# the PR is checked out or run: the branch name, file list, label history and linked issues are read
+# through the API, and the config comes from the base branch. Changes to labeler.yml take effect
+# after merging.
 #
 # Linking an issue in the sidebar doesn't trigger a PR event; the labels follow on the next push
 # or description edit.
@@ -25,14 +31,53 @@ jobs:
       contents: read
       issues: read # labels of the linked issues
       pull-requests: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      PR: ${{ github.event.pull_request.number }}
     steps:
-      - uses: actions/labeler@bf12e9b00b37c5c0ca2b87b79b2daf7891dbda13 # v7.0.0
+      - name: Labels removed by hand
+        id: removed
+        run: |
+          removed=$(gh api graphql -F owner="${REPO%/*}" -F name="${REPO#*/}" -F pr="$PR" -f query='
+            query($owner: String!, $name: String!, $pr: Int!) {
+              repository(owner: $owner, name: $name) {
+                pullRequest(number: $pr) {
+                  timelineItems(itemTypes: [LABELED_EVENT, UNLABELED_EVENT], last: 100) {
+                    nodes {
+                      __typename
+                      ... on LabeledEvent { label { name } }
+                      ... on UnlabeledEvent { label { name } }
+                    }
+                  }
+                }
+              }
+            }' --jq 'reduce .data.repository.pullRequest.timelineItems.nodes[] as $e ({}; .[$e.label.name] = $e.__typename)
+                     | [to_entries[] | select(.value == "UnlabeledEvent") | .key] | join(" ")')
+          echo "removed by hand: ${removed:-(none)}"
+          echo "labels=$removed" >> "$GITHUB_OUTPUT"
+
+      # The base branch's config minus the rules for labels removed by hand.
+      - name: Labeler config
+        id: config
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          REMOVED: ${{ steps.removed.outputs.labels }}
+        run: |
+          config="$RUNNER_TEMP/labeler.yml"
+          gh api -H "Accept: application/vnd.github.raw" "repos/$REPO/contents/.github/labeler.yml?ref=$BASE_SHA" > "$config"
+          for label in $REMOVED; do LABEL="$label" yq -i 'del(.[strenv(LABEL)])' "$config"; done
+          echo "path=$config" >> "$GITHUB_OUTPUT"
+          echo "rules=$(yq 'length' "$config")" >> "$GITHUB_OUTPUT"
+
+      - if: steps.config.outputs.rules != '0'
+        uses: actions/labeler@bf12e9b00b37c5c0ca2b87b79b2daf7891dbda13 # v7.0.0
+        with:
+          configuration-path: ${{ steps.config.outputs.path }}
 
       - name: Copy release labels from the issues this PR closes
         env:
-          GH_TOKEN: ${{ github.token }}
-          REPO: ${{ github.repository }}
-          PR: ${{ github.event.pull_request.number }}
+          REMOVED: ${{ steps.removed.outputs.labels }}
           # Labels that choose a section in .github/release.yml.
           RELEASE_LABELS: breaking security enhancement bug documentation ci chore
         run: |
@@ -46,10 +91,10 @@ jobs:
             }' --jq '[.data.repository.pullRequest.closingIssuesReferences.nodes[].labels.nodes[].name] | unique | .[]')
           args=()
           while IFS= read -r label; do
-            [[ -n "$label" && " $RELEASE_LABELS " == *" $label "* ]] && args+=(-f "labels[]=$label")
+            [[ -n "$label" && " $RELEASE_LABELS " == *" $label "* && " $REMOVED " != *" $label "* ]] && args+=(-f "labels[]=$label")
           done <<< "$linked"
           if ((${#args[@]})); then
             gh api -X POST "repos/$REPO/issues/$PR/labels" "${args[@]}" --jq '[.[].name] | "labels now: " + join(", ")'
           else
-            echo "no release labels on linked issues"
+            echo "no release labels to copy from linked issues"
           fi
