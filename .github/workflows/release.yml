@@ -8,7 +8,7 @@ name: release
 # No floating git tags: version ranges are npm's job.
 #
 # Rehearse locally (everything except attest/publish/release, which need GitHub OIDC):
-#   echo '{"ref":"refs/tags/v<x.y.z>"}' > /tmp/tag.json && osmatrix ci run -W release.yml --event-file /tmp/tag.json --wait
+#   echo '{"ref":"refs/tags/v<x.y.z>"}' > /tmp/tag.json && osmatrix ci run -W release.yml --job release --event-file /tmp/tag.json --wait
 #
 # One-time setup: npm package settings -> Trusted publishing -> this repository + release.yml;
 # GitHub repository settings -> Releases -> enable immutable releases.

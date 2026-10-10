@@ -24,9 +24,13 @@ const dir = mkdtempSync(join(tmpdir(), "osmatrix-release-"));
 const event = join(dir, "event.json");
 writeFileSync(event, JSON.stringify({ ref: `refs/tags/v${version}`, ref_name: `v${version}` }));
 console.error(`Rehearsing release.yml for v${version}`);
-const r = spawnSync(process.execPath, [join(root, "src", "cli.ts"), "ci", "run", "--repo", root, "-W", "release.yml", "--event-file", event, "--wait"], {
-  stdio: "inherit",
-});
+// Name the job: otherwise the planner treats "release" as a fan-in job (its only need, "checks",
+// is already a leg) and skips it, so nothing past the checks would be rehearsed.
+const r = spawnSync(
+  process.execPath,
+  [join(root, "src", "cli.ts"), "ci", "run", "--repo", root, "-W", "release.yml", "--job", "release", "--event-file", event, "--wait"],
+  { stdio: "inherit" },
+);
 rmSync(dir, { recursive: true, force: true });
 process.exitCode = r.status ?? 1;
 
