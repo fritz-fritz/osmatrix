@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "osmatrix": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "osmatrix@0", "mcp"]
+    }
+  }
+}

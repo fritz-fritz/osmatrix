@@ -1,0 +1,17 @@
+{
+  "name": "fritztech",
+  "description": "FritzTech plugins for Claude Code",
+  "owner": {
+    "name": "fritztech",
+    "url": "https://github.com/fritz-fritz/osmatrix"
+  },
+  "plugins": [
+    {
+      "name": "osmatrix",
+      "description": "Local Ubuntu, Windows and macOS environments plus local GitHub Actions matrix runs (act) for agents: run commands, sync files, forward ports, screenshots, and test CI legs before pushing.",
+      "category": "development",
+      "source": "./claude",
+      "homepage": "https://github.com/fritz-fritz/osmatrix"
+    }
+  ]
+}

@@ -1,0 +1,30 @@
+name: matrix-demo
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    name: test (${{ matrix.os }}, node ${{ matrix.node }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        node: ["22"]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Show environment
+        shell: bash
+        run: |
+          echo "runner.os=${{ runner.os }} matrix.os=${{ matrix.os }}"
+          uname -a || true
+          node --version
+      - name: Run tests
+        run: node scripts/test.js
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: node --check scripts/test.js && node --check scripts/server.js

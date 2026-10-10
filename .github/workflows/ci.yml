@@ -1,0 +1,104 @@
+name: ci
+on:
+  push:
+  pull_request:
+
+jobs:
+  plugins:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+      - name: Skills identical across clients, manifest versions match package.json
+        run: npm run validate
+      - name: Claude plugin + marketplace manifests
+        run: |
+          npx -y @anthropic-ai/claude-code@latest plugin validate --strict claude
+          npx -y @anthropic-ai/claude-code@latest plugin validate --strict .claude-plugin/marketplace.json
+      - name: Codex manifests (Agent Plugins 1.0.0 schemas)
+        run: |
+          npm i --no-save ajv@8 ajv-formats@3
+          node -e '
+            const Ajv=require("ajv/dist/2020").default, f=require("ajv-formats"), fs=require("fs");
+            const ajv=new Ajv({strict:false,allErrors:true}); f(ajv); let bad=0;
+            for (const [s,file] of [["plugin","codex/plugin.json"],["mcp","codex/mcp.json"]]) {
+              const schema=JSON.parse(require("child_process").execSync(`curl -fsSL https://agent-plugins.org/schemas/1.0.0/${s}.schema.json`));
+              const v=ajv.compile(schema); if(!v(JSON.parse(fs.readFileSync(file)))){bad=1;console.error(file,v.errors)} else console.log(file,"valid");
+            } process.exit(bad)'
+      - name: skills.sh discovers exactly one skill
+        # CI=true makes the skills CLI colorize its output; strip ANSI codes before matching.
+        env:
+          NO_COLOR: "1"
+        run: npx -y skills@latest add . --list | sed 's/\x1b\[[0-9;]*m//g' | grep -q "Found 1 skill"
+      - name: Bundled plugins build, validate, and their MCP servers start (Claude, Cursor, Codex)
+        run: |
+          npm ci
+          npm run package:plugins
+          for c in claude cursor codex; do
+            OSMATRIX_TEST_PLUGIN_ROOT="$PWD/artifacts/$c/osmatrix" node --test test/mcp.test.ts
+          done
+          npx -y @anthropic-ai/claude-code@latest plugin validate --strict artifacts/.claude-plugin/marketplace.json
+
+  unit:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+      - name: CLI smoke test
+        shell: bash
+        env:
+          OSMATRIX_HOME: ${{ runner.temp }}/osmatrix
+        run: |
+          node dist/cli.js --version
+          node dist/cli.js --json config > /dev/null
+          node dist/cli.js --json ci plan --repo fixtures/matrix-demo
+          node dist/cli.js install-agents --dry-run
+      - name: Package installs
+        shell: bash
+        run: |
+          npm pack
+          npm install -g ./osmatrix-*.tgz
+          osmatrix --version
+
+  integration:
+    # Linux runners have Docker: exercise the container guest, forwarding and host act legs end to end.
+    runs-on: ubuntu-latest
+    env:
+      OSMATRIX_HOME: ${{ github.workspace }}/.osmatrix-home
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+      - run: npm ci && npm run build
+      - run: node dist/cli.js up ubuntu --wait 600
+      - run: node dist/cli.js exec ubuntu -- uname -a
+      - name: forward a guest port to the host
+        run: |
+          node dist/cli.js push ubuntu fixtures/matrix-demo
+          # --background keeps the server alive after the ssh session; a bare `cmd &` holds the session open.
+          node dist/cli.js exec ubuntu --background --cwd work/matrix-demo -- node scripts/server.js 8080
+          sleep 2
+          node dist/cli.js --json forward ubuntu 8080 | tee fwd.json
+          curl -sf "$(node -p 'require("./fwd.json").url')/x"
+      - name: Linux legs of the demo workflow via act
+        run: |
+          node dist/cli.js ci run --repo fixtures/matrix-demo --only linux --wait || {
+            node dist/cli.js ci status --repo fixtures/matrix-demo --full
+            exit 1
+          }
+      - name: Clean up the guest (matters when this job runs locally under act)
+        if: always()
+        run: node dist/cli.js destroy ubuntu --yes

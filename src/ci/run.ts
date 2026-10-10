@@ -1,0 +1,453 @@
+import { spawn } from "node:child_process";
+import crypto from "node:crypto";
+import fs from "node:fs";
+import path from "node:path";
+import YAML from "yaml";
+import { DockurBackend } from "../backends/dockur.ts";
+import { ensureAct } from "../core/act.ts";
+import { guestWorkdir, loadConfig, type Config } from "../core/config.ts";
+import { cliEntry, ensureDir } from "../core/paths.ts";
+import { isAlive, spawnDetached } from "../core/proc.ts";
+import { commandLine, freePort, push as sshPush, quoteFor, sshArgs, sshBin, sshExec, withCwd, type Endpoint } from "../core/ssh.ts";
+import { getGuest, readyEndpoint, waitReady } from "../env.ts";
+import { plan as makePlan, type Leg, type Plan, type PlanFilter } from "./plan.ts";
+
+export type LegState = "pending" | "running" | "success" | "failure" | "skipped" | "error";
+
+export interface LegResult {
+  id: string;
+  target?: string;
+  workflow: string;
+  job: string;
+  matrix: Record<string, unknown>;
+  state: LegState;
+  startedAt?: string;
+  finishedAt?: string;
+  durationSec?: number;
+  failedStep?: string;
+  steps?: { name: string; result: string }[];
+  error?: string;
+  warnings: string[];
+  log: string;
+  /** Last lines of the log for failed legs. */
+  tail?: string;
+}
+
+export interface RunStatus {
+  id: string;
+  repo: string;
+  state: "running" | "done" | "aborted";
+  pid?: number;
+  startedAt: string;
+  finishedAt?: string;
+  options: RunOptions;
+  counts: Record<LegState, number>;
+  legs: LegResult[];
+  planWarnings: string[];
+}
+
+export interface RunOptions extends PlanFilter {
+  /** Event name passed to act (default: first of push/pull_request/workflow_dispatch the workflow listens to). */
+  event?: string;
+  /** Event payload for act (-e), e.g. {"ref": "refs/tags/v1.2.3"} to simulate a tag push. */
+  eventPayload?: Record<string, unknown>;
+  secretFile?: string;
+  /** Per-leg timeout in minutes (default 60). */
+  timeoutMin?: number;
+}
+
+// ---------- run directory helpers ----------
+
+export function runsDir(repo: string): string {
+  const base = ensureDir(path.join(repo, ".osmatrix"));
+  const gi = path.join(base, ".gitignore");
+  if (!fs.existsSync(gi)) fs.writeFileSync(gi, "*\n");
+  return ensureDir(path.join(base, "runs"));
+}
+
+function runDir(repo: string, id: string) {
+  return path.join(runsDir(repo), id);
+}
+
+export function listRuns(repo: string): string[] {
+  const d = runsDir(repo);
+  return fs
+    .readdirSync(d)
+    .filter((f) => fs.existsSync(path.join(d, f, "status.json")))
+    .sort();
+}
+
+function latestRun(repo: string): string {
+  const runs = listRuns(repo);
+  if (!runs.length) throw new Error(`no runs in ${repo}/.osmatrix/runs`);
+  return runs[runs.length - 1];
+}
+
+function emptyCounts(): Record<LegState, number> {
+  return { pending: 0, running: 0, success: 0, failure: 0, skipped: 0, error: 0 };
+}
+
+class StatusFile {
+  readonly file: string;
+  readonly s: RunStatus;
+  constructor(file: string, s: RunStatus) {
+    this.file = file;
+    this.s = s;
+  }
+  save() {
+    this.s.counts = emptyCounts();
+    for (const l of this.s.legs) this.s.counts[l.state]++;
+    const tmp = this.file + ".tmp";
+    fs.writeFileSync(tmp, JSON.stringify(this.s, null, 2));
+    fs.renameSync(tmp, this.file);
+  }
+}
+
+// ---------- public API ----------
+
+export async function ciPlan(repo: string, filter: PlanFilter = {}): Promise<Plan> {
+  return makePlan(path.resolve(repo), loadConfig(), filter);
+}
+
+/** Create a run. With wait=false the legs execute in a detached worker and this returns immediately. */
+export async function ciRun(repoIn: string, opts: RunOptions = {}, wait = false): Promise<RunStatus> {
+  const repo = path.resolve(repoIn);
+  const p = makePlan(repo, loadConfig(), opts);
+  if (!p.legs.length) throw new Error(`nothing to run: ${p.warnings.join("; ") || "no matching legs"}`);
+  const id = new Date().toISOString().replace(/[-:]/g, "").replace(/\..+/, "") + "-" + crypto.randomBytes(2).toString("hex");
+  const dir = ensureDir(runDir(repo, id));
+  fs.writeFileSync(path.join(dir, "plan.json"), JSON.stringify(p, null, 2));
+  const status: RunStatus = {
+    id,
+    repo,
+    state: "running",
+    startedAt: new Date().toISOString(),
+    options: opts,
+    counts: emptyCounts(),
+    planWarnings: p.warnings,
+    legs: p.legs.map((l) => ({
+      id: l.id,
+      target: l.target,
+      workflow: l.workflow,
+      job: l.job,
+      matrix: l.matrix,
+      state: l.skip ? "skipped" : "pending",
+      error: l.skip,
+      warnings: l.warnings,
+      log: path.join(".osmatrix", "runs", id, `${l.id}.log`),
+    })),
+  };
+  const sf = new StatusFile(path.join(dir, "status.json"), status);
+  if (wait) {
+    status.pid = process.pid;
+    sf.save();
+    await worker(repo, id);
+  } else {
+    sf.save();
+    const pid = spawnDetached(process.execPath, [cliEntry(), "ci", "_worker", id, "--repo", repo], {
+      logFile: path.join(dir, "worker.log"),
+    });
+    status.pid = pid;
+    sf.save();
+  }
+  return ciStatus(repo, id);
+}
+
+export function ciStatus(repoIn: string, idIn?: string): RunStatus {
+  const repo = path.resolve(repoIn);
+  const id = idIn ?? latestRun(repo);
+  const file = path.join(runDir(repo, id), "status.json");
+  if (!fs.existsSync(file)) throw new Error(`run ${id} not found`);
+  const s = JSON.parse(fs.readFileSync(file, "utf8")) as RunStatus;
+  if (s.state === "running" && s.pid && !isAlive(s.pid)) {
+    s.state = "aborted";
+    for (const l of s.legs) if (l.state === "running" || l.state === "pending") l.state = "error";
+  }
+  return s;
+}
+
+export function ciLogs(repoIn: string, legId: string, opts: { run?: string; tail?: number; grep?: string } = {}): string {
+  const repo = path.resolve(repoIn);
+  const s = ciStatus(repo, opts.run);
+  const leg = s.legs.find((l) => l.id === legId) ?? s.legs.find((l) => l.id.includes(legId));
+  if (!leg) throw new Error(`leg "${legId}" not in run ${s.id} (legs: ${s.legs.map((l) => l.id).join(", ")})`);
+  const file = path.join(repo, leg.log);
+  if (!fs.existsSync(file)) return `(no log yet for ${leg.id}; state ${leg.state})`;
+  let lines = fs.readFileSync(file, "utf8").split("\n");
+  if (opts.grep) {
+    const re = new RegExp(opts.grep, "i");
+    lines = lines.filter((l) => re.test(l));
+  }
+  const n = opts.tail ?? 200;
+  return lines.slice(-n).join("\n");
+}
+
+// ---------- worker ----------
+
+export async function worker(repo: string, id: string): Promise<void> {
+  const dir = runDir(repo, id);
+  const p = JSON.parse(fs.readFileSync(path.join(dir, "plan.json"), "utf8")) as Plan;
+  const sf = new StatusFile(path.join(dir, "status.json"), JSON.parse(fs.readFileSync(path.join(dir, "status.json"), "utf8")));
+  sf.s.pid = process.pid;
+  sf.save();
+  const cfg = loadConfig();
+
+  const groups = new Map<string, Leg[]>();
+  for (const leg of p.legs) {
+    if (leg.skip || !leg.target) continue;
+    groups.set(leg.target, [...(groups.get(leg.target) ?? []), leg]);
+  }
+
+  const vmSlots = new Semaphore(cfg.max_vms);
+  await Promise.all(
+    [...groups.entries()].map(async ([target, legs]) => {
+      const isVm = target !== "host";
+      if (isVm) await vmSlots.acquire();
+      try {
+        for (const leg of legs) await runLeg(repo, dir, cfg, leg, sf);
+      } finally {
+        if (isVm) vmSlots.release();
+      }
+    }),
+  );
+  sf.s.state = "done";
+  sf.s.finishedAt = new Date().toISOString();
+  sf.save();
+}
+
+async function runLeg(repo: string, dir: string, cfg: Config, leg: Leg, sf: StatusFile): Promise<void> {
+  const r = sf.s.legs.find((l) => l.id === leg.id)!;
+  r.state = "running";
+  r.startedAt = new Date().toISOString();
+  sf.save();
+  const logFile = path.join(dir, `${leg.id}.log`);
+  const log = fs.createWriteStream(logFile, { flags: "a" });
+  const parser = new ActJsonParser((line) => log.write(line + "\n"), leg.job);
+  const timeoutMs = (sf.s.options.timeoutMin ?? 60) * 60_000;
+  try {
+    const event = sf.s.options.event ?? detectEvent(path.join(repo, leg.workflow));
+    const secretFile = resolveSecretFile(repo, sf.s.options.secretFile);
+    let code: number;
+    if (leg.target === "host") {
+      const act = await ensureAct();
+      const args = [event, ...commonActArgs(leg), "--pull=false", "--rm", "--artifact-server-path", path.join(dir, "artifacts")];
+      for (const l of new Set([...leg.runsOn, ...(leg.needsLabels ?? [])])) args.push("-P", `${l}=${cfg.act_linux_image}`);
+      // act mounts the Docker socket into job containers; SELinux (Fedora, openSUSE, RHEL) denies
+      // that unless the container runs unconfined, which matches GitHub's runners.
+      if (selinuxEnforcing()) args.push("--container-options", "--security-opt label=disable");
+      // act's artifact server defaults to a fixed port (34567); concurrent or nested runs would collide.
+      args.push("--artifact-server-port", String(await freePort()));
+      if (secretFile) args.push("--secret-file", secretFile);
+      if (sf.s.options.eventPayload) {
+        const eventFile = path.join(dir, "event.json");
+        fs.writeFileSync(eventFile, JSON.stringify(sf.s.options.eventPayload));
+        args.push("-e", eventFile);
+      }
+      log.write(`$ act ${args.join(" ")}\n`);
+      code = await streamProcess(act, args, repo, parser, timeoutMs);
+    } else {
+      const g = getGuest(leg.target!);
+      if (g.backend instanceof DockurBackend && g.cfg.os === "macos" && !g.backend.everReady()) {
+        throw new Error(
+          `macOS guest "${g.cfg.name}" has not been set up yet. Run \`osmatrix setup ${g.cfg.name} --accept-license\` (MCP: env_setup) once the user agrees to Apple's macOS license; it is fully automatic (~30-60 min).`,
+        );
+      }
+      log.write(`[osmatrix] ensuring guest ${g.cfg.name} is up\n`);
+      await g.backend.up();
+      const s = await waitReady(g, g.cfg.boot_timeout ?? 3600);
+      if (s.state !== "ready") throw new Error(`guest ${g.cfg.name} not ready: ${s.state}${s.detail ? ` (${s.detail})` : ""}`);
+      const ep = await readyEndpoint(g.cfg.name);
+      const remote = `${guestWorkdir(g.cfg)}/${path.basename(repo)}`;
+      log.write(`[osmatrix] syncing ${repo} -> ${g.cfg.name}:${remote}\n`);
+      await sshPush(ep, repo, remote, { clean: true, includeGit: true });
+      if (!fs.existsSync(path.join(repo, ".git"))) {
+        // act wants a git repository (sha/ref); subdirectories of a larger repo get a throwaway one.
+        const init = "git init -q; git add -A; git -c user.name=osmatrix -c user.email=osmatrix@localhost commit -qm osmatrix";
+        await sshExec(ep, withCwd(ep.shell, remote, init), { timeoutMs: 120_000 });
+      }
+      const args = [event, ...commonActArgs(leg), "--artifact-server-path", ".osmatrix-artifacts"];
+      for (const l of new Set([...leg.runsOn, ...(leg.needsLabels ?? [])])) args.push("-P", `${l}=-self-hosted`);
+      if (sf.s.options.eventPayload) {
+        await writeRemoteFile(ep, remote, ".osmatrix-event.json", JSON.stringify(sf.s.options.eventPayload));
+        args.push("-e", ".osmatrix-event.json");
+      }
+      if (secretFile) {
+        await writeRemoteFile(ep, remote, ".osmatrix-secrets", fs.readFileSync(secretFile, "utf8"));
+        args.push("--secret-file", ".osmatrix-secrets");
+      }
+      log.write(`$ act ${args.join(" ")}\n`);
+      const command = withCwd(ep.shell, remote, commandLine(ep.shell, ["act", ...args]));
+      code = await streamProcess(sshBin(), sshArgs(ep, ["-T"]).concat([command]), undefined, parser, timeoutMs);
+      if (secretFile) await sshExec(ep, removeCmd(ep, `${remote}/.osmatrix-secrets`)).catch(() => undefined);
+    }
+    parser.flush();
+    r.steps = parser.steps;
+    r.failedStep = parser.failedStep;
+    r.state = code === 0 && parser.jobResult !== "failure" ? "success" : "failure";
+    if (code === 124) r.error = `timed out after ${sf.s.options.timeoutMin ?? 60} min`;
+  } catch (e) {
+    r.state = "error";
+    r.error = (e as Error).message;
+    log.write(`[osmatrix] error: ${r.error}\n`);
+  } finally {
+    await new Promise((res) => log.end(res));
+    r.finishedAt = new Date().toISOString();
+    r.durationSec = Math.round((Date.parse(r.finishedAt) - Date.parse(r.startedAt!)) / 1000);
+    if (r.state !== "success") {
+      r.tail = fs.readFileSync(logFile, "utf8").split("\n").slice(-60).join("\n");
+    }
+    sf.save();
+  }
+}
+
+function commonActArgs(leg: Leg): string[] {
+  const a = ["-W", leg.workflow, "-j", leg.job, "--json"];
+  for (const [k, v] of Object.entries(leg.matrix)) {
+    if (v === null || ["string", "number", "boolean"].includes(typeof v)) a.push("--matrix", `${k}:${String(v)}`);
+  }
+  return a;
+}
+
+function selinuxEnforcing(): boolean {
+  if (process.platform !== "linux") return false;
+  try {
+    return fs.readFileSync("/sys/fs/selinux/enforce", "utf8").trim() === "1";
+  } catch {
+    return false;
+  }
+}
+
+function detectEvent(workflowFile: string): string {
+  try {
+    const doc = YAML.parse(fs.readFileSync(workflowFile, "utf8")) ?? {};
+    const on = doc.on ?? doc[true as unknown as string]; // YAML 1.1 parsers may read `on` as true
+    const events = typeof on === "string" ? [on] : Array.isArray(on) ? on : Object.keys(on ?? {});
+    for (const pref of ["push", "pull_request", "workflow_dispatch"]) if (events.includes(pref)) return pref;
+    return events[0] ?? "push";
+  } catch {
+    return "push";
+  }
+}
+
+function resolveSecretFile(repo: string, explicit?: string): string | undefined {
+  if (explicit) {
+    const f = path.resolve(repo, explicit);
+    if (!fs.existsSync(f)) throw new Error(`secret file ${f} not found`);
+    return f;
+  }
+  for (const c of [path.join(repo, ".osmatrix", "secrets"), path.join(repo, ".secrets")]) if (fs.existsSync(c)) return c;
+  return undefined;
+}
+
+async function writeRemoteFile(ep: Endpoint, dir: string, name: string, content: string) {
+  const target = `${dir}/${name}`;
+  const cmd =
+    ep.shell === "pwsh"
+      ? `[IO.File]::WriteAllText((Join-Path $HOME ${quoteFor("pwsh", target)}), [Console]::In.ReadToEnd())`
+      : `umask 077; cat > ${quoteFor(ep.shell, target)}`;
+  const r = await sshExec(ep, cmd, { input: content, timeoutMs: 60_000 });
+  if (r.code !== 0) throw new Error(`failed to write ${target}: ${r.stderr}`);
+}
+
+function removeCmd(ep: Endpoint, file: string): string {
+  return ep.shell === "pwsh" ? `Remove-Item -Force -LiteralPath ${quoteFor("pwsh", file)}` : `rm -f ${quoteFor(ep.shell, file)}`;
+}
+
+function streamProcess(cmd: string, args: string[], cwd: string | undefined, parser: ActJsonParser, timeoutMs: number): Promise<number> {
+  return new Promise((resolve) => {
+    const child = spawn(cmd, args, { cwd, stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
+    const timer = setTimeout(() => {
+      parser.raw(`[osmatrix] timeout after ${Math.round(timeoutMs / 60000)} min; killing`);
+      child.kill();
+      resolve(124);
+    }, timeoutMs);
+    child.stdout.on("data", (d: Buffer) => parser.feed(d.toString("utf8")));
+    child.stderr.on("data", (d: Buffer) => parser.feed(d.toString("utf8")));
+    child.on("error", (e) => {
+      clearTimeout(timer);
+      parser.raw(`[osmatrix] failed to start ${cmd}: ${e.message}`);
+      resolve(127);
+    });
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      resolve(code ?? 1);
+    });
+  });
+}
+
+/** Turns act --json output into a readable log and tracks step/job results. */
+export class ActJsonParser {
+  steps: { name: string; result: string }[] = [];
+  failedStep?: string;
+  jobResult?: string;
+  private buf = "";
+  private readonly out: (line: string) => void;
+  private readonly job?: string;
+  constructor(out: (line: string) => void, job?: string) {
+    this.out = out;
+    this.job = job;
+  }
+  raw(line: string) {
+    this.out(line);
+  }
+  feed(chunk: string) {
+    this.buf += chunk;
+    let i: number;
+    while ((i = this.buf.indexOf("\n")) >= 0) {
+      this.line(this.buf.slice(0, i).replace(/\r$/, ""));
+      this.buf = this.buf.slice(i + 1);
+    }
+  }
+  flush() {
+    if (this.buf) this.line(this.buf);
+    this.buf = "";
+  }
+  private line(l: string) {
+    if (!l.startsWith("{")) {
+      this.out(l);
+      return;
+    }
+    let j: Record<string, unknown>;
+    try {
+      j = JSON.parse(l);
+    } catch {
+      this.out(l);
+      return;
+    }
+    const msg = String(j.msg ?? "").replace(/\s+$/, "");
+    const step = typeof j.step === "string" ? j.step : undefined;
+    if (typeof j.stepResult === "string" && step) {
+      // act -j also runs needed jobs; qualify step names with the job when they differ.
+      const name = typeof j.jobID === "string" && this.job && j.jobID !== this.job ? `${j.jobID}: ${step}` : step;
+      this.steps.push({ name, result: j.stepResult });
+      if (j.stepResult === "failure" && !this.failedStep) this.failedStep = name;
+    }
+    // The leg's own job result decides; a needed job failing also fails the leg.
+    if (typeof j.jobResult === "string" && (j.jobResult === "failure" || !this.job || j.jobID === this.job)) {
+      if (this.jobResult !== "failure") this.jobResult = j.jobResult;
+    }
+    const prefix = step ? `[${step}] ` : "";
+    if (j.raw_output) this.out(`  | ${msg}`);
+    else if (msg) this.out(`${String(j.level ?? "info") === "info" ? "" : String(j.level).toUpperCase() + " "}${prefix}${msg}`);
+  }
+}
+
+class Semaphore {
+  private n: number;
+  private q: (() => void)[] = [];
+  constructor(n: number) {
+    this.n = Math.max(1, n);
+  }
+  async acquire() {
+    if (this.n > 0) {
+      this.n--;
+      return;
+    }
+    await new Promise<void>((r) => this.q.push(r));
+  }
+  release() {
+    const next = this.q.shift();
+    if (next) next();
+    else this.n++;
+  }
+}

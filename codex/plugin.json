@@ -1,0 +1,50 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "osmatrix",
+  "version": "0.1.0",
+  "description": "Local Ubuntu, Windows and macOS environments plus local GitHub Actions matrix runs (act) for agents: run commands, sync files, forward ports, screenshots, and test CI legs before pushing.",
+  "author": {
+    "name": "osmatrix contributors"
+  },
+  "homepage": "https://github.com/fritz-fritz/osmatrix",
+  "repository": "https://github.com/fritz-fritz/osmatrix",
+  "license": "MIT",
+  "keywords": [
+    "ci",
+    "github-actions",
+    "act",
+    "windows",
+    "macos",
+    "linux",
+    "testing",
+    "vm",
+    "mcp"
+  ],
+  "extensions": {
+    "com.openai": {
+      "interface": {
+        "displayName": "osmatrix",
+        "shortDescription": "Cross-platform CI, locally",
+        "longDescription": "Run GitHub Actions workflows locally across Ubuntu, Windows and macOS before pushing. Inspect failed steps, reproduce bugs in OS guests, sync your working tree, and reach guest apps through local port forwards. Uses Docker, virtual machines or your existing SSH machines; available guests depend on your host.",
+        "developerName": "FritzTech",
+        "category": "Developer Tools",
+        "capabilities": [
+          "Read",
+          "Write"
+        ],
+        "websiteURL": "https://github.com/fritz-fritz/osmatrix",
+        "supportURL": "https://github.com/fritz-fritz/osmatrix/issues",
+        "privacyPolicyURL": "https://github.com/fritz-fritz/osmatrix/blob/main/PRIVACY.md",
+        "termsOfServiceURL": "https://github.com/fritz-fritz/osmatrix/blob/main/TERMS.md",
+        "defaultPrompt": [
+          "Run this repo's CI locally on Linux, Windows and macOS before I push.",
+          "Start the dev server inside the Windows guest and open it from the host."
+        ],
+        "brandColor": "#0B173C",
+        "brandColorDark": "#5AA9F0",
+        "logo": "./assets/logo.png",
+        "composerIcon": "./assets/logo.png"
+      }
+    }
+  }
+}

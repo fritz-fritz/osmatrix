@@ -1,0 +1,33 @@
+{
+  "name": "osmatrix",
+  "displayName": "osmatrix",
+  "version": "0.1.0",
+  "description": "Local Ubuntu, Windows and macOS environments plus local GitHub Actions matrix runs (act) for agents: run commands, sync files, forward ports, screenshots, and test CI legs before pushing.",
+  "author": {
+    "name": "osmatrix contributors"
+  },
+  "homepage": "https://github.com/fritz-fritz/osmatrix",
+  "repository": "https://github.com/fritz-fritz/osmatrix",
+  "license": "MIT",
+  "logo": "assets/logo.svg",
+  "keywords": [
+    "ci",
+    "github-actions",
+    "act",
+    "windows",
+    "macos",
+    "linux",
+    "testing",
+    "vm",
+    "mcp"
+  ],
+  "category": "developer-tools",
+  "tags": [
+    "ci",
+    "testing",
+    "virtual-machines",
+    "mcp"
+  ],
+  "skills": "./skills/",
+  "mcpServers": "./mcp.json"
+}

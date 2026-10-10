@@ -1,0 +1,62 @@
+{
+  "name": "osmatrix",
+  "version": "0.1.0",
+  "description": "Local Ubuntu/Windows/macOS environments and GitHub Actions matrix runs (via act) for coding agents. CLI + MCP server + skill.",
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "osmatrix": "dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "assets/container",
+    "assets/oem",
+    "assets/provision",
+    "assets/macos",
+    "README.md",
+    "skills",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=22.18"
+  },
+  "keywords": [
+    "mcp",
+    "act",
+    "github-actions",
+    "agents",
+    "dockur",
+    "windows",
+    "macos",
+    "claude",
+    "cursor",
+    "codex"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node --test test/*.test.ts",
+    "dev": "node src/cli.ts",
+    "prepack": "npm run build",
+    "sync": "node scripts/sync-skills.mjs",
+    "validate": "node scripts/sync-skills.mjs --check && node scripts/validate-skills.mjs && node scripts/validate-plugins.mjs",
+    "package:plugins": "npm run validate && node scripts/package-plugins.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.1",
+    "commander": "^15.0.0",
+    "env-paths": "^4.0.0",
+    "smol-toml": "^1.9.1",
+    "yaml": "^2.9.1",
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.5",
+    "typescript": "^7.0.2"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/fritz-fritz/osmatrix.git"
+  },
+  "homepage": "https://github.com/fritz-fritz/osmatrix"
+}

@@ -1,0 +1,89 @@
+name: release
+# Push an immutable tag v<x.y.z> (matching package.json) to release that exact version:
+#   - npm: publishes osmatrix@<x.y.z> via trusted publishing (OIDC, no token; provenance attached).
+#     Stable versions move the `latest` dist-tag; prereleases (x.y.z-rc.1) go to `next`.
+#     Consumers float with npm's own ranges: osmatrix@0, osmatrix@0.1, osmatrix@latest.
+#   - GitHub: an immutable release with the npm tarball and bundled Claude/Cursor/Codex plugins,
+#     each covered by a signed build-provenance attestation.
+# No floating git tags: version ranges are npm's job.
+#
+# Rehearse locally (everything except attest/publish/release, which need GitHub OIDC):
+#   echo '{"ref":"refs/tags/v<x.y.z>"}' > /tmp/tag.json && osmatrix ci run -W release.yml --event-file /tmp/tag.json --wait
+#
+# One-time setup: npm package settings -> Trusted publishing -> this repository + release.yml;
+# GitHub repository settings -> Releases -> enable immutable releases.
+on:
+  push:
+    tags: ["v[0-9]+.[0-9]+.[0-9]+*"]
+
+permissions:
+  contents: write # create the release
+  id-token: write # npm trusted publishing + attestations
+  attestations: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+
+      - name: Version from tag
+        id: v
+        run: |
+          v=$(node -p 'require("./package.json").version')
+          [ "v$v" = "$GITHUB_REF_NAME" ] || { echo "tag $GITHUB_REF_NAME does not match package.json v$v"; exit 1; }
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          if [[ "$v" == *-* ]]; then echo "prerelease=true" >> "$GITHUB_OUTPUT"; echo "npm_tag=next" >> "$GITHUB_OUTPUT"
+          else echo "prerelease=false" >> "$GITHUB_OUTPUT"; echo "npm_tag=latest" >> "$GITHUB_OUTPUT"; fi
+
+      - run: npm ci
+      - name: Plugins in sync (skills, artwork, manifest versions, MCP major pin)
+        run: npm run validate
+      - run: npm run typecheck
+      - run: npm test
+
+      - name: Build bundled plugins (includes the npm tarball)
+        run: |
+          npm run package:plugins
+          # The exact tarball bundled in the plugins is the one published to npm.
+          cp "artifacts/codex/osmatrix/runtime/osmatrix-${{ steps.v.outputs.version }}.tgz" artifacts/
+
+      - name: Attest build provenance
+        if: ${{ !env.ACT }} # needs GitHub OIDC; skipped when rehearsing locally with act
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: |
+            artifacts/osmatrix-*.tgz
+            artifacts/osmatrix-*.tar.gz
+
+      # "./" matters: npm reads a bare "dir/file.tgz" as a GitHub owner/repo shorthand.
+      - name: Publish to npm (dry run, local rehearsal only)
+        if: ${{ env.ACT }}
+        run: npm publish "./artifacts/osmatrix-${{ steps.v.outputs.version }}.tgz" --access public --dry-run --tag "${{ steps.v.outputs.npm_tag }}"
+
+      - name: Publish to npm
+        if: ${{ !env.ACT }} # needs GitHub OIDC; skipped when rehearsing locally with act
+        run: |
+          v=${{ steps.v.outputs.version }}
+          # npm versions are immutable; skip (instead of failing) when re-running a partially completed release.
+          if npm view "osmatrix@$v" version >/dev/null 2>&1; then echo "osmatrix@$v already on npm"; exit 0; fi
+          npm publish "./artifacts/osmatrix-$v.tgz" --access public --provenance --tag "${{ steps.v.outputs.npm_tag }}"
+
+      - name: GitHub release
+        if: ${{ !env.ACT }} # needs GitHub OIDC; skipped when rehearsing locally with act
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          v=${{ steps.v.outputs.version }}
+          flags=(--verify-tag --generate-notes --title "osmatrix $v")
+          if [ "${{ steps.v.outputs.prerelease }}" = true ]; then flags+=(--prerelease); else flags+=(--latest); fi
+          # Assets are attached at creation: immutable releases cannot gain assets afterwards.
+          gh release create "$GITHUB_REF_NAME" "${flags[@]}" \
+            "artifacts/osmatrix-$v.tgz" \
+            "artifacts/osmatrix-claude-$v.tar.gz" \
+            "artifacts/osmatrix-cursor-$v.tar.gz" \
+            "artifacts/osmatrix-codex-$v.tar.gz"
