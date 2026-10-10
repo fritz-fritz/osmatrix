@@ -198,7 +198,11 @@ osmatrix ci run -W release.yml --event-file /tmp/tag.json --wait
 
 One-time setup:
 - In the GitHub repository settings, enable immutable releases.
-- Trusted publishing can only be configured for a package that already exists. Publish the first version by hand with `npm login && npm publish --access public` (2FA). Then go to npmjs.com → osmatrix → Settings → Trusted publishing, add this repository and `release.yml`, and disallow token publishing.
+- Trusted publishing can only be configured for a package that already exists. Claim the name once (a placeholder version is enough), then go to npmjs.com → osmatrix → Settings → Trusted publishing: publisher GitHub Actions, repository `fritz-fritz/osmatrix`, workflow `release.yml`, no environment, and "Allow npm publish". Every real version, including the first, then goes through the release workflow. Disallow token publishing afterwards.
+
+## Contributing
+
+Contributions are welcome under the MIT license; see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Development
 
