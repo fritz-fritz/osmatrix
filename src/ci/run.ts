@@ -6,6 +6,7 @@ import YAML from "yaml";
 import { DockurBackend } from "../backends/dockur.ts";
 import { ensureAct } from "../core/act.ts";
 import { guestWorkdir, loadConfig, type Config } from "../core/config.ts";
+import { acquireLocks } from "../core/locks.ts";
 import { cliEntry, ensureDir } from "../core/paths.ts";
 import { isAlive, spawnDetached } from "../core/proc.ts";
 import { commandLine, freePort, push as sshPush, quoteFor, sshArgs, sshBin, sshExec, withCwd, type Endpoint } from "../core/ssh.ts";
@@ -28,6 +29,8 @@ export interface LegResult {
   steps?: { name: string; result: string }[];
   error?: string;
   warnings: string[];
+  /** Set while the leg waits for another run to release an act container or guest it needs. */
+  waitingFor?: string;
   log: string;
   /** Last lines of the log for failed legs. */
   tail?: string;
@@ -77,6 +80,16 @@ export function listRuns(repo: string): string[] {
     .sort();
 }
 
+function activeRuns(repo: string): string[] {
+  return listRuns(repo).filter((id) => {
+    try {
+      return ciStatus(repo, id).state === "running";
+    } catch {
+      return false;
+    }
+  });
+}
+
 function latestRun(repo: string): string {
   const runs = listRuns(repo);
   if (!runs.length) throw new Error(`no runs in ${repo}/.osmatrix/runs`);
@@ -114,6 +127,9 @@ export async function ciRun(repoIn: string, opts: RunOptions = {}, wait = false)
   const repo = path.resolve(repoIn);
   const p = makePlan(repo, loadConfig(), opts);
   if (!p.legs.length) throw new Error(`nothing to run: ${p.warnings.join("; ") || "no matching legs"}`);
+  for (const other of activeRuns(repo)) {
+    p.warnings.push(`run ${other} is still running in this repo; legs that need the same act containers or guests wait for it`);
+  }
   const id = new Date().toISOString().replace(/[-:]/g, "").replace(/\..+/, "") + "-" + crypto.randomBytes(2).toString("hex");
   const dir = ensureDir(runDir(repo, id));
   fs.writeFileSync(path.join(dir, "plan.json"), JSON.stringify(p, null, 2));
@@ -215,13 +231,34 @@ export async function worker(repo: string, id: string): Promise<void> {
   sf.save();
 }
 
+/**
+ * What a leg must have to itself while it runs. act names job containers (and their volumes) after
+ * the workflow name and job id only, so two runs executing the same job at once, even from different
+ * checkouts, would replace each other's container. A guest has one work directory per repo name and
+ * one desktop, so its legs take turns too.
+ */
+export function legLockKeys(leg: Leg): string[] {
+  if (leg.target !== "host") return [`guest:${leg.target}`];
+  const wf = leg.workflowName ?? leg.workflow;
+  return [leg.job, ...(leg.needsAll ?? leg.needs)].map((j) => `act-job:${wf}/${j}`);
+}
+
 async function runLeg(repo: string, dir: string, cfg: Config, leg: Leg, sf: StatusFile): Promise<void> {
   const r = sf.s.legs.find((l) => l.id === leg.id)!;
+  const logFile = path.join(dir, `${leg.id}.log`);
+  const log = fs.createWriteStream(logFile, { flags: "a" });
+  let waited: string | undefined;
+  const release = await acquireLocks(legLockKeys(leg), { pid: process.pid, run: sf.s.id, repo, leg: leg.id }, (key, h) => {
+    waited = key.startsWith("guest:") ? `guest ${leg.target}` : `act job ${key.slice("act-job:".length)}`;
+    r.waitingFor = `${waited} is in use by run ${h.run} (leg ${h.leg}${h.repo === repo ? "" : `, ${h.repo}`})`;
+    log.write(`[osmatrix] waiting: ${r.waitingFor}\n`);
+    sf.save();
+  });
+  if (waited) log.write(`[osmatrix] ${waited} is free; starting\n`);
+  r.waitingFor = undefined;
   r.state = "running";
   r.startedAt = new Date().toISOString();
   sf.save();
-  const logFile = path.join(dir, `${leg.id}.log`);
-  const log = fs.createWriteStream(logFile, { flags: "a" });
   const parser = new ActJsonParser((line) => log.write(line + "\n"), leg.job);
   const timeoutMs = (sf.s.options.timeoutMin ?? 60) * 60_000;
   try {
@@ -290,6 +327,7 @@ async function runLeg(repo: string, dir: string, cfg: Config, leg: Leg, sf: Stat
     r.error = (e as Error).message;
     log.write(`[osmatrix] error: ${r.error}\n`);
   } finally {
+    release();
     await new Promise((res) => log.end(res));
     r.finishedAt = new Date().toISOString();
     r.durationSec = Math.round((Date.parse(r.finishedAt) - Date.parse(r.startedAt!)) / 1000);

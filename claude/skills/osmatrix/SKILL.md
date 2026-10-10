@@ -37,6 +37,7 @@ Use the **MCP tools** (`ci_plan`, `env_exec`, ...) when they are available: they
    - Run uncommitted work as-is: the working tree (respecting `.gitignore`) is what gets tested.
    - Tag- or release-triggered workflows: pass `event_payload`, e.g. `{"ref": "refs/tags/v1.2.3"}` (CLI: `--event-file`), so `github.ref`/`GITHUB_REF_NAME` look like a real tag push. Steps that need GitHub's OIDC token (attestations, trusted publishing, creating releases) can't run locally; workflows usually guard them with `if: ${{ !env.ACT }}`.
 3. **Poll**: `ci_status` every 30–60 s until `state: done`. Each failed leg has `failedStep` and a log `tail`.
+   - Concurrent runs are safe: a leg that needs an act job container or a guest another run is using stays `pending` with `waitingFor` naming that run, and starts when it's free. act names job containers after the workflow name and job id only, so this applies across checkouts too.
 4. **Dig in**: `ci_logs` with `leg` (id or substring), `grep`, `tail`.
 5. **Reproduce interactively** in the same guest: the synced repo is at `work/<repo-name>` (relative to the guest user's home).
    - `env_exec {guest: "windows", cwd: "work/myrepo", command: "npm test"}`

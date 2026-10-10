@@ -9,6 +9,8 @@ export type MatrixCombo = Record<string, unknown>;
 export interface Leg {
   id: string;
   workflow: string; // repo-relative path
+  /** The workflow's `name:` (act names job containers after it and the job id). */
+  workflowName?: string;
   job: string;
   jobName?: string;
   matrix: MatrixCombo;
@@ -17,6 +19,8 @@ export interface Leg {
   needsLabels: string[];
   /** Jobs this leg's job directly needs. */
   needs: string[];
+  /** Every job this leg's job transitively needs (act -j runs them all). */
+  needsAll?: string[];
   /** "host" = act on the host docker (Linux legs); otherwise a guest name. */
   target?: string;
   targetOs?: string;
@@ -218,6 +222,7 @@ export function plan(repo: string, cfg: Config, filter: PlanFilter = {}): Plan {
         wfLegs.push({
           id,
           workflow: wf,
+          workflowName: typeof doc.name === "string" ? doc.name : undefined,
           job: jobId,
           jobName: typeof job.name === "string" ? job.name : undefined,
           matrix: combo,
@@ -254,6 +259,7 @@ export function plan(repo: string, cfg: Config, filter: PlanFilter = {}): Plan {
       }
       leg.needsLabels = [...new Set([...seenJobs].flatMap(labelsOf))].filter((l) => !l.includes("${{"));
       leg.needs = needsOf(leg.job);
+      leg.needsAll = [...seenJobs].sort();
     }
     // needs: across OS boundaries can't be honored when legs run in separate environments.
     for (const leg of wfLegs) {
