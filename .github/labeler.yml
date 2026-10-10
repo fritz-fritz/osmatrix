@@ -4,7 +4,8 @@
 # branches with a name: fix/login, claude/fix-login-x7k2, cursor/feat-guest-3f9a, copilot/fix-123
 # and fritz/docs/readme all count. That leading segment can't itself be a type word, so
 # ci/fix-labeler is ci, not bug.
-# `breaking` and `skip-release-notes` are applied by hand.
+# workflows/labeler.yml also copies these labels (and `breaking`) from the issues a PR closes.
+# `breaking` and `skip-release-notes` are otherwise applied by hand.
 
 bug:
   - head-branch: ['^(?:(?!(?:fix|bugfix|hotfix|feat|feature|docs?|ci|chore|security)/)[^/]+/)?(?:fix|bugfix|hotfix)(?:[/_-]|$)']
