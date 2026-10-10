@@ -139,7 +139,7 @@ Secrets for CI go in `<repo>/.osmatrix/secrets` (or `.secrets`) as `KEY=value` l
 
 - `services:` on non-Linux legs.
 - OIDC.
-- `needs:` across OSes. act runs the dependency in the same environment.
+- `needs:` across OSes. act runs the dependency in the same environment; on Windows legs, osmatrix runs a needed Linux job's `run:` steps without a `shell:` with Git Bash.
 - Matrices built from expressions.
 - Remote reusable workflows.
 

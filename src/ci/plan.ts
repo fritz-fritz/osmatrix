@@ -21,6 +21,8 @@ export interface Leg {
   needs: string[];
   /** Every job this leg's job transitively needs (act -j runs them all). */
   needsAll?: string[];
+  /** Needed jobs (transitively) that target Linux, when this leg doesn't: act runs them in this leg's OS. */
+  linuxNeeds?: string[];
   /** "host" = act on the host docker (Linux legs); otherwise a guest name. */
   target?: string;
   targetOs?: string;
@@ -190,7 +192,6 @@ export function plan(repo: string, cfg: Config, filter: PlanFilter = {}): Plan {
       continue;
     }
     const jobs = (doc.jobs ?? {}) as Record<string, Record<string, unknown>>;
-    const jobOs: Record<string, Set<string>> = {};
     const wfLegs: Leg[] = [];
     for (const [jobId, job] of Object.entries(jobs)) {
       if (filter.job && filter.job !== jobId) continue;
@@ -214,7 +215,6 @@ export function plan(repo: string, cfg: Config, filter: PlanFilter = {}): Plan {
         if (!target && !skip) skip = `no configured guest serves runs-on ${JSON.stringify(labels)}`;
         if (job.services && os && os !== "linux") lw.push("job services: are only supported on Linux legs");
         if (job.permissions && JSON.stringify(job.permissions).includes("id-token")) lw.push("OIDC (id-token) is not available locally");
-        if (os) (jobOs[jobId] ??= new Set()).add(os);
         let id = legId(jobId, combo);
         if (workflows.length > 1) id = `${path.posix.basename(wf).replace(/\.ya?ml$/, "")}.${id}`;
         while (seen.has(id)) id += "_";
@@ -248,6 +248,9 @@ export function plan(repo: string, cfg: Config, filter: PlanFilter = {}): Plan {
       // A copy: callers mutate the result (the traversal below pops from it).
       return typeof n === "string" ? [n] : Array.isArray(n) ? [...(n as string[])] : [];
     };
+    // OS families a job targets, from its labels; independent of the job filter, so needs are classified too.
+    const osOf = (jobId: string): Set<string> =>
+      new Set(labelsOf(jobId).flatMap((l) => pickTarget([l], cfg).os ?? (/^ubuntu-/.test(l) ? "linux" : [])));
     for (const leg of wfLegs) {
       const seenJobs = new Set<string>();
       const stack = needsOf(leg.job);
@@ -260,14 +263,16 @@ export function plan(repo: string, cfg: Config, filter: PlanFilter = {}): Plan {
       leg.needsLabels = [...new Set([...seenJobs].flatMap(labelsOf))].filter((l) => !l.includes("${{"));
       leg.needs = needsOf(leg.job);
       leg.needsAll = [...seenJobs].sort();
-    }
-    // needs: across OS boundaries can't be honored when legs run in separate environments.
-    for (const leg of wfLegs) {
-      const needs = jobs[leg.job]?.needs;
-      const list = typeof needs === "string" ? [needs] : Array.isArray(needs) ? (needs as string[]) : [];
-      for (const n of list) {
-        const nos = jobOs[n] ?? new Set<string>();
-        if (leg.targetOs && nos.size && [...nos].some((o) => o !== leg.targetOs)) {
+      // needs: across OS boundaries can't be honored when legs run in separate environments.
+      if (!leg.targetOs) continue;
+      const crossOs = leg.needsAll.filter((n) => [...osOf(n)].some((o) => o !== leg.targetOs));
+      if (leg.targetOs !== "linux") leg.linuxNeeds = crossOs.filter((n) => osOf(n).has("linux"));
+      for (const n of crossOs) {
+        if (leg.targetOs === "windows" && leg.linuxNeeds?.includes(n)) {
+          leg.warnings.push(
+            `needs "${n}" targets Linux; act runs it inside this Windows leg. osmatrix runs its run: steps without a shell: under Git Bash, as GitHub would use bash, but Linux-only tools (apt-get, docker, …) fail there and outputs/artifacts may differ`,
+          );
+        } else {
           leg.warnings.push(`needs "${n}" runs on another OS; act will run it inside this leg's environment (outputs/artifacts may differ)`);
         }
       }
@@ -296,4 +301,22 @@ export function plan(repo: string, cfg: Config, filter: PlanFilter = {}): Plan {
     }
   }
   return { repo, legs: filtered, warnings };
+}
+
+/**
+ * Give `jobs` a `defaults.run.shell` of `shell` (keeping comments and layout), so their run: steps without
+ * a shell: don't fall back to act's host default (pwsh on Windows). Jobs that already set one, reusable
+ * workflow calls, and every job when the workflow sets a default are left alone. Returns the jobs changed.
+ */
+export function setDefaultRunShell(text: string, jobs: string[], shell: string): { text: string; changed: string[] } {
+  const doc = YAML.parseDocument(text);
+  if (doc.getIn(["defaults", "run", "shell"]) !== undefined) return { text, changed: [] };
+  const changed: string[] = [];
+  for (const j of jobs) {
+    const job = doc.getIn(["jobs", j]);
+    if (!YAML.isMap(job) || job.has("uses") || doc.getIn(["jobs", j, "defaults", "run", "shell"]) !== undefined) continue;
+    doc.setIn(["jobs", j, "defaults", "run", "shell"], shell);
+    changed.push(j);
+  }
+  return { text: changed.length ? doc.toString({ lineWidth: 0 }) : text, changed };
 }
