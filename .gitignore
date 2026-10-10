@@ -3,3 +3,4 @@ dist/
 .osmatrix/
 *.tgz
 artifacts/
+.codeql/

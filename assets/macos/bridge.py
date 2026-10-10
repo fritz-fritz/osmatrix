@@ -5,24 +5,27 @@ Runs inside the dockur container. The guest polls GET /next for a command, runs 
 output to /result. The host drives it with `docker exec <ctr> python3 bridge.py run '<cmd>'`.
 Only reachable from the guest (container-internal port, never published).
 """
-import http.server, json, os, re, sys, time, urllib.request
+import http.server, json, os, sys, time, urllib.request
 
 PORT = int(os.environ.get("OSMATRIX_BRIDGE_PORT", "8099"))
 DIR = "/tmp/osmatrix-bridge"
 
 
-FILE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
-
-
 def safe_file(name):
-    """Resolve a /file/<name> request to a regular file directly inside DIR/files, or None."""
-    if not FILE_NAME.fullmatch(name):
+    """Map a /file/<name> request to a regular file directly inside DIR/files, or None.
+
+    The request never becomes part of a path: it is only compared with the directory's own
+    entries, and the matching entry is what gets opened."""
+    root = os.path.join(DIR, "files")
+    try:
+        entries = os.scandir(root)
+    except FileNotFoundError:
         return None
-    root = os.path.realpath(os.path.join(DIR, "files"))
-    path = os.path.realpath(os.path.join(root, name))
-    if os.path.dirname(path) != root or not os.path.isfile(path):
-        return None
-    return path
+    with entries:
+        for entry in entries:
+            if entry.name == name and not entry.name.startswith(".") and entry.is_file(follow_symlinks=False):
+                return entry.path
+    return None
 
 
 def serve():

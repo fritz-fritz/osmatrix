@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -22,7 +22,12 @@ test("bridge /file/ only serves regular files directly inside files/", { skip: !
     mkdirSync(path.join(dir, "files", "sub"), { recursive: true });
     writeFileSync(path.join(dir, "files", "configure.sh"), "echo ok\n");
     writeFileSync(path.join(dir, "secret"), "nope\n");
-    const names = ["configure.sh", "..", ".", "../secret", "sub", "sub/x", "%2e%2e", ".hidden", "", "missing.sh"];
+    try {
+      symlinkSync(path.join(dir, "secret"), path.join(dir, "files", "link.sh")); // must not be followed
+    } catch {
+      /* symlinks may need privileges on Windows */
+    }
+    const names = ["configure.sh", "link.sh", "..", ".", "../secret", "sub", "sub/x", "%2e%2e", ".hidden", "", "missing.sh"];
     const script = [
       "import importlib.util, json, sys",
       `spec = importlib.util.spec_from_file_location("bridge", ${JSON.stringify(bridge)})`,

@@ -1,6 +1,6 @@
 {
   "name": "osmatrix",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Local Ubuntu/Windows/macOS environments and GitHub Actions matrix runs (via act) for coding agents. CLI + MCP server + skill.",
   "license": "MIT",
   "type": "module",
@@ -40,7 +40,13 @@
     "prepack": "npm run build",
     "sync": "node scripts/sync-skills.mjs",
     "validate": "node scripts/sync-skills.mjs --check && node scripts/validate-skills.mjs && node scripts/validate-plugins.mjs",
-    "package:plugins": "npm run validate && node scripts/package-plugins.mjs"
+    "package:plugins": "npm run validate && node scripts/package-plugins.mjs",
+    "codeql": "node scripts/codeql.mjs",
+    "check": "npm run typecheck && npm test && npm run validate",
+    "ci:local": "node src/cli.ts ci run --repo . -W ci.yml --wait",
+    "ci:local:linux": "node src/cli.ts ci run --repo . -W ci.yml --only linux --wait",
+    "release:rehearse": "node scripts/release-rehearse.mjs",
+    "verify": "npm run check && npm run codeql && npm run ci:local"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.32.1",

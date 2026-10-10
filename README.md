@@ -1,4 +1,12 @@
+<img src="assets/logo.svg" alt="osmatrix logo" height="125">
+
 # osmatrix
+
+[![CI](https://img.shields.io/github/actions/workflow/status/fritz-fritz/osmatrix/ci.yml?branch=main&label=CI)](https://github.com/fritz-fritz/osmatrix/actions/workflows/ci.yml)
+[![npm](https://img.shields.io/npm/v/osmatrix)](https://www.npmjs.com/package/osmatrix)
+[![skills.sh](https://skills.sh/b/fritz-fritz/osmatrix)](https://skills.sh/fritz-fritz/osmatrix/osmatrix)
+[![license](https://img.shields.io/github/license/fritz-fritz/osmatrix)](LICENSE)
+[![Socket Security](https://badge.socket.dev/npm/package/osmatrix)](https://socket.dev/npm/package/osmatrix)
 
 Local **Ubuntu, Windows and macOS** environments plus **local GitHub Actions matrix runs** for coding agents (Claude Code, Cursor, Codex) and for humans. It's one CLI that also serves as an MCP server, and it ships with an agent skill.
 
@@ -18,42 +26,33 @@ human / scripts ── osmatrix CLI ───────┴─ core ─┬─ u
 
 ## Install
 
-### Try the plugins from this checkout
+### As an agent plugin (recommended)
 
-`npm run package:plugins` builds a plugin for each of Claude, Cursor and Codex that bundles this checkout's runtime, so they work before anything is on npm. `artifacts/` is then a local marketplace named `fritztech-local` for all three clients, committed to its own git repo because Cursor imports marketplaces with git.
-
-```bash
-npm ci
-npm run package:plugins
-```
-
-| Client | Install from `artifacts/` |
-|---|---|
-| Claude Code | `/plugin marketplace add ./artifacts`, then `/plugin install osmatrix@fritztech-local` |
-| Codex | `codex plugin marketplace add ./artifacts`, then `codex plugin add osmatrix@fritztech-local` |
-| Cursor | Add the local `artifacts/` folder as a marketplace (plugin cards may lack the logo until the marketplace is on GitHub). If an earlier osmatrix plugin failed to start, toggle its MCP server off and on in Cursor's MCP settings: Cursor remembers the failure by server name, even across reinstalls. |
-
-Each client's plugin is also archived as `artifacts/osmatrix-<client>-<version>.tar.gz` (one `osmatrix/` directory). Node.js 22.18+ and npm are required, and npx downloads runtime dependencies on first launch. Docker and virtualization requirements depend on which guests you use. Re-run `npm run package:plugins` after changes, then refresh the marketplace in your client.
-
-Start with "Check which operating systems this host supports, then plan this repository's CI." Planning starts no guests. For repository tools, the agent passes your checkout's absolute path explicitly.
-
-### As an agent plugin
-
-After the first npm release, the repository root is a plugin marketplace for each client. Every plugin bundles the skill and registers the MCP server (`npx -y osmatrix@0 mcp`, pinned to the current major version). Until then, use the local export above; the npm-backed marketplace cannot start an unpublished package.
+The repository is a plugin marketplace for each client. The plugin bundles the skill and the MCP server, which runs from npm as `npx -y osmatrix@0 mcp`, pinned to the current major version.
 
 | Client | Install |
 |---|---|
 | Claude Code | `/plugin marketplace add fritz-fritz/osmatrix`, then `/plugin install osmatrix@fritztech` |
-| Codex | `codex plugin marketplace add fritz-fritz/osmatrix`, then `codex plugin add osmatrix@fritztech` |
+| Codex / ChatGPT | `codex plugin marketplace add fritz-fritz/osmatrix`, then `codex plugin add osmatrix@fritztech` |
 | Cursor | **Dashboard → Plugins → Team Marketplaces → Add Marketplace → Import from Repo** |
-| Skill only (any agent, via [skills.sh](https://skills.sh)) | `npx skills add fritz-fritz/osmatrix` |
+| Skill only, any agent (via [skills.sh](https://skills.sh)) | `npx skills add fritz-fritz/osmatrix` |
 
-### From npm, or from a checkout
+Requirements:
+
+- Node.js 22.18+ with npm.
+- Docker.
+- KVM for the Windows/macOS VMs, or an Apple Silicon Mac for macOS guests (see [Host requirements](#host-requirements)).
+
+Then try: "Check which operating systems this host supports, then plan this repository's CI." Planning starts no guests. For repository tools, the agent passes your checkout's absolute path explicitly.
+
+> If the osmatrix MCP server shows as failed after you install or switch plugins, toggle it off and on in your client's MCP settings. Some clients, Cursor for one, remember a server's failure by name even across reinstalls.
+
+### As a CLI (npm)
 
 ```bash
-npm install -g osmatrix        # or from a checkout: npm ci && npm run build && npm link
+npm install -g osmatrix
 osmatrix init                  # config + ssh key + host check
-osmatrix install-agents        # register MCP server + skill with Claude Code, Cursor and Codex
+osmatrix install-agents        # optional: register MCP server + skill with Claude Code, Cursor and Codex without the plugins
 ```
 
 `install-agents` writes to these places:
@@ -189,12 +188,7 @@ To release:
    - publishes that same tarball to npm with trusted publishing and provenance;
    - creates the GitHub release with all four files attached.
 
-Rehearse a release locally first. This runs everything except attestation, the real npm publish and the GitHub release, which need GitHub's OIDC token; it does an `npm publish --dry-run` instead:
-
-```bash
-echo '{"ref":"refs/tags/v0.1.0"}' > /tmp/tag.json
-osmatrix ci run -W release.yml --event-file /tmp/tag.json --wait
-```
+Rehearse a release locally first with `npm run release:rehearse`. It runs `release.yml` as if `v<version>` had been pushed, skipping attestation, the real npm publish and the GitHub release (they need GitHub's OIDC token), and does an `npm publish --dry-run` instead.
 
 One-time setup:
 - In the GitHub repository settings, enable immutable releases.
@@ -211,8 +205,32 @@ npm ci
 npm test          # unit tests (node:test, TypeScript run directly by Node)
 npm run build     # tsc -> dist/
 npm run validate  # skill sync, versions, listing limits, assets and MCP commands
+npm run check     # typecheck + tests + validate
+npm run ci:local  # this repo's ci.yml via act: Linux on Docker, Windows/macOS in guests (ci:local:linux: Linux only)
+npm run release:rehearse # release.yml for v<version>, publishing as a dry run
+npm run verify    # check + codeql + ci:local: run before pushing
 npm run package:plugins # bundled Claude/Cursor/Codex plugins + local marketplace in artifacts/
+npm run codeql    # GitHub's code-scanning queries, locally (needs the CodeQL CLI)
 node src/cli.ts   # run from source
 ```
 
 Set `OSMATRIX_HOME=/some/dir` to isolate config and state, for example in tests.
+
+To use the checkout's CLI and MCP server directly, without packaging: `npm run build && npm link`, then `osmatrix install-agents`.
+
+### Try unreleased changes as plugins
+
+`npm run package:plugins` builds a plugin for each of Claude, Cursor and Codex that bundles this checkout's runtime, for trying changes that aren't released on npm yet. `artifacts/` is then a local marketplace named `fritztech-local` for all three clients, committed to its own git repo because Cursor imports marketplaces with git.
+
+```bash
+npm ci
+npm run package:plugins
+```
+
+| Client | Install from `artifacts/` |
+|---|---|
+| Claude Code | `/plugin marketplace add ./artifacts`, then `/plugin install osmatrix@fritztech-local` |
+| Codex | `codex plugin marketplace add ./artifacts`, then `codex plugin add osmatrix@fritztech-local` |
+| Cursor | Add the local `artifacts/` folder as a marketplace (plugin cards may lack the logo for local marketplaces). If you switch from the npm-backed plugin, toggle its MCP server off and on. |
+
+Each client's plugin is also archived as `artifacts/osmatrix-<client>-<version>.tar.gz` (one `osmatrix/` directory). Node.js 22.18+ and npm are required, and npx downloads runtime dependencies on first launch. Docker and virtualization requirements depend on which guests you use. Re-run `npm run package:plugins` after changes, then refresh the marketplace in your client.

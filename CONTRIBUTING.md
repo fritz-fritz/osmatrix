@@ -13,7 +13,11 @@ osmatrix is MIT-licensed, and its copyright is held by "osmatrix contributors". 
 
 ## Development setup
 
-You need Node.js 22.18 or later and Docker. Running Windows or macOS guests also needs KVM (Linux, or Windows with WSL2) or an Apple Silicon Mac.
+You need Node.js 22.18 or later and Docker. Running Windows or macOS guests also needs KVM (Linux, or Windows with WSL2) or an Apple Silicon Mac. For `npm run codeql`, also install the CodeQL CLI. The recommended way is GitHub's `gh` extension, which keeps it up to date (steps under [Checks before you push](#checks-before-you-push)):
+
+```bash
+gh extension install github/gh-codeql && gh codeql set-version latest && gh codeql install-stub ~/.local/bin/
+```
 
 ```bash
 git clone https://github.com/fritz-fritz/osmatrix && cd osmatrix
@@ -28,17 +32,28 @@ To try your checkout as a plugin, run `npm run package:plugins`. It builds Claud
 
 Set `OSMATRIX_HOME=/some/dir` to keep experiments apart from your real guests: config, data and Docker resource names are then all separate.
 
-## Test your change across operating systems
+## Checks before you push
 
-osmatrix runs its own CI locally, so please rehearse before pushing:
+| Script | What it runs |
+|---|---|
+| `npm run check` | typecheck, unit + MCP tests, plugin validation (fast, no Docker) |
+| `npm run codeql` | GitHub's code-scanning queries (JavaScript/TypeScript, Python, Actions), locally |
+| `npm run ci:local` | `.github/workflows/ci.yml` through act with this checkout's osmatrix: Linux legs on Docker, Windows/macOS legs in your guests |
+| `npm run ci:local:linux` | only the Linux legs (Docker only, no VMs needed) |
+| `npm run release:rehearse` | `release.yml` as if `v<version>` were pushed; publishing is a dry run |
+| `npm run verify` | `check` + `codeql` + `ci:local`, the full pre-push gate |
+
+osmatrix runs its own CI locally, so a passing `npm run verify` (or `ci:local:linux` when you have no VMs) means GitHub CI should pass too. Guests you can't run on your host are fine to skip; GitHub CI covers all three OSes.
+
+`npm run codeql` needs the CodeQL CLI. The easiest way to install it and keep it updated is GitHub's `gh` extension:
 
 ```bash
-osmatrix ci plan --repo .
-osmatrix ci run --repo . -W ci.yml --wait          # Linux via act, plus Windows/macOS guests you have
-osmatrix ci run --repo . -W ci.yml --only linux --wait
+gh extension install github/gh-codeql
+gh codeql set-version latest          # rerun to update; `gh extension upgrade gh-codeql` updates the manager
+gh codeql install-stub ~/.local/bin/  # puts a `codeql` command on PATH
 ```
 
-Guests you can't run on your host are fine to skip; GitHub CI covers all three OSes.
+Query packs are downloaded and cached on first use.
 
 ## Where things live
 
@@ -67,7 +82,7 @@ Guests you can't run on your host are fine to skip; GitHub CI covers all three O
 ## Pull requests
 
 1. Fork, branch from `main`, and keep each PR focused on one change.
-2. Before you push, run `npm test`, `npm run validate` and `npm run typecheck`, and ideally a local `osmatrix ci run` too.
+2. Before you push, run `npm run verify` (or at least `npm run check` and `npm run ci:local:linux`); see [Checks before you push](#checks-before-you-push).
 3. Describe what changed, why, and how you tested it, including which host OS and guests.
 
 Maintainers squash-merge pull requests. Releases are cut by maintainers by pushing a `v<x.y.z>` tag (see "Releasing" in the README); please don't bump the version in PRs.
