@@ -24,8 +24,10 @@ documentation:
 
 ci:
   - head-branch: ['^(?:(?!(?:fix|bugfix|hotfix|feat|feature|docs?|ci|chore|security)/)[^/]+/)?ci(?:[/_-]|$)']
+  # Every changed file is CI or release tooling. One brace glob, because any-glob-to-all-files needs
+  # a single glob to match all files (separate globs would miss a PR touching ci.yml and scripts/).
   - changed-files:
-      - any-glob-to-all-files: ['.github/workflows/**', '.github/ci-tools/**', '.github/dependabot.yml', 'scripts/**']
+      - any-glob-to-all-files: ['{.github/workflows/**,.github/ci-tools/**,.github/dependabot.yml,.github/labeler.yml,.github/release.yml,scripts/**}']
 
 chore:
   - head-branch: ['^(?:(?!(?:fix|bugfix|hotfix|feat|feature|docs?|ci|chore|security)/)[^/]+/)?chore(?:[/_-]|$)']
