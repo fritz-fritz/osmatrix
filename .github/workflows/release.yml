@@ -16,17 +16,35 @@ on:
   push:
     tags: ["v[0-9]+.[0-9]+.[0-9]+*"]
 
-permissions:
-  contents: write # create the release
-  id-token: write # npm trusted publishing + attestations
-  attestations: write
+permissions: {} # granted per job below
 
 jobs:
-  release:
+  # Nothing irreversible (npm publish, immutable release) happens until the tagged commit has passed
+  # ci.yml and every other check (e.g. CodeQL). If they fail, delete the tag, fix, and re-tag.
+  checks:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+      checks: read
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Wait for the commit's CI and checks to pass
+        if: ${{ !env.ACT }} # local rehearsals run against uncommitted work; there are no GitHub checks
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/checks.mjs "$GITHUB_SHA" --wait --timeout 2700 --exclude-run "$GITHUB_RUN_ID"
+
+  release:
+    needs: checks
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # create the release
+      id-token: write # npm trusted publishing + attestations
+      attestations: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 24
           registry-url: https://registry.npmjs.org
@@ -54,7 +72,7 @@ jobs:
 
       - name: Attest build provenance
         if: ${{ !env.ACT }} # needs GitHub OIDC; skipped when rehearsing locally with act
-        uses: actions/attest-build-provenance@v4
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-path: |
             artifacts/osmatrix-*.tgz

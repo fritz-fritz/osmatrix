@@ -42,6 +42,7 @@ Set `OSMATRIX_HOME=/some/dir` to keep experiments apart from your real guests: c
 | `npm run ci:local:linux` | only the Linux legs (Docker only, no VMs needed) |
 | `npm run release:rehearse` | `release.yml` as if `v<version>` were pushed; publishing is a dry run |
 | `npm run verify` | `check` + `codeql` + `ci:local`, the full pre-push gate |
+| `npm run release:tag` | maintainers: tag and push `v<version>`, only after the pushed commit's GitHub checks passed |
 
 osmatrix runs its own CI locally, so a passing `npm run verify` (or `ci:local:linux` when you have no VMs) means GitHub CI should pass too. Guests you can't run on your host are fine to skip; GitHub CI covers all three OSes.
 
@@ -78,6 +79,22 @@ Query packs are downloaded and cached on first use.
 - **Edit the skill only in `skills/`,** then run `npm run sync`. CI fails if the client copies drift.
 - **Keep the skill accurate.** Agents follow it literally, so describe real behavior and limits.
 - **Add or update tests** in `test/` for behavior changes.
+- **Pin GitHub Actions to full commit SHAs** with a version comment, like `actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1`. Tags can be moved; commits can't. `npm run validate` rejects unpinned actions, and Dependabot keeps the SHAs and comments current. npm tools that workflows run belong in `.github/ci-tools/package.json`. They're pinned by its lockfile, updated by Dependabot, and installed with `npm ci --prefix .github/ci-tools`, never with `npx -y` or `npm install <pkg>@<version>`, which the validator also rejects.
+
+## Dependabot
+
+`.github/dependabot.yml` checks npm packages (the package and the CI tools in `.github/ci-tools`) and GitHub Actions weekly. A new version must be at least 7 days old before Dependabot proposes it (a supply-chain cooldown), and minor/patch updates are grouped into one PR per ecosystem.
+
+`.github/workflows/dependabot-auto-merge.yml` approves each Dependabot PR and turns on GitHub auto-merge (squash) for that PR only. GitHub merges it once the required `CI Gate` check passes; failing PRs stay open for a human. The repository's **Allow auto-merge** setting only makes per-PR auto-merge available, so other PRs merge exactly as before. Tighten the policy in the workflow's `with:` block: `target: minor` or `patch` leaves bigger bumps for review, and `exclude: 'pkg-a,pkg-b'` holds packages back.
+
+One-time setup for maintainers:
+
+1. **Settings → General → Pull Requests:** enable **Allow auto-merge**.
+2. **A GitHub App** with repository permissions **Contents: read and write** and **Pull requests: read and write**, no webhook, installed on this repository. The Bookclerk merge App can be reused by adding this repository to its installation. The App token matters: merges made with `GITHUB_TOKEN` don't start `push` workflows, so CI on `main` would be skipped.
+3. **Dependabot secrets** (Settings → Secrets and variables → **Dependabot**; Dependabot runs don't receive Actions secrets): `DEPENDABOT_MERGE_APP_CLIENT_ID` (the App's client ID) and `DEPENDABOT_MERGE_APP_KEY` (a private key generated for the App).
+4. **A ruleset on `main` that requires the `CI Gate` status check.** Without a required check, there's nothing for auto-merge to wait on.
+
+The workflow must run while checks are still pending: GitHub refuses to enable auto-merge on a PR that's already mergeable. To retry a Dependabot PR, for example after adding the secrets, comment `@dependabot rebase`.
 
 ## Pull requests
 

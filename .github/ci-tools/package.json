@@ -1,0 +1,12 @@
+{
+  "name": "osmatrix-ci-tools",
+  "private": true,
+  "description": "Tools CI workflows run (plugin validators, skills.sh CLI, JSON Schema). Pinned by the lockfile and updated by Dependabot; install with `npm ci --prefix .github/ci-tools`.",
+  "license": "MIT",
+  "dependencies": {
+    "@anthropic-ai/claude-code": "2.1.288",
+    "ajv": "8.20.0",
+    "ajv-formats": "3.0.1",
+    "skills": "1.7.0"
+  }
+}

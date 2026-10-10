@@ -179,16 +179,19 @@ Every release is one immutable version. The tag is `v<x.y.z>`, matching `osmatri
 
 To release:
 
-1. Bump `version` in `package.json`. A breaking CLI/MCP change means a new major.
-2. Run `npm run sync`. It stamps the version into the three plugin manifests and the major-version pin into their MCP configs.
-3. Commit, tag `v<version>` and push the tag. [`release.yml`](.github/workflows/release.yml) then:
-   - validates and tests;
-   - builds the bundled plugins;
+1. Bump the version with `npm version patch --no-git-tag-version` (or `minor` / `major`; a breaking CLI/MCP change means a new major), then run `npm run sync` to stamp it into the three plugin manifests and the major-version pin into their MCP configs.
+2. Run `npm run verify` and `npm run release:rehearse`. The rehearsal runs `release.yml` locally as if `v<version>` had been pushed, with an `npm publish --dry-run` in place of attestation, publishing and the GitHub release (they need GitHub's OIDC token). It refuses a version that's already on npm.
+3. Commit and push `main`, and let GitHub CI run.
+4. Run `npm run release:tag` (add `--wait` to wait for CI). It creates and pushes the tag only if `HEAD` is pushed, the version and tag are unused, and the commit's CI and other checks, such as CodeQL, have passed. So a tag isn't spent on a commit that can't be released.
+
+When the tag lands, [`release.yml`](.github/workflows/release.yml):
+   - checks again that the commit's CI and checks passed, waiting if they're still running; nothing irreversible happens before that;
+   - validates, tests and builds the bundled plugins;
    - attests build provenance for the npm tarball and the plugin archives;
    - publishes that same tarball to npm with trusted publishing and provenance;
    - creates the GitHub release with all four files attached.
 
-Rehearse a release locally first with `npm run release:rehearse`. It runs `release.yml` as if `v<version>` had been pushed, skipping attestation, the real npm publish and the GitHub release (they need GitHub's OIDC token), and does an `npm publish --dry-run` instead.
+If the checks fail after tagging, nothing has been published, so you can delete the tag, fix, and tag again.
 
 One-time setup:
 - In the GitHub repository settings, enable immutable releases.
@@ -208,6 +211,7 @@ npm run validate  # skill sync, versions, listing limits, assets and MCP command
 npm run check     # typecheck + tests + validate
 npm run ci:local  # this repo's ci.yml via act: Linux on Docker, Windows/macOS in guests (ci:local:linux: Linux only)
 npm run release:rehearse # release.yml for v<version>, publishing as a dry run
+npm run release:tag # tag + push v<version> once the pushed commit's checks passed (maintainers)
 npm run verify    # check + codeql + ci:local: run before pushing
 npm run package:plugins # bundled Claude/Cursor/Codex plugins + local marketplace in artifacts/
 npm run codeql    # GitHub's code-scanning queries, locally (needs the CodeQL CLI)

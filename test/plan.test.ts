@@ -131,3 +131,33 @@ jobs:
   const win = plan(repo, linuxCfg()).legs.find((l) => l.job === "win")!;
   assert.deepEqual(win.needsLabels.sort(), ["ubuntu-22.04", "ubuntu-latest"]);
 });
+
+test("plan skips fan-in jobs whose needs already run as legs, unless asked for by name", () => {
+  const repo = tmpRepo(`
+on: push
+jobs:
+  unit:
+    runs-on: \${{ matrix.os }}
+    strategy: { matrix: { os: [ubuntu-latest, windows-latest] } }
+    steps: [{ run: echo }]
+  lint:
+    runs-on: ubuntu-latest
+    steps: [{ run: echo }]
+  gate:
+    needs: [unit, lint]
+    if: always()
+    runs-on: ubuntu-latest
+    steps: [{ run: echo }]
+  deploy:
+    needs: [build]
+    runs-on: ubuntu-latest
+    steps: [{ run: echo }]
+`);
+  const legs = plan(repo, linuxCfg()).legs;
+  assert.match(legs.find((l) => l.job === "gate")!.skip ?? "", /already run as legs/);
+  // "build" is not a leg in this run (no such job), so deploy isn't treated as a fan-in.
+  assert.equal(legs.find((l) => l.job === "deploy")!.skip, undefined);
+  assert.equal(plan(repo, linuxCfg(), { job: "gate" }).legs[0].skip, undefined);
+  // With only Linux legs selected, unit's Windows leg is filtered out but unit still runs on Linux.
+  assert.match(plan(repo, linuxCfg(), { only: ["linux"] }).legs.find((l) => l.job === "gate")!.skip ?? "", /already run/);
+});
