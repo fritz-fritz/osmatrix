@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { ActJsonParser } from "../src/ci/run.ts";
+import { ActJsonParser, actDifferenceHints } from "../src/ci/run.ts";
 import { defaultGuests, labelMatches, mergeConfig, defaultConfig } from "../src/core/config.ts";
 import { commandLine, quotePosix, quotePwsh, withCwd } from "../src/core/ssh.ts";
 import { encodePng } from "../src/gui.ts";
@@ -68,4 +68,12 @@ test("png encoder emits a valid header", () => {
   const png = encodePng(2, 1, Buffer.from([255, 0, 0, 255, 0, 255, 0, 255]));
   assert.deepEqual([...png.subarray(0, 8)], [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
   assert.equal(png.readUInt32BE(16), 2);
+});
+
+test("failures that mention act's file-command paths get an act-difference hint", () => {
+  const container = "  | refusing GITHUB_OUTPUT outside RUNNER_TEMP/GITHUB_WORKSPACE: /run/act/workflow/outputcmd.txt";
+  assert.match(actDifferenceHints(container)[0], /^the failure mentions \/run\/act\/workflow\/outputcmd\.txt: .*env\.ACT/);
+  assert.equal(actDifferenceHints("bad path C:/Users/u/.cache/act/1f2e/act/workflow/envs.txt").length, 1);
+  // act's own step script paths live in the same directory and are not file commands.
+  assert.deepEqual(actDifferenceHints("🐳 docker exec cmd=[bash -e /var/run/act/workflow/resolve]\nexit 1"), []);
 });

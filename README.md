@@ -143,6 +143,8 @@ Secrets for CI go in `<repo>/.osmatrix/secrets` (or `.secrets`) as `KEY=value` l
 - Matrices built from expressions.
 - Remote reusable workflows.
 
+act also keeps the file-command files (`GITHUB_OUTPUT`, `GITHUB_ENV`, …) outside `RUNNER_TEMP`, so scripts that check those paths stay inside `RUNNER_TEMP` fail only locally. A failed leg says so in its warnings; skip such checks when `env.ACT` is set.
+
 Guests are also leaner than GitHub's hosted images, so prefer `setup-*` actions.
 
 ## Privacy and terms
