@@ -1,4 +1,4 @@
-<img src="assets/logo.svg" height="100px">
+<img src="assets/logo.svg" alt="osmatrix logo" height="100px">
 
 # osmatrix
 
