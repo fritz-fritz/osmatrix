@@ -91,12 +91,12 @@ program
 
 program
   .command("install-agents")
-  .description("Register the MCP server and skill with Claude Code, Cursor and Codex")
+  .description("Register the MCP server and skills with Claude Code, Cursor and Codex")
   .option("--claude", "only Claude Code")
   .option("--cursor", "only Cursor")
   .option("--codex", "only Codex")
-  .option("--npx", "register `npx -y osmatrix@latest mcp` instead of this install's path")
-  .option("--copy-skill", "copy the skill instead of symlinking it")
+  .option("--npx", "register `npx -y osmatrix@<major> mcp` instead of this install's path")
+  .option("--copy-skill", "copy the skills instead of symlinking them")
   .option("--uninstall", "remove the registrations")
   .option("--dry-run", "show what would change")
   .action(

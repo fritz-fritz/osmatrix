@@ -10,7 +10,7 @@
       "name": "osmatrix",
       "description": "Local Ubuntu, Windows and macOS environments plus local GitHub Actions matrix runs (act) for agents: run commands, sync files, forward ports, screenshots, and test CI legs before pushing.",
       "category": "development",
-      "source": "./claude",
+      "source": "./",
       "homepage": "https://github.com/fritz-fritz/osmatrix"
     }
   ]

@@ -4,15 +4,20 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
-import { CLIENTS, expectedMcpArgs, validatePlugin } from "../scripts/validate-plugins.mjs";
+import { BUNDLE_FILES, CLIENTS, expectedMcpArgs, validatePlugin } from "../scripts/validate-plugins.mjs";
 import { unpinnedUses } from "../scripts/validate-workflows.mjs";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
 const { version } = JSON.parse(await readFile(path.join(root, "package.json"), "utf8"));
 
-test("every committed client plugin validates", async () => {
-  for (const client of Object.keys(CLIENTS)) await validatePlugin(client, path.join(root, client), { version });
+test("the repository validates as a plugin for every client", async () => {
+  for (const client of Object.keys(CLIENTS)) await validatePlugin(client, root, { version });
 });
+
+/** What a client's bundle contains: the shared files plus that client's manifest. */
+async function copyPlugin(client: keyof typeof CLIENTS, dest: string) {
+  for (const f of [...BUNDLE_FILES, CLIENTS[client].manifest]) await cp(path.join(root, f), path.join(dest, f), { recursive: true });
+}
 
 test("bundled MCP args use each host's plugin-root placeholder", () => {
   assert.equal(expectedMcpArgs("claude", "1.2.3", true)[1], "--package=${CLAUDE_PLUGIN_ROOT}/runtime/osmatrix-1.2.3.tgz");
@@ -24,7 +29,7 @@ test("bundled MCP args use each host's plugin-root placeholder", () => {
 test("plugin validation catches unusable listings, escaping paths, missing files and wrong placeholders", async () => {
   const temp = await mkdtemp(path.join(tmpdir(), "osmatrix-listing-"));
   try {
-    await cp(path.join(root, "codex"), temp, { recursive: true });
+    await copyPlugin("codex", temp);
     const manifestFile = path.join(temp, "plugin.json");
     const manifest = JSON.parse(await readFile(manifestFile, "utf8"));
     const listing = manifest.extensions["com.openai"].interface;
@@ -53,7 +58,7 @@ test("plugin validation catches unusable listings, escaping paths, missing files
     await assert.rejects(validatePlugin("codex", temp, { version }), /ENOENT/);
 
     const cursor = await mkdtemp(path.join(tmpdir(), "osmatrix-cursor-"));
-    await cp(path.join(root, "cursor"), cursor, { recursive: true });
+    await copyPlugin("cursor", cursor);
     const mcpFile = path.join(cursor, "mcp.json");
     const mcp = JSON.parse(await readFile(mcpFile, "utf8"));
     mcp.mcpServers.osmatrix.args = expectedMcpArgs("codex", version, true); // ${PLUGIN_ROOT}: Cursor would not expand it

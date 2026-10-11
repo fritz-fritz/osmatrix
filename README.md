@@ -4,13 +4,13 @@
 
 [![CI](https://img.shields.io/github/actions/workflow/status/fritz-fritz/osmatrix/ci.yml?branch=main&label=CI)](https://github.com/fritz-fritz/osmatrix/actions/workflows/ci.yml)
 [![npm](https://img.shields.io/npm/v/osmatrix)](https://www.npmjs.com/package/osmatrix)
-[![skills.sh](https://skills.sh/b/fritz-fritz/osmatrix)](https://skills.sh/fritz-fritz/osmatrix/osmatrix)
+[![skills.sh](https://skills.sh/b/fritz-fritz/osmatrix)](https://skills.sh/fritz-fritz/osmatrix)
 [![license](https://img.shields.io/github/license/fritz-fritz/osmatrix)](LICENSE)
 [![Socket Security](https://badge.socket.dev/npm/package/osmatrix)](https://socket.dev/npm/package/osmatrix)
 
 <p align="center"><img src="assets/social-preview.svg" alt="osmatrix social card" width="65%"></p>
 
-Local **Ubuntu, Windows and macOS** environments plus **local GitHub Actions matrix runs** for coding agents (Claude Code, Cursor, Codex) and for humans. It's one CLI that also serves as an MCP server, and it ships with an agent skill.
+Local **Ubuntu, Windows and macOS** environments plus **local GitHub Actions matrix runs** for coding agents (Claude Code, Cursor, Codex) and for humans. It's one CLI that also serves as an MCP server, and it ships with three agent skills.
 
 - **Guests**: `exec`, file push/pull, **port forwarding** (both directions), screenshots and keyboard/mouse input.
 - **Local CI**: `ci plan` / `ci run` expand workflow matrices. `ubuntu-*` legs run with [act](https://github.com/nektos/act) on the host's Docker. `windows-*` and `macos-*` legs run act **inside** the matching VM, so a Windows leg really runs on Windows.
@@ -18,7 +18,7 @@ Local **Ubuntu, Windows and macOS** environments plus **local GitHub Actions mat
 
 ```
 Claude Code / Cursor / Codex
-  ├─ skill (SKILL.md): when and how
+  ├─ skills (SKILL.md ×3): when and how
   └─ MCP server (osmatrix mcp, stdio) ─┐
 human / scripts ── osmatrix CLI ───────┴─ core ─┬─ ubuntu  : act runner image + sshd (container)
                                                ├─ windows : dockur/windows VM (KVM)
@@ -30,20 +30,28 @@ human / scripts ── osmatrix CLI ───────┴─ core ─┬─ u
 
 ### As an agent plugin (recommended)
 
-The repository is a plugin marketplace for each client. The plugin bundles the skill and the MCP server, which runs from npm as `npx -y osmatrix@0 mcp`, pinned to the current major version.
+The repository is a plugin marketplace for each client, and its root is the plugin. The plugin bundles the skills and the MCP server, which runs from npm as `npx -y osmatrix@0 mcp`, pinned to the current major version.
 
 | Client | Install |
 |---|---|
 | Claude Code | `/plugin marketplace add fritz-fritz/osmatrix`, then `/plugin install osmatrix@fritztech` |
-| Codex / ChatGPT | `codex plugin marketplace add fritz-fritz/osmatrix`, then `codex plugin add osmatrix@fritztech` |
+| Codex / ChatGPT | `codex plugin marketplace add fritz-fritz/osmatrix`, then enable **osmatrix** under Plugins |
 | Cursor | **Dashboard → Plugins → Team Marketplaces → Add Marketplace → Import from Repo** |
-| Skill only, any agent (via [skills.sh](https://skills.sh)) | `npx skills add fritz-fritz/osmatrix` |
+| Skills only, any agent (via [skills.sh](https://skills.sh)) | `npx skills add fritz-fritz/osmatrix` |
 
 Requirements:
 
 - Node.js 22.18+ with npm.
 - Docker.
 - KVM for the Windows/macOS VMs, or an Apple Silicon Mac for macOS guests (see [Host requirements](#host-requirements)).
+
+The plugin adds three skills, so an agent loads only the guidance a task needs:
+
+| Skill | Loads when the task is... |
+|---|---|
+| `osmatrix-ci` | running a repo's GitHub Actions workflows locally, debugging a leg that failed on another OS |
+| `osmatrix-guests` | running or debugging code inside a Ubuntu/Windows/macOS guest, reaching a guest app from the host (port forwarding), driving a VM's GUI |
+| `osmatrix-setup` | first use, checking the host, creating or repairing guests, adding an ssh guest |
 
 Then try: "Check which operating systems this host supports, then plan this repository's CI." Planning starts no guests. For repository tools, the agent passes your checkout's absolute path explicitly.
 
@@ -54,14 +62,16 @@ Then try: "Check which operating systems this host supports, then plan this repo
 ```bash
 npm install -g osmatrix
 osmatrix init                  # config + ssh key + host check
-osmatrix install-agents        # optional: register MCP server + skill with Claude Code, Cursor and Codex without the plugins
+osmatrix install-agents        # optional: register MCP server + skills with Claude Code, Cursor and Codex without the plugins
 ```
 
 `install-agents` writes to these places:
 
-- **Claude Code**: `claude mcp add --scope user`, or `~/.claude.json` when the `claude` CLI isn't on PATH. Also `~/.claude/skills/osmatrix`.
-- **Cursor**: `~/.cursor/mcp.json`, plus the shared `~/.agents/skills/osmatrix`.
-- **Codex**: `~/.codex/config.toml` `[mcp_servers.osmatrix]`, plus the shared `~/.agents/skills/osmatrix`.
+- **Claude Code**: `claude mcp add --scope user`, or `~/.claude.json` when the `claude` CLI isn't on PATH. Also `~/.claude/skills/osmatrix-*`.
+- **Cursor**: `~/.cursor/mcp.json`, plus the shared `~/.agents/skills/osmatrix-*`.
+- **Codex**: `~/.codex/config.toml` `[mcp_servers.osmatrix]`, plus the shared `~/.agents/skills/osmatrix-*`.
+
+A single `osmatrix` skill installed by an earlier version is removed, so it doesn't trigger next to the new ones.
 
 Options:
 
@@ -131,7 +141,7 @@ Secrets for CI go in `<repo>/.osmatrix/secrets` (or `.secrets`) as `KEY=value` l
 
 ## Configuration
 
-`osmatrix config` prints the effective config and its file path. See [skills/osmatrix/reference.md](skills/osmatrix/reference.md) for every option, including adding `ssh` guests such as a real Mac on your network.
+`osmatrix config` prints the effective config and its file path. See [skills/osmatrix-setup/references/reference.md](skills/osmatrix-setup/references/reference.md) for every option, including adding `ssh` guests such as a real Mac on your network.
 
 ## What local runs don't reproduce
 
@@ -154,21 +164,19 @@ osmatrix runs on your machine, with no telemetry or accounts, and does not indep
 ## Repository structure
 
 ```
-osmatrix/
-├── src/, assets/                      # the CLI + MCP server (npm package "osmatrix")
-├── skills/osmatrix/                    # canonical skill: edit this one (skills.sh reads it here)
-├── .claude-plugin/marketplace.json    # Claude marketplace  → ./claude
-├── .cursor-plugin/marketplace.json    # Cursor marketplace  → cursor
-├── .agents/plugins/marketplace.json   # Codex marketplace   → ./codex
-├── claude/   .claude-plugin/plugin.json, .mcp.json, skills/ (generated)
-├── cursor/   .cursor-plugin/plugin.json, mcp.json, skills/ (generated)
-├── codex/    plugin.json (Agent Plugins 1.0.0), mcp.json, skills/ (generated)
-└── scripts/  sync-skills.mjs, validate-skills.mjs
+osmatrix/                              # the repository root is the plugin, for every client
+├── src/, assets/                      # the CLI + MCP server (npm package "osmatrix"); assets/logo.* is the plugin artwork
+├── skills/osmatrix-{ci,guests,setup}/ # the skills, each self-contained (SKILL.md + references/)
+├── .claude-plugin/                    # Claude Code: marketplace.json → ./, plugin.json
+├── .cursor-plugin/                    # Cursor:      marketplace.json → ./, plugin.json
+├── .agents/plugins/marketplace.json   # Codex:       marketplace    → ./
+├── plugin.json, mcp.json              # Agent Plugins 1.0.0 manifest (Codex) and the MCP config all clients share
+└── scripts/  sync-manifests.mjs, validate-skills.mjs, validate-plugins.mjs, package-plugins.mjs
 ```
 
-Each client reads only its own marketplace and plugin directory. That's why every plugin ships its own copy of the skill. After editing `skills/` or bumping the version in `package.json`, run `npm run sync`. CI runs `npm run validate`, which fails if a copy or a manifest version has drifted.
+Each client reads its own manifest at the root; `skills/`, `mcp.json` and the artwork are shared, so nothing is generated. After bumping the version in `package.json`, run `npm run sync`. CI runs `npm run validate`, which fails if a manifest version or the MCP pin has drifted, and checks every skill with the clients' own validators.
 
-Plugin artwork has two canonical files in `assets/`: the shaded vector `logo.svg` and its raster render `logo.png`. Both include a rounded navy tile with transparency outside its rounded corners. `npm run sync` distributes both formats to every client; `npm run validate` rejects missing or different copies.
+Nothing else at the root may use a name a client discovers as a plugin component: no `CLAUDE.md`, `bin/`, `commands/`, `agents/` or `hooks/`.
 
 ## Releasing
 
@@ -211,7 +219,7 @@ Contributions are welcome under the MIT license; see [CONTRIBUTING.md](CONTRIBUT
 npm ci
 npm test          # unit tests (node:test, TypeScript run directly by Node)
 npm run build     # tsc -> dist/
-npm run validate  # skill sync, versions, listing limits, assets and MCP commands
+npm run validate  # skills, manifest versions, listing limits, assets and MCP commands
 npm run check     # typecheck + tests + validate
 npm run ci:local  # this repo's ci.yml via act: Linux on Docker, Windows/macOS in guests (ci:local:linux: Linux only)
 npm run release:rehearse # release.yml for v<version>, publishing as a dry run
@@ -238,7 +246,7 @@ npm run package:plugins
 | Client | Install from `artifacts/` |
 |---|---|
 | Claude Code | `/plugin marketplace add ./artifacts`, then `/plugin install osmatrix@fritztech-local` |
-| Codex | `codex plugin marketplace add ./artifacts`, then `codex plugin add osmatrix@fritztech-local` |
+| Codex | `codex plugin marketplace add ./artifacts`, then enable **osmatrix** under Plugins |
 | Cursor | Add the local `artifacts/` folder as a marketplace (plugin cards may lack the logo for local marketplaces). If you switch from the npm-backed plugin, toggle its MCP server off and on. |
 
 Each client's plugin is also archived as `artifacts/osmatrix-<client>-<version>.tar.gz` (one `osmatrix/` directory). Node.js 22.18+ and npm are required, and npx downloads runtime dependencies on first launch. Docker and virtualization requirements depend on which guests you use. Re-run `npm run package:plugins` after changes, then refresh the marketplace in your client.

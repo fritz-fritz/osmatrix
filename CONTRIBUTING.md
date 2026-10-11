@@ -23,7 +23,7 @@ gh extension install github/gh-codeql && gh codeql set-version latest && gh code
 git clone https://github.com/fritz-fritz/osmatrix && cd osmatrix
 npm ci
 npm test            # unit + MCP tests (node:test; TypeScript runs directly)
-npm run validate    # skill copies, artwork, manifests, listing limits, MCP commands
+npm run validate    # skills, manifest versions, listing limits, MCP commands
 npm run build       # tsc -> dist/
 node src/cli.ts doctor
 ```
@@ -66,18 +66,18 @@ Query packs are downloaded and cached on first use.
 | `src/ci/` | workflow planning (matrix expansion, routing) and the act runner |
 | `src/mcp.ts`, `src/cli.ts` | the MCP server and the CLI, thin layers over the same functions |
 | `assets/` | guest provisioning scripts and the container image (shipped in the npm package) |
-| `skills/osmatrix/` | the canonical agent skill |
-| `claude/`, `cursor/`, `codex/` | per-client plugins; their `skills/` copies are generated |
-| `scripts/` | skill/artwork sync, plugin validation and packaging |
+| `skills/` | the agent skills: `osmatrix-ci`, `osmatrix-guests`, `osmatrix-setup`, each with its own `references/` |
+| `.claude-plugin/`, `.cursor-plugin/`, `.agents/plugins/`, `plugin.json`, `mcp.json` | per-client manifests; the repository root is the plugin |
+| `scripts/` | manifest sync, skill and plugin validation, packaging |
 
 ## Guidelines
 
 - **Match the surrounding code:** TypeScript run directly by Node (erasable syntax only), small focused modules, comments that explain *why*.
-- **Every MCP tool is also a CLI command.** Add both, and document new tools in `skills/osmatrix/reference.md`.
+- **Every MCP tool is also a CLI command.** Add both, and document new tools in the matching skill's `references/reference.md`.
 - **New MCP tools need an entry in `TOOL_ANNOTATIONS`** (`src/mcp.ts`), with honest `readOnlyHint` / `destructiveHint` / `openWorldHint` values. The MCP test fails without one.
 - **Cross-platform:** no shelling out through bash on the host; spawn with argument arrays. Paths come from `src/core/paths.ts`. Never assume a port is free.
-- **Edit the skill only in `skills/`,** then run `npm run sync`. CI fails if the client copies drift.
-- **Keep the skill accurate.** Agents follow it literally, so describe real behavior and limits.
+- **Keep each skill self-contained** (links only inside its directory, name prefixed `osmatrix-`): Codex, Cursor and skills.sh install skills flat. `npm run validate` checks this.
+- **Keep the skills accurate.** Agents follow them literally, so describe real behavior and limits.
 - **Add or update tests** in `test/` for behavior changes.
 - **Pin GitHub Actions to full commit SHAs** with a version comment, like `actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1`. Tags can be moved; commits can't. `npm run validate` rejects unpinned actions, and Dependabot keeps the SHAs and comments current. npm tools that workflows run belong in `.github/ci-tools/package.json`. They're pinned by its lockfile, updated by Dependabot, and installed with `npm ci --prefix .github/ci-tools`, never with `npx -y` or `npm install <pkg>@<version>`, which the validator also rejects.
 

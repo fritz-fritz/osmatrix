@@ -34,7 +34,17 @@ export const resourcePrefix = home ? `osmatrix-${createHash("sha256").update(pat
 /** Package root (works from both src/ and dist/). */
 export const pkgRoot = fileURLToPath(new URL("../../", import.meta.url));
 export const assetsDir = path.join(pkgRoot, "assets");
-export const skillDir = path.join(pkgRoot, "skills", "osmatrix");
+export const skillsDir = path.join(pkgRoot, "skills");
+/** Skill directory names shipped in this package, so adding a skill needs no code change. */
+export function skillNames(): string[] {
+  return fs
+    .readdirSync(skillsDir, { withFileTypes: true })
+    .filter((e) => e.isDirectory() && fs.existsSync(path.join(skillsDir, e.name, "SKILL.md")))
+    .map((e) => e.name)
+    .sort();
+}
+/** Skill names earlier versions installed; removed on install/uninstall so they don't trigger next to the new ones. */
+export const LEGACY_SKILL_NAMES = ["osmatrix"];
 
 export function ensureDir(dir: string): string {
   fs.mkdirSync(dir, { recursive: true });

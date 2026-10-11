@@ -1,16 +1,18 @@
 #!/usr/bin/env node
 // Checks that JSON Schema cannot express: listing limits, referenced files, and MCP commands, for the
-// Claude, Cursor and Codex plugins (as committed, or as bundled by package-plugins.mjs).
+// Claude, Cursor and Codex plugins. The repository root is the plugin for every client (each reads its
+// own manifest there); package-plugins.mjs builds bundled copies that are validated the same way.
 import { lstat, readFile } from "node:fs/promises";
 import { dirname, isAbsolute, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { skillNames } from "./validate-skills.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 export const readJson = async (file) => JSON.parse(await readFile(file, "utf8"));
 
 /** Per-client layout: manifest, MCP config file, logo fields, and the plugin-root placeholder the host expands. */
 export const CLIENTS = {
-  claude: { manifest: ".claude-plugin/plugin.json", mcp: ".mcp.json", rootVar: "${CLAUDE_PLUGIN_ROOT}", logos: (m) => [m.icon] },
+  claude: { manifest: ".claude-plugin/plugin.json", mcp: "mcp.json", rootVar: "${CLAUDE_PLUGIN_ROOT}", logos: (m) => [m.icon] },
   cursor: { manifest: ".cursor-plugin/plugin.json", mcp: "mcp.json", rootVar: "${CURSOR_PLUGIN_ROOT}", logos: (m) => [m.logo] },
   codex: {
     manifest: "plugin.json",
@@ -22,6 +24,9 @@ export const CLIENTS = {
     },
   },
 };
+
+/** Files every client's bundled plugin carries (plus that client's manifest): what a client reads from the repository. */
+export const BUNDLE_FILES = ["skills", "assets/logo.svg", "assets/logo.png", "assets/social-preview.svg", "README.md", "LICENSE", "PRIVACY.md", "TERMS.md", "mcp.json"];
 
 /** The MCP args a plugin must use: the npm major pin, or the runtime tarball bundled inside the plugin. */
 export function expectedMcpArgs(client, version, bundled) {
@@ -122,8 +127,16 @@ export async function validatePlugin(client, dir, { version, bundled = false } =
       if ((await containedFile(dir, logo)).size > 5 * 1024 * 1024) throw new Error(`${logo} exceeds 5 MiB`);
       await checkSquareIcon(resolve(dir, logo));
     }
-    await containedFile(dir, "skills/osmatrix/SKILL.md");
-    await containedFile(dir, "skills/osmatrix/reference.md");
+    // Claude's default MCP file is .mcp.json; the manifest must point it at the shared mcp.json.
+    if (client === "claude" && manifest.mcpServers !== "./mcp.json") throw new Error('manifest must set "mcpServers": "./mcp.json"');
+    // Every skill of the canonical set, each self-contained.
+    const skills = await skillNames();
+    const shipped = await skillNames(resolve(dir, "skills")).catch(() => []);
+    if (JSON.stringify(shipped) !== JSON.stringify(skills)) throw new Error(`skills/ must contain exactly ${skills.join(", ")} (found ${shipped.join(", ") || "none"})`);
+    for (const skill of skills) {
+      await containedFile(dir, `skills/${skill}/SKILL.md`);
+      await containedFile(dir, `skills/${skill}/references/reference.md`);
+    }
     const server = (await readJson(resolve(dir, spec.mcp))).mcpServers?.osmatrix;
     if (server?.type !== "stdio" || server.command !== "npx") throw new Error("osmatrix must use the npx stdio transport");
     if (JSON.stringify(server.args) !== JSON.stringify(expectedMcpArgs(client, version, bundled))) {
@@ -141,7 +154,7 @@ export async function validatePlugin(client, dir, { version, bundled = false } =
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   try {
     const { version } = await readJson(resolve(root, "package.json"));
-    for (const client of Object.keys(CLIENTS)) await validatePlugin(client, resolve(root, client), { version });
+    for (const client of Object.keys(CLIENTS)) await validatePlugin(client, root, { version });
     // Codex marketplace entries need installation/authentication policy and a category.
     for (const p of (await readJson(resolve(root, ".agents/plugins/marketplace.json"))).plugins) {
       const pol = p.policy ?? {};

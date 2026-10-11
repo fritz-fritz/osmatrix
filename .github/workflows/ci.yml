@@ -18,7 +18,7 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 24
-      - name: Skills identical across clients, manifest versions match package.json
+      - name: Skills valid, manifest versions match package.json
         run: npm run validate
       - name: Install CI tools (pinned by .github/ci-tools/package-lock.json, updated by Dependabot)
         run: |
@@ -26,15 +26,17 @@ jobs:
           echo "$GITHUB_WORKSPACE/.github/ci-tools/node_modules/.bin" >> "$GITHUB_PATH"
       - name: Claude plugin + marketplace manifests
         run: |
-          claude plugin validate --strict claude
+          claude plugin validate --strict .claude-plugin/plugin.json
           claude plugin validate --strict .claude-plugin/marketplace.json
       - name: Codex manifests (Agent Plugins 1.0.0 schemas)
         run: node scripts/validate-codex-schemas.mjs
-      - name: skills.sh discovers exactly one skill
+      - name: skills.sh discovers every skill
         # CI=true makes the skills CLI colorize its output; strip ANSI codes before matching.
         env:
           NO_COLOR: "1"
-        run: skills add . --list | sed 's/\x1b\[[0-9;]*m//g' | grep -q "Found 1 skill"
+        run: |
+          n=$(ls -d skills/*/SKILL.md | wc -l)
+          skills add . --list | sed 's/\x1b\[[0-9;]*m//g' | grep -q "Found $n skills"
       - name: Bundled plugins build, validate, and their MCP servers start (Claude, Cursor, Codex)
         run: |
           npm ci
