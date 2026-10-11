@@ -21,7 +21,7 @@ Claude Code / Cursor / Codex
   ├─ skills (SKILL.md ×3): when and how
   └─ MCP server (osmatrix mcp, stdio) ─┐
 human / scripts ── osmatrix CLI ───────┴─ core ─┬─ ubuntu  : act runner image + sshd (container)
-                                               ├─ windows : dockur/windows VM (KVM)
+                                               ├─ windows : dockur/windows VM (KVM) | QEMU+HVF (Apple Silicon)
                                                ├─ macos   : dockur/macos VM (KVM) | tart (Apple Silicon)
                                                └─ any     : existing machine over ssh
 ```
@@ -87,7 +87,9 @@ Options:
 |---|---|---|---|
 | Linux x86_64 with KVM | Docker | dockur (KVM) | dockur (KVM), see licensing note |
 | Windows 11 + Docker Desktop (WSL2, nested virtualization) | Docker | dockur | dockur (best effort) |
-| macOS Apple Silicon | Docker | via `ssh` guest only | tart |
+| macOS Apple Silicon | Docker | Windows 11 on ARM: QEMU + Hypervisor.framework (prototype) | tart |
+
+On Apple Silicon, the Windows guest runs on the Mac's own QEMU (`brew install qemu`) with Hypervisor.framework. Docker is still needed once: setup runs dockur's `windows-arm` image to download Windows 11 on ARM and build the unattended install media, then boots them with the host's QEMU. The guest is Windows on ARM, so x64-only tools run under Windows' own emulation; osmatrix installs native ARM64 builds of PowerShell, Git, Node.js, Python and act.
 
 Run `osmatrix doctor` to see what this host can do. It also needs an OpenSSH client and `tar`, both built into current Windows, macOS and Linux. `act` is downloaded (checksum-verified) on first use if it isn't on PATH.
 
