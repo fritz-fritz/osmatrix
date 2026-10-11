@@ -232,15 +232,18 @@ export async function worker(repo: string, id: string): Promise<void> {
 }
 
 /**
- * What a leg must have to itself while it runs. act names job containers (and their volumes) after
- * the workflow name and job id only, so two runs executing the same job at once, even from different
- * checkouts, would replace each other's container. A guest has one work directory per repo name and
+ * What a leg must have to itself while it runs. act names job containers (and their volumes)
+ * `act-<workflow name>-<job name>`, canonicalized, with nothing from the checkout or the run, so two
+ * runs of a workflow with that name, even from different checkouts or osmatrix installs, could replace
+ * each other's containers. Job names can be expressions and needed matrix jobs get suffixes, so the
+ * whole workflow is locked, canonicalized as act does. A guest has one work directory per repo name and
  * one desktop, so its legs take turns too.
  */
 export function legLockKeys(leg: Leg): string[] {
   if (leg.target !== "host") return [`guest:${leg.target}`];
-  const wf = leg.workflowName ?? leg.workflow;
-  return [leg.job, ...(leg.needsAll ?? leg.needs)].map((j) => `act-job:${wf}/${j}`);
+  // act falls back to the workflow's file name.
+  const name = leg.workflowName ?? path.posix.basename(leg.workflow);
+  return [`host:act-workflow:${`act-${name}`.replace(/[^a-zA-Z0-9]/g, "-").replaceAll("--", "-")}`];
 }
 
 async function runLeg(repo: string, dir: string, cfg: Config, leg: Leg, sf: StatusFile): Promise<void> {
@@ -249,7 +252,7 @@ async function runLeg(repo: string, dir: string, cfg: Config, leg: Leg, sf: Stat
   const log = fs.createWriteStream(logFile, { flags: "a" });
   let waited: string | undefined;
   const release = await acquireLocks(legLockKeys(leg), { pid: process.pid, run: sf.s.id, repo, leg: leg.id }, (key, h) => {
-    waited = key.startsWith("guest:") ? `guest ${leg.target}` : `act job ${key.slice("act-job:".length)}`;
+    waited = key.startsWith("guest:") ? `guest ${leg.target}` : `workflow "${leg.workflowName ?? leg.workflow}" (act containers)`;
     r.waitingFor = `${waited} is in use by run ${h.run} (leg ${h.leg}${h.repo === repo ? "" : `, ${h.repo}`})`;
     log.write(`[osmatrix] waiting: ${r.waitingFor}\n`);
     sf.save();
