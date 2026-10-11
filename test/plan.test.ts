@@ -3,7 +3,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
-import { expandMatrix, plan, substitute } from "../src/ci/plan.ts";
+import YAML from "yaml";
+import { expandMatrix, plan, setDefaultRunShell, substitute } from "../src/ci/plan.ts";
 import { defaultConfig, mergeConfig } from "../src/core/config.ts";
 
 test("expandMatrix: cartesian product", () => {
@@ -160,4 +161,73 @@ jobs:
   assert.equal(plan(repo, linuxCfg(), { job: "gate" }).legs[0].skip, undefined);
   // With only Linux legs selected, unit's Windows leg is filtered out but unit still runs on Linux.
   assert.match(plan(repo, linuxCfg(), { only: ["linux"] }).legs.find((l) => l.job === "gate")!.skip ?? "", /already run/);
+});
+
+test("Windows legs list their Linux needs, also when planned with --job", () => {
+  const repo = tmpRepo(`
+on: push
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    steps: [{ run: echo }]
+  gw:
+    needs: plan
+    strategy: { matrix: { os: [ubuntu-latest, macos-latest, windows-latest] } }
+    runs-on: \${{ matrix.os }}
+    steps: [{ run: echo }]
+`);
+  const legs = plan(repo, linuxCfg(), { job: "gw" }).legs;
+  const win = legs.find((l) => l.targetOs === "windows")!;
+  assert.deepEqual(win.linuxNeeds, ["plan"]);
+  assert.ok(win.warnings.some((w) => w.includes("Git Bash")));
+  const mac = legs.find((l) => l.targetOs === "macos")!;
+  assert.ok(mac.warnings.some((w) => w.includes(`needs "plan" runs on another OS`)));
+  const linux = legs.find((l) => l.targetOs === "linux")!;
+  assert.equal(linux.linuxNeeds, undefined);
+  assert.ok(!linux.warnings.some((w) => w.includes("needs")));
+});
+
+test("setDefaultRunShell gives jobs a run shell unless one is set", () => {
+  const src = `# CI
+on: push
+jobs:
+  plan: # gate
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          set -euo pipefail
+          echo ok
+  pinned:
+    runs-on: ubuntu-latest
+    defaults: { run: { shell: sh } }
+    steps: [{ run: echo }]
+  called:
+    uses: ./.github/workflows/x.yml
+`;
+  const { text, changed } = setDefaultRunShell(src, ["plan", "pinned", "called", "missing"], "'C:/Git/bin/bash.exe' -e {0}");
+  assert.deepEqual(changed, ["plan"]);
+  assert.ok(text.includes("# gate") && text.includes("set -euo pipefail"));
+  const jobs = (YAML.parse(text) as { jobs: Record<string, { defaults?: { run: { shell: string } } }> }).jobs;
+  assert.equal(jobs.plan.defaults?.run.shell, "'C:/Git/bin/bash.exe' -e {0}");
+  assert.equal(jobs.pinned.defaults?.run.shell, "sh");
+  const wfDefault = "defaults: { run: { shell: bash } }\n" + src;
+  assert.deepEqual(setDefaultRunShell(wfDefault, ["plan"], "x").changed, []);
+});
+
+test("needed jobs with legs on Linux and other OSes are not given a bash default", () => {
+  const repo = tmpRepo(`
+on: push
+jobs:
+  build:
+    strategy: { matrix: { os: [ubuntu-latest, windows-latest] } }
+    runs-on: \${{ matrix.os }}
+    steps: [{ run: echo }]
+  ship:
+    needs: build
+    runs-on: windows-latest
+    steps: [{ run: echo }]
+`);
+  const ship = plan(repo, linuxCfg(), { job: "ship" }).legs[0];
+  assert.deepEqual(ship.linuxNeeds, []);
+  assert.ok(ship.warnings.some((w) => w.includes(`needs "build" runs on Linux and other OSes`)));
 });

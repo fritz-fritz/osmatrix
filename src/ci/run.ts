@@ -11,7 +11,7 @@ import { cliEntry, ensureDir } from "../core/paths.ts";
 import { isAlive, spawnDetached } from "../core/proc.ts";
 import { commandLine, freePort, push as sshPush, quoteFor, sshArgs, sshBin, sshExec, withCwd, type Endpoint } from "../core/ssh.ts";
 import { getGuest, readyEndpoint, waitReady } from "../env.ts";
-import { plan as makePlan, type Leg, type Plan, type PlanFilter } from "./plan.ts";
+import { plan as makePlan, setDefaultRunShell, type Leg, type Plan, type PlanFilter } from "./plan.ts";
 
 export type LegState = "pending" | "running" | "success" | "failure" | "skipped" | "error";
 
@@ -305,6 +305,7 @@ async function runLeg(repo: string, dir: string, cfg: Config, leg: Leg, sf: Stat
         const init = "git init -q; git add -A; git -c user.name=osmatrix -c user.email=osmatrix@localhost commit -qm osmatrix";
         await sshExec(ep, withCwd(ep.shell, remote, init), { timeoutMs: 120_000 });
       }
+      if (g.cfg.os === "windows" && leg.linuxNeeds?.length) await bashForLinuxNeeds(ep, repo, remote, leg, r, log);
       const args = [event, ...commonActArgs(leg), "--artifact-server-path", ".osmatrix-artifacts"];
       for (const l of new Set([...leg.runsOn, ...(leg.needsLabels ?? [])])) args.push("-P", `${l}=-self-hosted`);
       if (sf.s.options.eventPayload) {
@@ -380,18 +381,49 @@ function resolveSecretFile(repo: string, explicit?: string): string | undefined 
   return undefined;
 }
 
+/**
+ * act runs a Windows leg's Linux needs in the VM, where run: steps without a shell: default to pwsh.
+ * GitHub would run them with bash, so point those jobs at Git Bash in the guest's copy of the workflow.
+ */
+async function bashForLinuxNeeds(ep: Endpoint, repo: string, remote: string, leg: Leg, r: LegResult, log: fs.WriteStream) {
+  // Git Bash's launcher (bin\bash.exe) sets up PATH; System32\bash.exe would be WSL, so don't rely on PATH.
+  const find = `$g = Get-Command git -ErrorAction SilentlyContinue; $c = @('C:\\Program Files\\Git\\bin\\bash.exe'); if ($g) { $c = @((Join-Path (Split-Path (Split-Path $g.Source)) 'bin\\bash.exe'), (Join-Path (Split-Path (Split-Path (Split-Path $g.Source))) 'bin\\bash.exe')) + $c }; $c | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1`;
+  const bash = (await sshExec(ep, powershell(ep, find), { timeoutMs: 60_000 })).stdout.trim().replace(/\\/g, "/");
+  if (!bash) {
+    r.warnings.push(`Git Bash not found in the guest; Linux needs (${leg.linuxNeeds!.join(", ")}) run their run: steps under pwsh`);
+    return;
+  }
+  // GitHub's default for a run: step without shell: on Linux is `bash -e {0}`. Double quotes: act splits
+  // the string to find the program, but on Windows hands the raw string to CreateProcess as the command line.
+  const { text, changed } = setDefaultRunShell(fs.readFileSync(path.join(repo, leg.workflow), "utf8"), leg.linuxNeeds!, `"${bash}" -e {0}`);
+  if (!changed.length) return;
+  await writeRemoteFile(ep, remote, leg.workflow, text);
+  log.write(`[osmatrix] Linux needs ${changed.join(", ")}: run: steps without shell: use ${bash} in this leg\n`);
+}
+
+/**
+ * A PowerShell script as a command for a Windows endpoint. Guests whose ssh shell is cmd get Windows
+ * PowerShell with the script encoded, which sidesteps cmd's quoting.
+ */
+export function powershell(ep: Pick<Endpoint, "shell">, script: string): string {
+  if (ep.shell === "pwsh") return script;
+  return `powershell -NoProfile -NonInteractive -EncodedCommand ${Buffer.from(script, "utf16le").toString("base64")}`;
+}
+
 async function writeRemoteFile(ep: Endpoint, dir: string, name: string, content: string) {
   const target = `${dir}/${name}`;
+  // PowerShell reads stdin in the console's code page; base64 keeps non-ASCII content intact.
   const cmd =
-    ep.shell === "pwsh"
-      ? `[IO.File]::WriteAllText((Join-Path $HOME ${quoteFor("pwsh", target)}), [Console]::In.ReadToEnd())`
-      : `umask 077; cat > ${quoteFor(ep.shell, target)}`;
-  const r = await sshExec(ep, cmd, { input: content, timeoutMs: 60_000 });
+    ep.shell === "posix"
+      ? `umask 077; cat > ${quoteFor("posix", target)}`
+      : powershell(ep, `[IO.File]::WriteAllBytes((Join-Path $HOME ${quoteFor("pwsh", target)}), [Convert]::FromBase64String([Console]::In.ReadToEnd()))`);
+  const input = ep.shell === "posix" ? content : Buffer.from(content, "utf8").toString("base64");
+  const r = await sshExec(ep, cmd, { input, timeoutMs: 60_000 });
   if (r.code !== 0) throw new Error(`failed to write ${target}: ${r.stderr}`);
 }
 
 function removeCmd(ep: Endpoint, file: string): string {
-  return ep.shell === "pwsh" ? `Remove-Item -Force -LiteralPath ${quoteFor("pwsh", file)}` : `rm -f ${quoteFor(ep.shell, file)}`;
+  return ep.shell === "posix" ? `rm -f ${quoteFor("posix", file)}` : powershell(ep, `Remove-Item -Force -LiteralPath ${quoteFor("pwsh", file)}`);
 }
 
 function streamProcess(cmd: string, args: string[], cwd: string | undefined, parser: ActJsonParser, timeoutMs: number): Promise<number> {
