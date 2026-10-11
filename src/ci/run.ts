@@ -402,7 +402,7 @@ function resolveSecretFile(repo: string, explicit?: string): string | undefined 
 async function bashForLinuxNeeds(ep: Endpoint, repo: string, remote: string, leg: Leg, r: LegResult, log: fs.WriteStream) {
   // Git Bash's launcher (bin\bash.exe) sets up PATH; System32\bash.exe would be WSL, so don't rely on PATH.
   const find = `$g = Get-Command git -ErrorAction SilentlyContinue; $c = @('C:\\Program Files\\Git\\bin\\bash.exe'); if ($g) { $c = @((Join-Path (Split-Path (Split-Path $g.Source)) 'bin\\bash.exe'), (Join-Path (Split-Path (Split-Path (Split-Path $g.Source))) 'bin\\bash.exe')) + $c }; $c | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1`;
-  const bash = (await sshExec(ep, find, { timeoutMs: 60_000 })).stdout.trim().replace(/\\/g, "/");
+  const bash = (await sshExec(ep, powershell(ep, find), { timeoutMs: 60_000 })).stdout.trim().replace(/\\/g, "/");
   if (!bash) {
     r.warnings.push(`Git Bash not found in the guest; Linux needs (${leg.linuxNeeds!.join(", ")}) run their run: steps under pwsh`);
     return;
@@ -415,20 +415,29 @@ async function bashForLinuxNeeds(ep: Endpoint, repo: string, remote: string, leg
   log.write(`[osmatrix] Linux needs ${changed.join(", ")}: run: steps without shell: use ${bash} in this leg\n`);
 }
 
+/**
+ * A PowerShell script as a command for a Windows endpoint. Guests whose ssh shell is cmd get Windows
+ * PowerShell with the script encoded, which sidesteps cmd's quoting.
+ */
+export function powershell(ep: Pick<Endpoint, "shell">, script: string): string {
+  if (ep.shell === "pwsh") return script;
+  return `powershell -NoProfile -NonInteractive -EncodedCommand ${Buffer.from(script, "utf16le").toString("base64")}`;
+}
+
 async function writeRemoteFile(ep: Endpoint, dir: string, name: string, content: string) {
   const target = `${dir}/${name}`;
-  // pwsh reads stdin in the console's code page; base64 keeps non-ASCII content intact.
+  // PowerShell reads stdin in the console's code page; base64 keeps non-ASCII content intact.
   const cmd =
-    ep.shell === "pwsh"
-      ? `[IO.File]::WriteAllBytes((Join-Path $HOME ${quoteFor("pwsh", target)}), [Convert]::FromBase64String([Console]::In.ReadToEnd()))`
-      : `umask 077; cat > ${quoteFor(ep.shell, target)}`;
-  const input = ep.shell === "pwsh" ? Buffer.from(content, "utf8").toString("base64") : content;
+    ep.shell === "posix"
+      ? `umask 077; cat > ${quoteFor("posix", target)}`
+      : powershell(ep, `[IO.File]::WriteAllBytes((Join-Path $HOME ${quoteFor("pwsh", target)}), [Convert]::FromBase64String([Console]::In.ReadToEnd()))`);
+  const input = ep.shell === "posix" ? content : Buffer.from(content, "utf8").toString("base64");
   const r = await sshExec(ep, cmd, { input, timeoutMs: 60_000 });
   if (r.code !== 0) throw new Error(`failed to write ${target}: ${r.stderr}`);
 }
 
 function removeCmd(ep: Endpoint, file: string): string {
-  return ep.shell === "pwsh" ? `Remove-Item -Force -LiteralPath ${quoteFor("pwsh", file)}` : `rm -f ${quoteFor(ep.shell, file)}`;
+  return ep.shell === "posix" ? `rm -f ${quoteFor("posix", file)}` : powershell(ep, `Remove-Item -Force -LiteralPath ${quoteFor("pwsh", file)}`);
 }
 
 function streamProcess(cmd: string, args: string[], cwd: string | undefined, parser: ActJsonParser, timeoutMs: number): Promise<number> {

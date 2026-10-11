@@ -213,3 +213,21 @@ jobs:
   const wfDefault = "defaults: { run: { shell: bash } }\n" + src;
   assert.deepEqual(setDefaultRunShell(wfDefault, ["plan"], "x").changed, []);
 });
+
+test("needed jobs with legs on Linux and other OSes are not given a bash default", () => {
+  const repo = tmpRepo(`
+on: push
+jobs:
+  build:
+    strategy: { matrix: { os: [ubuntu-latest, windows-latest] } }
+    runs-on: \${{ matrix.os }}
+    steps: [{ run: echo }]
+  ship:
+    needs: build
+    runs-on: windows-latest
+    steps: [{ run: echo }]
+`);
+  const ship = plan(repo, linuxCfg(), { job: "ship" }).legs[0];
+  assert.deepEqual(ship.linuxNeeds, []);
+  assert.ok(ship.warnings.some((w) => w.includes(`needs "build" runs on Linux and other OSes`)));
+});

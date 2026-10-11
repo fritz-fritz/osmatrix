@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { ActJsonParser, actDifferenceHints } from "../src/ci/run.ts";
+import { ActJsonParser, actDifferenceHints, powershell } from "../src/ci/run.ts";
 import { defaultGuests, labelMatches, mergeConfig, defaultConfig } from "../src/core/config.ts";
 import { commandLine, quotePosix, quotePwsh, withCwd } from "../src/core/ssh.ts";
 import { encodePng } from "../src/gui.ts";
@@ -76,4 +76,12 @@ test("failures that mention act's file-command paths get an act-difference hint"
   assert.equal(actDifferenceHints("bad path C:/Users/u/.cache/act/1f2e/act/workflow/envs.txt").length, 1);
   // act's own step script paths live in the same directory and are not file commands.
   assert.deepEqual(actDifferenceHints("🐳 docker exec cmd=[bash -e /var/run/act/workflow/resolve]\nexit 1"), []);
+});
+
+test("PowerShell scripts run as-is on pwsh endpoints and encoded on cmd ones", () => {
+  const script = `Remove-Item -Force -LiteralPath 'a b/"c"' & echo ü`;
+  assert.equal(powershell({ shell: "pwsh" }, script), script);
+  const m = /^powershell -NoProfile -NonInteractive -EncodedCommand ([A-Za-z0-9+/=]+)$/.exec(powershell({ shell: "cmd" }, script));
+  assert.ok(m);
+  assert.equal(Buffer.from(m[1], "base64").toString("utf16le"), script);
 });

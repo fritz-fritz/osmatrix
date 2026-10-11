@@ -266,9 +266,15 @@ export function plan(repo: string, cfg: Config, filter: PlanFilter = {}): Plan {
       // needs: across OS boundaries can't be honored when legs run in separate environments.
       if (!leg.targetOs) continue;
       const crossOs = leg.needsAll.filter((n) => [...osOf(n)].some((o) => o !== leg.targetOs));
-      if (leg.targetOs !== "linux") leg.linuxNeeds = crossOs.filter((n) => osOf(n).has("linux"));
+      // Only jobs that target Linux alone: a job-wide shell default would also change a mixed-OS job's other legs.
+      const linuxOnly = (n: string) => [...osOf(n)].every((o) => o === "linux");
+      if (leg.targetOs !== "linux") leg.linuxNeeds = crossOs.filter(linuxOnly);
       for (const n of crossOs) {
-        if (leg.targetOs === "windows" && leg.linuxNeeds?.includes(n)) {
+        if (leg.targetOs === "windows" && osOf(n).has("linux") && !linuxOnly(n)) {
+          leg.warnings.push(
+            `needs "${n}" runs on Linux and other OSes; act runs all of its matrix legs inside this Windows leg, where its run: steps without a shell: use pwsh, so its Linux legs will likely fail. Check it on its own legs instead`,
+          );
+        } else if (leg.targetOs === "windows" && leg.linuxNeeds?.includes(n)) {
           leg.warnings.push(
             `needs "${n}" targets Linux; act runs it inside this Windows leg. osmatrix runs its run: steps without a shell: under Git Bash, as GitHub would use bash, but Linux-only tools (apt-get, docker, …) fail there and outputs/artifacts may differ`,
           );
