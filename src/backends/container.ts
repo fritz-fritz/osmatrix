@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { DEFAULT_LINUX_IMAGE, guestShell, type GuestConfig } from "../core/config.ts";
+import { assertLocalGuestsReachable, dockerReach, localGuestBlockReason } from "../core/nesting.ts";
 import { assetsDir, resourcePrefix } from "../core/paths.ts";
 import { run } from "../core/proc.ts";
 import { ensureKey, sshProbe, type Endpoint } from "../core/ssh.ts";
@@ -35,7 +36,9 @@ export class ContainerBackend implements Backend {
 
   async supported(): Promise<Support> {
     const r = await run(dockerBin(), ["version", "--format", "{{.Server.Version}}"]).catch(() => undefined);
-    return r && r.code === 0 ? { ok: true } : { ok: false, reason: "docker daemon not reachable" };
+    if (!r || r.code !== 0) return { ok: false, reason: "docker daemon not reachable" };
+    const blocked = localGuestBlockReason(await dockerReach(), this.cfg.os);
+    return blocked ? { ok: false, reason: blocked } : { ok: true };
   }
 
   async status(): Promise<GuestStatus> {
@@ -70,6 +73,7 @@ export class ContainerBackend implements Backend {
   }
 
   async up(): Promise<void> {
+    await assertLocalGuestsReachable(this.cfg.os);
     const st = await containerState(this.container);
     if (st === "running") return;
     let image: string | undefined;
