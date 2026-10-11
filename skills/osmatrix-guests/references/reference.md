@@ -9,6 +9,7 @@ Every command accepts `--json`. Exit code is non-zero on errors (for `exec`, the
 | `env_status` | `osmatrix status [guest]` |
 | `env_up` | `osmatrix up <guest> [--wait [sec]]` |
 | `env_down` | `osmatrix down <guest>` |
+| `env_configure` | `osmatrix configure <guest> [--cpus n] [--memory 8G] [--disk 96G] [--apply]` |
 | `env_reset` | `osmatrix reset <guest> [--wait [sec]]` |
 | `env_snapshot` | `osmatrix snapshot <guest>` |
 | `env_exec` | `osmatrix exec <guest> [--cwd dir] [--timeout sec] [--background] -- <command...>` |

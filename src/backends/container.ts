@@ -79,6 +79,9 @@ export class ContainerBackend implements Backend {
     let image: string | undefined;
     if (st === "stopped") {
       try {
+        // cpus/memory may have changed since the container was created.
+        const limits = this.limitArgs();
+        if (limits.length) await docker(["update", ...limits, this.container]);
         await docker(["start", this.container]);
         return;
       } catch (e) {
@@ -109,10 +112,19 @@ export class ContainerBackend implements Backend {
       "-e", `AUTHORIZED_KEY=${publicKey}`,
       "--label", "osmatrix.guest=" + this.cfg.name,
     ];
-    if (this.cfg.cpus) args.push("--cpus", String(this.cfg.cpus));
-    if (this.cfg.memory) args.push("--memory", this.cfg.memory.toLowerCase().replace(/b$/, ""));
-    args.push(image);
+    args.push(...this.limitArgs(), image);
     await docker(args);
+  }
+
+  private limitArgs(): string[] {
+    const args: string[] = [];
+    if (this.cfg.cpus) args.push("--cpus", String(this.cfg.cpus));
+    if (this.cfg.memory) {
+      const mem = this.cfg.memory.toLowerCase().replace(/b$/, "");
+      // docker update refuses a memory limit above the existing swap limit; keep them equal (no extra swap).
+      args.push("--memory", mem, "--memory-swap", mem);
+    }
+    return args;
   }
 
   async down(): Promise<void> {

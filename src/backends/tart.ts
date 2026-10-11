@@ -63,13 +63,14 @@ export class TartBackend implements Backend {
     const me = vms.find((v) => v.Name === this.vm);
     if (!me) {
       await runOk(this.tart(), ["clone", this.cfg.image ?? "ghcr.io/cirruslabs/macos-sequoia-base:latest", this.vm], { timeoutMs: 2 * 60 * 60_000 });
-      const set = ["set", this.vm];
-      if (this.cfg.cpus) set.push("--cpu", String(this.cfg.cpus));
-      if (this.cfg.memory) set.push("--memory", String(parseSizeMb(this.cfg.memory)));
-      if (set.length > 2) await runOk(this.tart(), set);
     } else if (me.State === "running") {
       return;
     }
+    // Applied on every start, so changed cpus/memory take effect at the next boot.
+    const set = ["set", this.vm];
+    if (this.cfg.cpus) set.push("--cpu", String(this.cfg.cpus));
+    if (this.cfg.memory) set.push("--memory", String(parseSizeMb(this.cfg.memory)));
+    if (set.length > 2) await runOk(this.tart(), set);
     const log = path.join(ensureDir(paths.guestDir(this.cfg.name)), "tart-run.log");
     const pid = spawnDetached(this.tart(), ["run", "--no-graphics", this.vm], { logFile: log });
     updateState((s) => {

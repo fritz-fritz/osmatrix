@@ -237,6 +237,19 @@ program
   );
 
 program
+  .command("configure <guest>")
+  .description("Change a guest's CPUs, memory or disk size (checked against its minimums and this host)")
+  .option("--cpus <n>", "virtual CPUs", int)
+  .option("--memory <size>", 'RAM, e.g. "8G"')
+  .option("--disk <size>", 'virtual disk (dockur VMs; grow only), e.g. "96G"')
+  .option("--apply", "restart the guest now so the change takes effect")
+  .action(
+    action((g: string, o: { cpus?: number; memory?: string; disk?: string; apply?: boolean }) =>
+      env.configure(g, { cpus: o.cpus, memory: o.memory, disk: o.disk }, { apply: o.apply }),
+    ),
+  );
+
+program
   .command("screenshot <guest>")
   .description("Save a PNG of the guest display (dockur guests)")
   .option("-o, --output <file>", "output file", "screenshot.png")
