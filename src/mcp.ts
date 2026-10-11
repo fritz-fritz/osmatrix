@@ -308,7 +308,12 @@ export async function startMcp(): Promise<void> {
         secretFile: a.secret_file,
         timeoutMin: a.timeout_minutes,
       });
-      return text({ id: s.id, state: s.state, legs: s.legs.map((l) => ({ id: l.id, target: l.target, state: l.state, error: l.error })) });
+      return text({
+        id: s.id,
+        state: s.state,
+        legs: s.legs.map((l) => ({ id: l.id, target: l.target, state: l.state, error: l.error })),
+        ...(s.planWarnings.length ? { warnings: s.planWarnings } : {}),
+      });
     }),
   );
 

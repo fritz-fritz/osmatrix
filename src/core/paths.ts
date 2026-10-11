@@ -17,6 +17,11 @@ export const paths = {
   stateFile: path.join(dataDir, "state.json"),
   keyFile: path.join(dataDir, "keys", "id_ed25519"),
   binDir: path.join(dataDir, "bin"),
+  /**
+   * Locks for resources every osmatrix install on this host shares (act's job containers on the Docker
+   * daemon), so it ignores OSMATRIX_HOME.
+   */
+  hostLockDir: path.join(ep.data, "locks"),
   guestDir: (name: string) => path.join(dataDir, "guests", name),
 };
 

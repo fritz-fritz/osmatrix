@@ -365,9 +365,11 @@ function summarize(s: ReturnType<typeof ciStatus>) {
       target: l.target ?? "-",
       state: l.state,
       ...(l.durationSec !== undefined ? { sec: l.durationSec } : {}),
+      ...(l.waitingFor ? { waitingFor: l.waitingFor } : {}),
       ...(l.failedStep ? { failedStep: l.failedStep } : {}),
       ...(l.error ? { error: l.error } : {}),
     })),
+    ...(s.planWarnings.length ? { warnings: s.planWarnings } : {}),
   };
 }
 
