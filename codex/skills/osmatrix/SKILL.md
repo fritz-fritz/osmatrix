@@ -49,6 +49,7 @@ Secrets: put `KEY=value` lines in `.osmatrix/secrets` (or act's default `.secret
 
 Local green is strong evidence, not proof. Report anything that didn't run or differs from GitHub:
 - `ci_plan` warnings: `services:` on non-Linux legs, OIDC (`id-token`), `needs:` that cross OSes (act runs the needed job inside the same environment), matrices built from expressions, remote reusable workflows (skipped).
+- File-command paths: act puts `GITHUB_OUTPUT`, `GITHUB_ENV`, `GITHUB_PATH`, `GITHUB_STATE` and `GITHUB_STEP_SUMMARY` under its own `act/workflow/` directory (`/var/run/act/workflow/` in containers), not under `RUNNER_TEMP` as GitHub does. A script that refuses those paths unless they're inside `RUNNER_TEMP`/`GITHUB_WORKSPACE` fails only locally; the failed leg's `warnings` point this out. Report it as an act difference; the workflow can skip such checks when `env.ACT` is set.
 - macOS guests on Linux/Windows hosts are Intel (x86_64) and have no Homebrew (it dropped Intel support): steps that `brew install` fail there. On Apple Silicon hosts (tart) Homebrew is available.
 - Guests are leaner than GitHub-hosted images: preinstalled SDKs (Xcode versions, Visual Studio, Android SDK, many language versions) may be missing. Prefer `setup-*` actions; if a tool is missing in a guest, say so instead of concluding the code is broken.
 - macOS legs: `sudo` steps only work if the guest was provisioned with `--passwordless-sudo` (GitHub's runners allow passwordless sudo). A sudo failure there is an environment gap, not a code bug.

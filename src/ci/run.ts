@@ -337,9 +337,23 @@ async function runLeg(repo: string, dir: string, cfg: Config, leg: Leg, sf: Stat
     r.durationSec = Math.round((Date.parse(r.finishedAt) - Date.parse(r.startedAt!)) / 1000);
     if (r.state !== "success") {
       r.tail = fs.readFileSync(logFile, "utf8").split("\n").slice(-60).join("\n");
+      r.warnings.push(...actDifferenceHints(r.tail));
     }
     sf.save();
   }
+}
+
+/**
+ * Hints for failures that come from act's environment rather than the code. act keeps the file-command
+ * files (GITHUB_OUTPUT, GITHUB_ENV, …) under its own act/workflow/ directory; GitHub's runners keep them
+ * under RUNNER_TEMP, so scripts that check those paths for containment fail only locally.
+ */
+export function actDifferenceHints(log: string): string[] {
+  const m = /\S*act[\\/]workflow[\\/](?:outputcmd\.txt|envs\.txt|pathcmd\.txt|statecmd\.txt|SUMMARY\.md)\b/.exec(log);
+  if (!m) return [];
+  return [
+    `the failure mentions ${m[0]}: act keeps GITHUB_OUTPUT/GITHUB_ENV/GITHUB_PATH/GITHUB_STATE/GITHUB_STEP_SUMMARY there, outside RUNNER_TEMP, while GitHub keeps them under RUNNER_TEMP. A check that these paths lie inside RUNNER_TEMP or GITHUB_WORKSPACE fails only locally; skip it when env.ACT is set`,
+  ];
 }
 
 function commonActArgs(leg: Leg): string[] {
