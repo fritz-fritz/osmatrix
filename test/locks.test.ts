@@ -33,6 +33,16 @@ test("a lock left by a dead process is reclaimed", () => {
   unlock("k2", me("A"));
 });
 
+test("a lock whose holder stopped refreshing it is reclaimed, even if its pid is alive", () => {
+  assert.equal(tryLock("k3", me("A")).ok, true);
+  const dir = path.join(process.env.OSMATRIX_HOME!, "locks");
+  const file = path.join(dir, fs.readdirSync(dir).find((f) => f.startsWith("k3-"))!);
+  const old = new Date(Date.now() - 10 * 60_000);
+  fs.utimesSync(file, old, old); // e.g. the pid now belongs to an unrelated process
+  assert.equal(tryLock("k3", me("B")).ok, true);
+  unlock("k3", me("B"));
+});
+
 test("acquireLocks waits for the holder and reports it once", async () => {
   const releaseA = await acquireLocks(["b", "a"], me("A"), () => assert.fail("A should not wait"), 10);
   const waits: string[] = [];
@@ -47,7 +57,7 @@ test("acquireLocks waits for the holder and reports it once", async () => {
   unlock("c", me("C"));
 });
 
-test("host legs lock their job and every needed job; guest legs lock the guest", () => {
+test("host legs lock their workflow as act names its containers; guest legs lock the guest", () => {
   const repo = fs.mkdtempSync(path.join(os.tmpdir(), "osmatrix-locks-repo-"));
   fs.mkdirSync(path.join(repo, ".github", "workflows"), { recursive: true });
   fs.writeFileSync(
@@ -75,6 +85,11 @@ jobs:
   const legs = plan(repo, cfg, { job: "gw" }).legs;
   const linux = legs.find((l) => l.target === "host")!;
   const win = legs.find((l) => l.targetOs === "windows")!;
-  assert.deepEqual(legLockKeys(linux).sort(), ["act-job:CI/gw", "act-job:CI/mid", "act-job:CI/plan"]);
+  assert.deepEqual(legLockKeys(linux), ["host:act-workflow:act-CI"]);
   assert.deepEqual(legLockKeys(win), [`guest:${win.target}`]);
+  // act canonicalizes names, so these share containers and must share a lock; unnamed workflows use the file name.
+  const key = (workflowName: string | undefined, workflow = ".github/workflows/ci.yml") => legLockKeys({ ...linux, workflowName, workflow })[0];
+  assert.equal(key("A/B"), key("A-B"));
+  assert.equal(key("A -B"), key("A-B"));
+  assert.equal(key(undefined), "host:act-workflow:act-ci-yml");
 });
