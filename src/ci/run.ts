@@ -7,6 +7,7 @@ import { DockurBackend } from "../backends/dockur.ts";
 import { ensureAct } from "../core/act.ts";
 import { guestWorkdir, loadConfig, type Config } from "../core/config.ts";
 import { acquireLocks } from "../core/locks.ts";
+import { dockerReach, selinuxEnforcing } from "../core/nesting.ts";
 import { cliEntry, ensureDir } from "../core/paths.ts";
 import { isAlive, spawnDetached } from "../core/proc.ts";
 import { commandLine, freePort, push as sshPush, quoteFor, sshArgs, sshBin, sshExec, withCwd, type Endpoint } from "../core/ssh.ts";
@@ -278,6 +279,16 @@ async function runLeg(repo: string, dir: string, cfg: Config, leg: Leg, sf: Stat
       // act's artifact server defaults to a fixed port (34567); concurrent or nested runs would collide.
       args.push("--artifact-server-port", String(await freePort()));
       if (secretFile) args.push("--secret-file", secretFile);
+      const reach = await dockerReach();
+      if (reach && !reach.error && (!reach.files || !reach.loopback)) {
+        // act copies the checkout into job containers, so legs still run; what can break is anything that
+        // has the job reach back to act's own servers or to host paths.
+        log.write(
+          "[osmatrix] note: Docker's daemon doesn't share this environment's filesystem and/or loopback (devcontainer or remote DOCKER_HOST). " +
+            "Steps that upload/download artifacts or use the actions cache can fail when job containers can't reach this environment, " +
+            "and steps that bind-mount host paths see the daemon host's filesystem.\n",
+        );
+      }
       if (sf.s.options.eventPayload) {
         const eventFile = path.join(dir, "event.json");
         fs.writeFileSync(eventFile, JSON.stringify(sf.s.options.eventPayload));
@@ -362,15 +373,6 @@ function commonActArgs(leg: Leg): string[] {
     if (v === null || ["string", "number", "boolean"].includes(typeof v)) a.push("--matrix", `${k}:${String(v)}`);
   }
   return a;
-}
-
-function selinuxEnforcing(): boolean {
-  if (process.platform !== "linux") return false;
-  try {
-    return fs.readFileSync("/sys/fs/selinux/enforce", "utf8").trim() === "1";
-  } catch {
-    return false;
-  }
 }
 
 function detectEvent(workflowFile: string): string {

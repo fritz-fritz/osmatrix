@@ -83,6 +83,29 @@ Run `osmatrix doctor` to see what this host can do. It also needs an OpenSSH cli
 
 > **macOS licensing:** installing a macOS guest accepts Apple's [macOS Software License Agreement](https://www.apple.com/legal/sla/), which only permits macOS on Apple hardware. osmatrix asks for this consent once, through `osmatrix setup macos --accept-license` or an agent's `env_setup` call with `accept_license` after you agree, and records it as `macos_eula_acknowledged = true`.
 
+### Devcontainers, Codespaces and remote Docker
+
+osmatrix expects to run on the machine that runs Docker. Each local guest is a container. osmatrix reaches it over ssh on a port that Docker publishes on `127.0.0.1`, and the Windows guest receives its unattended-install files through a bind mount of a directory in the osmatrix data dir. Both of those only work when the Docker daemon shares osmatrix's loopback and filesystem.
+
+Inside a devcontainer or Codespace, that depends on how the container gets Docker:
+
+| Setup | Daemon shares loopback / files | ubuntu guest | Windows / macOS VMs | Linux CI legs | `ssh` guests |
+|---|---|---|---|---|---|
+| No Docker in the container | — | no | no | no | yes |
+| **Docker-in-Docker** (a daemon inside the container, e.g. the `docker-in-docker` feature) | yes / yes | yes | only if `/dev/kvm` is passed into the container (never on Codespaces) | yes | yes |
+| **Docker-outside-of-Docker** (the host's socket mounted in, e.g. the `docker-outside-of-docker` feature) | no / no | refused | refused | yes, with caveats | yes |
+| Remote `DOCKER_HOST` (`tcp://`, `ssh://`) | usually no / no | refused | refused | yes, with caveats | yes |
+
+What goes wrong with Docker-outside-of-Docker:
+
+- **Ports.** `-p 127.0.0.1:2221:22` binds the *host's* loopback. The devcontainer has its own network namespace, so its `127.0.0.1:2221` has nothing listening, and ssh to the guest never connects. The guest would look like it was booting forever.
+- **Paths.** A bind mount names a path, and the daemon resolves it on the *host's* filesystem. The Windows guest's install folder (`~/.local/share/osmatrix/guests/windows/oem` inside the devcontainer) doesn't exist there. Docker would mount an empty directory, and Windows would spend 20–60 minutes installing without the script that enables ssh.
+- **Linux CI legs** still work, because act copies the checkout into its job containers instead of mounting it. Steps can still fail if they upload or download artifacts or use the actions cache, which reach back to act's servers in the devcontainer, or if they bind-mount host paths themselves.
+
+`osmatrix doctor` (MCP: `host_doctor`) detects devcontainers (`REMOTE_CONTAINERS`, `DEVCONTAINER`), Codespaces (`CODESPACES`), other containers (`/.dockerenv`, `/run/.containerenv`) and remote `DOCKER_HOST` values. In those cases it probes the daemon: it bind-mounts a marker file and publishes a port on `127.0.0.1`, then checks that both are visible from where osmatrix runs. It reports the result under `nesting`. When the probe shows a local guest can't work, `up`, `setup` and CI legs on that guest fail straight away with the reason, rather than hanging. On a plain host, none of this runs.
+
+**What works well from a devcontainer:** `ssh` guests. They need only an ssh client, so a real Windows PC or Mac, or a Linux box, configured as an `ssh` guest (see [Configuration](#configuration)) gives you `exec`, `push`/`pull`, port forwarding and CI legs from anywhere. Forwards land on the devcontainer's loopback, where your editor's port forwarding can pick them up. If you want local VMs, run osmatrix on the Docker host itself.
+
 ## Setting up guests
 
 Guests are disposable development VMs, so `osmatrix setup <guest>` makes every choice for you. It installs the OS, creates the user, enables SSH, sets up passwordless sudo, installs the toolchain and saves a golden snapshot. You don't take any steps yourself, apart from the macOS license consent above.

@@ -6,11 +6,14 @@ import { loadConfig } from "./config.ts";
 import { ensureDir, paths } from "./paths.ts";
 import { run, which } from "./proc.ts";
 import { findAct } from "./act.ts";
+import { detectContainerHost, dockerReach, remoteDockerHost, type ContainerHost, type DockerReach } from "./nesting.ts";
 
 export interface DoctorReport {
   host: { platform: string; arch: string; cpus: number; memoryGB: number; freeDiskGB?: number };
   tools: Record<string, string | null>;
   guests: Record<string, { backend: string; os: string; runnable: boolean; reason?: string }>;
+  /** Present when osmatrix runs inside a container or against a remote Docker daemon. */
+  nesting?: ContainerHost & { dockerHost?: string; docker?: DockerReach };
   notes: string[];
 }
 
@@ -56,6 +59,15 @@ export async function doctor(): Promise<DoctorReport> {
   if (!tools.act) notes.push("act not found; it will be downloaded automatically on first `ci run` (or run `osmatrix install-act`).");
   if (!tools.ssh) notes.push("Install an OpenSSH client (built into Windows 10 1809+, macOS and most Linux distros).");
 
+  const host = detectContainerHost();
+  const remote = remoteDockerHost();
+  let nesting: DoctorReport["nesting"];
+  if (host || remote) {
+    const reach = tools.docker ? await dockerReach() : undefined;
+    nesting = { ...(host ?? { kind: "container", evidence: [] }), ...(remote ? { dockerHost: remote } : {}), ...(reach ? { docker: reach } : {}) };
+    notes.push(...nestingNotes(host, remote, tools.docker, reach));
+  }
+
   const guests: DoctorReport["guests"] = {};
   for (const g of Object.values(cfg.guests)) {
     let s: { ok: boolean; reason?: string };
@@ -77,6 +89,26 @@ export async function doctor(): Promise<DoctorReport> {
     host: { platform: process.platform, arch: process.arch, cpus: os.cpus().length, memoryGB: memGB, freeDiskGB },
     tools,
     guests,
+    ...(nesting ? { nesting } : {}),
     notes,
   };
+}
+
+/** What works from a devcontainer / Codespace / remote daemon, in the user's terms. */
+export function nestingNotes(host: ContainerHost | undefined, remote: string | undefined, docker: string | null, reach: DockerReach | undefined): string[] {
+  const where = remote ? `Docker is remote (DOCKER_HOST=${remote})` : `Running inside ${host?.kind === "codespaces" ? "a GitHub Codespace" : host?.kind === "devcontainer" ? "a devcontainer" : "a container"}`;
+  const ssh = "ssh guests (any Windows, macOS or Linux machine reachable over ssh) work from here; see `ssh` guests in the reference";
+  if (!docker) return [`${where} without Docker: local guests and Linux CI legs are unavailable. ${ssh}.`];
+  if (!reach || reach.error) return [`${where}; could not check whether Docker shares this environment (${reach?.error ?? "not probed"}).`];
+  if (reach.files && reach.loopback) {
+    return [`${where} with Docker-in-Docker: the daemon shares this environment's files and loopback, so local guests and Linux CI legs work. VM guests also need /dev/kvm passed into this container.`];
+  }
+  const notes = [
+    `${where}, and the Docker daemon ${!reach.loopback && !reach.files ? "shares neither its loopback nor its filesystem" : !reach.loopback ? "doesn't share its loopback" : "doesn't share its filesystem"} with this environment (Docker-outside-of-Docker).`,
+  ];
+  if (!reach.loopback) notes.push("Local guests (ubuntu container, dockur VMs) are refused: their ssh ports are published on the daemon host's 127.0.0.1, which this environment can't reach.");
+  else if (!reach.files) notes.push("Windows dockur guests are refused: their unattended-install folder is a bind mount, which would resolve on the daemon host's filesystem.");
+  notes.push("Linux CI legs still run (act copies the checkout into job containers), but artifact/cache steps can fail if job containers can't reach this environment.");
+  notes.push(`${ssh}. Or run osmatrix on the Docker host itself.`);
+  return notes;
 }
