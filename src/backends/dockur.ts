@@ -219,7 +219,14 @@ export class DockurBackend implements Backend {
   /** Number of times the VM firmware has booted since the container started. */
   async bootCount(): Promise<number> {
     const r = await run(dockerBin(), ["logs", this.container]);
-    return ((r.stdout + r.stderr).match(/OC: Loaded configuration/g) ?? []).length;
+    const mark = this.cfg.os === "macos" ? /OC: Loaded configuration/g : /BdsDxe: starting /g;
+    return ((r.stdout + r.stderr).match(mark) ?? []).length;
+  }
+
+  async bootProbe(): Promise<{ io: number; boots: number } | undefined> {
+    if (!this.everReady()) return undefined;
+    const [io, boots] = await Promise.all([this.ioBytes(), this.bootCount()]);
+    return { io, boots };
   }
 
   async down(): Promise<void> {

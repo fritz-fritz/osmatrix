@@ -25,6 +25,8 @@ Check `env_status` (CLI: `osmatrix status`) for what this host has:
 
 A guest must be `ready`. `stopped` → `env_up` (VMs take 1–3 min to boot; leave them running while you iterate). `absent`, `needs-ssh-setup`, or a `detail` saying "not set up" → follow `osmatrix-setup`. **Don't start VMs you don't need.**
 
+A set-up VM whose boot stops making progress (idle disk or a reset loop, well past its usual boot time) fails `env_up`/`env_reset` waits and CI legs with a "looks hung" error instead of waiting out the timeout. Take an `env_screenshot`, then `env_reset` (back to the golden snapshot) or `env_down` it.
+
 ## Running commands
 
 - `env_exec` — one command per call; returns `exitCode`, `stdout`, `stderr`. Default timeout 600 s (`timeout_seconds` up to 3600). `cwd` is relative to the guest user's home; repos synced by `ci_run`/`env_push` are at `work/<name>`.

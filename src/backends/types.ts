@@ -43,6 +43,11 @@ export interface Backend {
   endpoint(): Promise<Endpoint>;
   /** Called once ssh answers but rejects our key; backends that can install the key themselves do it here. */
   authorizeKey?(): Promise<boolean>;
+  /**
+   * Activity counters for an installed guest that is booting: disk bytes moved and firmware boots so far.
+   * Undefined while the guest is still being installed, when long quiet phases are normal.
+   */
+  bootProbe?(): Promise<{ io: number; boots: number } | undefined>;
   /** VNC endpoint for screenshots/input, when available. */
   vnc?(): Promise<{ host: string; port: number } | undefined>;
 }
