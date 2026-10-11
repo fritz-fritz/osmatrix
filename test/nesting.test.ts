@@ -29,10 +29,13 @@ test("remote DOCKER_HOST", () => {
 
 test("local guests are refused only for what actually breaks", () => {
   const dev = { kind: "devcontainer" as const, evidence: [] };
-  // Plain host, Docker-in-Docker, or a probe that couldn't run: allowed.
+  // Plain host or Docker-in-Docker: allowed.
   assert.equal(localGuestBlockReason(undefined, "linux", undefined, undefined), undefined);
   assert.equal(localGuestBlockReason({ files: true, loopback: true }, "windows", dev, undefined), undefined);
-  assert.equal(localGuestBlockReason({ files: false, loopback: false, error: "no daemon" }, "windows", dev, undefined), undefined);
+  // A probe that couldn't run leaves reachability unknown: refused, without claiming Docker-outside-of-Docker.
+  const unknown = localGuestBlockReason({ files: false, loopback: false, error: "pull access denied" }, "linux", dev, undefined)!;
+  assert.match(unknown, /inside a devcontainer, and osmatrix could not verify .*pull access denied/);
+  assert.doesNotMatch(unknown, /Docker-outside-of-Docker/);
   // Unreachable loopback breaks every local guest.
   const r = localGuestBlockReason({ files: true, loopback: false }, "linux", dev, undefined);
   assert.match(r!, /inside a devcontainer.*Docker-outside-of-Docker.*127\.0\.0\.1.*ssh guest/);
@@ -46,6 +49,8 @@ test("local guests are refused only for what actually breaks", () => {
 test("doctor notes for nested environments", () => {
   const cs = { kind: "codespaces" as const, evidence: [] };
   assert.match(nestingNotes(cs, undefined, null, undefined)[0], /GitHub Codespace without Docker.*ssh guests/);
+  assert.match(nestingNotes(undefined, "tcp://d:2375", null, undefined)[0], /^Docker is remote \(DOCKER_HOST=tcp:\/\/d:2375\) but not reachable/);
+  assert.match(nestingNotes(cs, undefined, "27", { files: false, loopback: false, error: "x" })[0], /could not check.*refused until/);
   assert.match(nestingNotes(cs, undefined, "27", { files: true, loopback: true })[0], /Docker-in-Docker.*\/dev\/kvm/);
   const dood = nestingNotes(cs, undefined, "27", { files: false, loopback: false }).join("\n");
   assert.match(dood, /shares neither/);

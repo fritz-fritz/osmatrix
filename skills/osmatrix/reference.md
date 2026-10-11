@@ -41,7 +41,7 @@ CLI-only: `osmatrix init`, `config`, `install-act`, `install-agents`, `ssh <gues
 
 Local guests are containers that osmatrix reaches over ssh on ports Docker publishes on `127.0.0.1`. The Windows guest also gets its install folder through a bind mount. Both need the Docker daemon to share osmatrix's loopback and filesystem.
 
-`host_doctor` detects a devcontainer, Codespace, other container or remote `DOCKER_HOST`. In those cases it probes the daemon and reports `nesting.docker.{files,loopback}`.
+`host_doctor` detects a devcontainer, Codespace, other container or remote `DOCKER_HOST`. In those cases it probes the daemon and reports `nesting.container`, `nesting.dockerHost` and `nesting.docker.{files,loopback}`. If the probe can't run (`nesting.docker.error`), local guests are refused until it succeeds.
 
 | `files` / `loopback` | typical setup | local guests | Linux CI legs | `ssh` guests |
 |---|---|---|---|---|

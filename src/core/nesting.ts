@@ -105,10 +105,11 @@ let cached: Promise<DockerReach | undefined> | undefined;
 
 /**
  * Probe whether the Docker daemon shares our filesystem and loopback. Only runs inside a container
- * or with a remote DOCKER_HOST (undefined otherwise: a plain host shares both). Cached per process.
+ * or with a remote DOCKER_HOST (undefined otherwise: a plain host shares both). A definite answer is
+ * cached per process; a failed probe (image pull, daemon hiccup) is retried on the next call.
  */
 export function dockerReach(): Promise<DockerReach | undefined> {
-  cached ??= (async () => {
+  const p = (cached ??= (async () => {
     if (!detectContainerHost() && !remoteDockerHost()) return undefined;
     let docker: string;
     try {
@@ -122,19 +123,23 @@ export function dockerReach(): Promise<DockerReach | undefined> {
     } catch (e) {
       return { files: false, loopback: false, error: (e as Error).message };
     }
-  })();
-  return cached;
+  })());
+  void p.then((r) => {
+    if (r?.error && cached === p) cached = undefined;
+  });
+  return p;
 }
 
 function where(host: ContainerHost | undefined, remote: string | undefined): string {
   if (remote) return `the Docker daemon is remote (DOCKER_HOST=${remote})`;
   const name = { codespaces: "a GitHub Codespace", devcontainer: "a devcontainer", container: "a container" }[host?.kind ?? "container"];
-  return `osmatrix is running inside ${name} whose Docker daemon is outside it (Docker-outside-of-Docker)`;
+  return `osmatrix is running inside ${name}`;
 }
 
 /**
  * Why local Docker-backed guests (container, dockur) can't work here, or undefined when they can.
- * Probe errors don't block: the guest's own checks report those more precisely.
+ * Fails closed: when the probe couldn't run, reachability is unknown, and starting anyway risks a
+ * guest stuck in "booting" or a Windows install without provisioning.
  */
 export function localGuestBlockReason(
   reach: DockerReach | undefined,
@@ -142,14 +147,21 @@ export function localGuestBlockReason(
   host = detectContainerHost(),
   remote = remoteDockerHost(),
 ): string | undefined {
-  if (!reach || reach.error) return undefined;
+  if (!reach) return undefined;
+  if (reach.error) {
+    return (
+      `${where(host, remote)}, and osmatrix could not verify that Docker shares this environment's loopback and files (${reach.error}). ` +
+      "Fix the error and retry, run osmatrix on the Docker host itself, or configure an ssh guest instead."
+    );
+  }
   const problems: string[] = [];
   if (!reach.loopback) problems.push("ports Docker publishes on 127.0.0.1 are not reachable from here, so osmatrix can't ssh into the guest");
   // Only Windows guests bind-mount a host directory (the unattended-install OEM folder).
   if (!reach.files && os === "windows") problems.push("bind-mounted paths resolve on the daemon's filesystem, so Windows would install without its provisioning script and never enable ssh");
   if (!problems.length) return undefined;
+  const split = remote ? "" : " whose Docker daemon is outside it (Docker-outside-of-Docker)";
   return (
-    `${where(host, remote)}: ${problems.join("; ")}. ` +
+    `${where(host, remote)}${split}: ${problems.join("; ")}. ` +
     "Run osmatrix on the Docker host itself, or configure an ssh guest (any machine reachable over ssh) instead."
   );
 }

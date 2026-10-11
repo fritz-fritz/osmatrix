@@ -13,7 +13,14 @@ export interface DoctorReport {
   tools: Record<string, string | null>;
   guests: Record<string, { backend: string; os: string; runnable: boolean; reason?: string }>;
   /** Present when osmatrix runs inside a container or against a remote Docker daemon. */
-  nesting?: ContainerHost & { dockerHost?: string; docker?: DockerReach };
+  nesting?: {
+    /** The container osmatrix runs in; absent when only DOCKER_HOST is remote. */
+    container?: ContainerHost;
+    /** A remote DOCKER_HOST (tcp://, ssh://). */
+    dockerHost?: string;
+    /** What the daemon shares with this environment, when Docker is available. */
+    docker?: DockerReach;
+  };
   notes: string[];
 }
 
@@ -64,7 +71,7 @@ export async function doctor(): Promise<DoctorReport> {
   let nesting: DoctorReport["nesting"];
   if (host || remote) {
     const reach = tools.docker ? await dockerReach() : undefined;
-    nesting = { ...(host ?? { kind: "container", evidence: [] }), ...(remote ? { dockerHost: remote } : {}), ...(reach ? { docker: reach } : {}) };
+    nesting = { ...(host ? { container: host } : {}), ...(remote ? { dockerHost: remote } : {}), ...(reach ? { docker: reach } : {}) };
     notes.push(...nestingNotes(host, remote, tools.docker, reach));
   }
 
@@ -98,8 +105,12 @@ export async function doctor(): Promise<DoctorReport> {
 export function nestingNotes(host: ContainerHost | undefined, remote: string | undefined, docker: string | null, reach: DockerReach | undefined): string[] {
   const where = remote ? `Docker is remote (DOCKER_HOST=${remote})` : `Running inside ${host?.kind === "codespaces" ? "a GitHub Codespace" : host?.kind === "devcontainer" ? "a devcontainer" : "a container"}`;
   const ssh = "ssh guests (any Windows, macOS or Linux machine reachable over ssh) work from here; see `ssh` guests in the reference";
-  if (!docker) return [`${where} without Docker: local guests and Linux CI legs are unavailable. ${ssh}.`];
-  if (!reach || reach.error) return [`${where}; could not check whether Docker shares this environment (${reach?.error ?? "not probed"}).`];
+  if (!docker) return [`${remote ? `${where} but not reachable` : `${where} without Docker`}: local guests and Linux CI legs are unavailable. ${ssh}.`];
+  if (!reach || reach.error) {
+    return [
+      `${where}; could not check whether Docker shares this environment (${reach?.error ?? "not probed"}). Local guests are refused until that check succeeds. ${ssh}.`,
+    ];
+  }
   if (reach.files && reach.loopback) {
     return [`${where} with Docker-in-Docker: the daemon shares this environment's files and loopback, so local guests and Linux CI legs work. VM guests also need /dev/kvm passed into this container.`];
   }
