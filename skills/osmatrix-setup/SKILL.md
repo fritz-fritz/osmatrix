@@ -34,7 +34,7 @@ Only start the guests a task needs: each VM takes 8 GB RAM.
 `env_setup` (CLI: `osmatrix setup <guest>`) is fully automatic: it installs the OS, creates the user, enables ssh, provisions the toolchain and saves a golden snapshot. It runs in the background; poll `env_status` and read `setup.phase`. Expect 20–60 min for Windows or macOS; ubuntu takes seconds. `force: true` (`--force`) redoes setup of an existing guest.
 
 - **macOS needs the user's consent once.** Installing macOS accepts Apple's macOS Software License Agreement (https://www.apple.com/legal/sla/), and running it on non-Apple hardware is outside that license. Ask the user and pass `accept_license: true` only after they explicitly agree. Never assume consent. Once given, it's remembered in config (`macos_eula_acknowledged`).
-- macOS guests on Linux/Windows hosts (dockur) are Intel (x86_64) and have no Homebrew; on Apple Silicon (tart) Homebrew is available. `osmatrix provision macos --passwordless-sudo` re-runs the toolchain install and lets `sudo` steps in workflows run as they do on GitHub's runners.
+- macOS guests on Linux/Windows hosts (dockur) are Intel (x86_64) and have no Homebrew; on Apple Silicon (tart) Homebrew is available. dockur guests get passwordless sudo during setup; for tart and `ssh` macOS guests, `osmatrix provision <guest> --passwordless-sudo` (CLI only) re-runs the toolchain install and lets `sudo` steps in workflows run as they do on GitHub's runners.
 - If setup reports an error, take an `env_screenshot` of the guest to see where it stopped, then tell the user.
 
 ## ssh guests (an existing machine)

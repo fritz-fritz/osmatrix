@@ -81,10 +81,13 @@ function setCodexToml(file: string, cmd: { command: string; args: string[] } | u
   return file;
 }
 
-/** True if `dir` is something an earlier osmatrix install created: our symlink/junction, or a copy of our skill. */
+/**
+ * True if `dir` is something an earlier osmatrix install created: a symlink/junction into a package's
+ * `skills/osmatrix`, or a copy whose SKILL.md carries our frontmatter. Anything else with that name is left alone.
+ */
 function isOurLegacySkill(dir: string): boolean {
   try {
-    if (fs.lstatSync(dir).isSymbolicLink()) return true;
+    if (fs.lstatSync(dir).isSymbolicLink() && /[\\/]skills[\\/]osmatrix[\\/]?$/.test(fs.readlinkSync(dir))) return true;
     return /^name:\s*osmatrix\s*$/m.test(fs.readFileSync(path.join(dir, "SKILL.md"), "utf8"));
   } catch {
     return false;
