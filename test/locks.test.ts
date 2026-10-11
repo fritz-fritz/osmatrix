@@ -70,7 +70,8 @@ jobs:
     steps: [{ run: echo }]
 `,
   );
-  const cfg = mergeConfig(defaultConfig("linux"), {});
+  // Explicit guests: the defaults depend on the host (a macOS host has no Windows guest).
+  const cfg = mergeConfig(defaultConfig(), { guests: { windows: { os: "windows", backend: "dockur" } } });
   const legs = plan(repo, cfg, { job: "gw" }).legs;
   const linux = legs.find((l) => l.target === "host")!;
   const win = legs.find((l) => l.targetOs === "windows")!;
