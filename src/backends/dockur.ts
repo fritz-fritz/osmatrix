@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import YAML from "yaml";
 import { guestShell, loadConfig, type GuestConfig } from "../core/config.ts";
+import { assertLocalGuestsReachable, dockerReach, localGuestBlockReason } from "../core/nesting.ts";
 import { assetsDir, ensureDir, paths, resourcePrefix } from "../core/paths.ts";
 import { run } from "../core/proc.ts";
 import { ensureKey, sshProbe, type Endpoint } from "../core/ssh.ts";
@@ -60,6 +61,8 @@ export class DockurBackend implements Backend {
           "installing macOS accepts Apple's macOS Software License Agreement, which only permits macOS on Apple hardware. With the user's consent run `osmatrix setup macos --accept-license` (MCP: env_setup with accept_license).",
       };
     }
+    const blocked = localGuestBlockReason(await dockerReach(), this.cfg.os);
+    if (blocked) return { ok: false, reason: blocked };
     try {
       if (!(await dockerHasKvm())) return { ok: false, reason: "containers cannot access /dev/kvm (needs Linux+KVM or Windows 11 WSL2 with nested virtualization)" };
     } catch (e) {
@@ -169,6 +172,7 @@ export class DockurBackend implements Backend {
   }
 
   async up(): Promise<void> {
+    await assertLocalGuestsReachable(this.cfg.os);
     const st = await containerState(this.container);
     if (st === "running") return;
     if (st === "stopped") {

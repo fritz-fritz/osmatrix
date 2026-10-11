@@ -27,6 +27,7 @@ Use the **MCP tools** (`ci_plan`, `env_exec`, ...) when they are available: they
    - **macOS needs the user's consent once.** Installing macOS accepts Apple's macOS Software License Agreement (https://www.apple.com/legal/sla/), and running it on non-Apple hardware is outside that license. Ask the user and pass `accept_license: true` only after they explicitly agree. Never assume consent. Once given, it's remembered in config.
    - If setup reports an error, take an `env_screenshot` of the guest to see where it stopped, then tell the user.
 4. `host_doctor` explains why a guest can't run on this host (no KVM, not Apple Silicon, ...). Guests a host can't run may be configured as `ssh` guests pointing at another machine.
+5. **Inside a devcontainer, Codespace or against a remote Docker daemon**, `host_doctor` reports `nesting`. If the daemon is outside this environment (Docker-outside-of-Docker), local guests are refused because their ssh ports and bind mounts land on the Docker host, not here. Don't work around the refusal. Tell the user, and offer two options: an `ssh` guest (a real machine; works from anywhere), or running osmatrix on the Docker host. Linux CI legs still run, but artifact/cache steps may fail there. See "Devcontainers and remote Docker" in [reference.md](reference.md).
 
 ## Local CI loop (preferred before pushing)
 

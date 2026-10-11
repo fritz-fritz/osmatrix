@@ -37,6 +37,21 @@ CLI-only: `osmatrix init`, `config`, `install-act`, `install-agents`, `ssh <gues
 | `tart` | macos on Apple Silicon | tart clone/run | key installed automatically via tart guest agent |
 | `ssh` | any existing machine | none (up/down are no-ops; reset/snapshot unsupported) | host keys checked (trust on first use) |
 
+## Devcontainers and remote Docker
+
+Local guests are containers that osmatrix reaches over ssh on ports Docker publishes on `127.0.0.1`. The Windows guest also gets its install folder through a bind mount. Both need the Docker daemon to share osmatrix's loopback and filesystem.
+
+`host_doctor` detects a devcontainer, Codespace, other container or remote `DOCKER_HOST`. In those cases it probes the daemon and reports `nesting.container`, `nesting.dockerHost` and `nesting.docker.{files,loopback}`. If the probe can't run (`nesting.docker.error`), local guests are refused until it succeeds.
+
+| `files` / `loopback` | typical setup | local guests | Linux CI legs | `ssh` guests |
+|---|---|---|---|---|
+| true / true | Docker-in-Docker | work (VMs also need `/dev/kvm` in the container; never on Codespaces) | work | work |
+| any / false | Docker-outside-of-Docker, remote `DOCKER_HOST` | refused: ssh to the guest can't connect | run; artifact/cache steps may fail | work |
+| false / true | unusual | ubuntu and macOS work; Windows refused (its install folder would be empty) | run | work |
+| no Docker | | unavailable | unavailable | work |
+
+Refused guests fail at `env_up`/`env_setup`/`ci_run` with the reason. They don't hang in `booting`.
+
 ## Config (`osmatrix config` shows the effective values)
 
 Linux: `~/.config/osmatrix/config.toml` · macOS: `~/Library/Preferences/osmatrix/config.toml` · Windows: `%APPDATA%\osmatrix\Config\config.toml`.
