@@ -22,8 +22,8 @@ const ajv = new Ajv2020({ strict: false, allErrors: true });
 addFormats(ajv);
 let bad = 0;
 for (const [schema, file] of [
-  ["plugin", "codex/plugin.json"],
-  ["mcp", "codex/mcp.json"],
+  ["plugin", "plugin.json"],
+  ["mcp", "mcp.json"],
 ]) {
   const res = await fetch(`https://agent-plugins.org/schemas/1.0.0/${schema}.schema.json`);
   if (!res.ok) throw new Error(`fetching ${schema} schema: HTTP ${res.status}`);

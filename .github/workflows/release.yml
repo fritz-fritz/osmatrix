@@ -59,7 +59,7 @@ jobs:
           else echo "prerelease=false" >> "$GITHUB_OUTPUT"; echo "npm_tag=latest" >> "$GITHUB_OUTPUT"; fi
 
       - run: npm ci
-      - name: Plugins in sync (skills, artwork, manifest versions, MCP major pin)
+      - name: Plugins in sync (skills, manifest versions, MCP major pin)
         run: npm run validate
       - run: npm run typecheck
       - run: npm test

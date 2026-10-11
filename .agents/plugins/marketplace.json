@@ -8,7 +8,7 @@
       "name": "osmatrix",
       "source": {
         "source": "local",
-        "path": "./codex"
+        "path": "./"
       },
       "policy": {
         "installation": "AVAILABLE",

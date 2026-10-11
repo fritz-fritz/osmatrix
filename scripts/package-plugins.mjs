@@ -2,20 +2,24 @@
 // Build Claude, Cursor and Codex plugins that bundle this checkout's runtime (an `npm pack` tarball), so
 // they work without osmatrix being published on npm. Used for local previews and as release assets.
 //
+// Each bundled plugin is the subset of the repository a client reads: its manifest, the shared mcp.json,
+// skills/, artwork, docs and LICENSE, plus the runtime tarball.
+//
 // Output, artifacts/:
 //   claude/osmatrix, cursor/osmatrix, codex/osmatrix      bundled plugins
 //   .claude-plugin, .cursor-plugin, .agents/plugins        a local "fritztech-local" marketplace for each client
 //   osmatrix-<client>-<version>.tar.gz                     one archive per client (contains osmatrix/)
 // artifacts/ is committed to its own throwaway git repo because Cursor imports marketplaces with git.
 import { execFileSync } from "node:child_process";
+import { existsSync } from "node:fs";
 import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { CLIENTS, expectedMcpArgs, readJson, validatePlugin } from "./validate-plugins.mjs";
+import { BUNDLE_FILES, CLIENTS, expectedMcpArgs, readJson, validatePlugin } from "./validate-plugins.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const { version } = await readJson(join(root, "package.json"));
+const { version, homepage } = await readJson(join(root, "package.json"));
 const output = join(root, "artifacts");
 const MARKETPLACE = "fritztech-local";
 const writeJson = (file, data) => writeFile(file, JSON.stringify(data, null, 2) + "\n");
@@ -35,15 +39,17 @@ try {
   await rm(output, { recursive: true, force: true });
   for (const [client, spec] of Object.entries(CLIENTS)) {
     const plugin = join(output, client, "osmatrix");
-    await cp(join(root, client), plugin, { recursive: true });
-    await cp(join(root, "LICENSE"), join(plugin, "LICENSE"));
+    for (const f of [...BUNDLE_FILES, spec.manifest]) await cp(join(root, f), join(plugin, f), { recursive: true });
     await mkdir(join(plugin, "runtime"));
     await cp(join(staging, filename), join(plugin, "runtime", filename));
     const mcpFile = join(plugin, spec.mcp);
     const mcp = await readJson(mcpFile);
     mcp.mcpServers.osmatrix.args = expectedMcpArgs(client, version, true);
     await writeJson(mcpFile, mcp);
-    const readme = await readFile(join(plugin, "README.md"), "utf8");
+    // The bundle carries only part of the repository: links to anything else point at the tagged source.
+    const readme = (await readFile(join(plugin, "README.md"), "utf8")).replace(/\]\(([^)#\s:]+)((?:#[^)]*)?)\)/g, (m, target, hash) =>
+      existsSync(join(plugin, target)) ? m : `](${homepage}/blob/v${version}/${target}${hash})`,
+    );
     await writeFile(
       join(plugin, "README.md"),
       readme.replace(

@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { cliEntry, pkgRoot, skillDir } from "./core/paths.ts";
+import { LEGACY_SKILL_NAMES, cliEntry, pkgRoot, skillNames, skillsDir } from "./core/paths.ts";
 import { run, which } from "./core/proc.ts";
 
 export type Agent = "claude" | "cursor" | "codex";
@@ -10,7 +10,7 @@ export interface InstallOptions {
   agents?: Agent[];
   /** Register `npx -y osmatrix mcp` instead of this checkout's absolute path. */
   npx?: boolean;
-  /** Copy the skill instead of symlinking it. */
+  /** Copy the skills instead of symlinking them. */
   copySkill?: boolean;
   uninstall?: boolean;
   dryRun?: boolean;
@@ -81,22 +81,40 @@ function setCodexToml(file: string, cmd: { command: string; args: string[] } | u
   return file;
 }
 
-function installSkill(dest: string, copy: boolean, uninstall: boolean, dry: boolean): string {
-  const target = path.join(dest, "osmatrix");
-  if (dry) return target;
-  fs.rmSync(target, { recursive: true, force: true });
-  if (uninstall) return target;
-  fs.mkdirSync(dest, { recursive: true });
-  if (!copy) {
-    try {
-      fs.symlinkSync(skillDir, target, process.platform === "win32" ? "junction" : "dir");
-      return target;
-    } catch {
-      /* fall back to copy (e.g. Windows without symlink rights) */
-    }
+/**
+ * True if `dir` is something an earlier osmatrix install created: a symlink/junction into a package's
+ * `skills/osmatrix`, or a copy whose SKILL.md carries our frontmatter. Anything else with that name is left alone.
+ */
+function isOurLegacySkill(dir: string): boolean {
+  try {
+    if (fs.lstatSync(dir).isSymbolicLink() && /[\\/]skills[\\/]osmatrix[\\/]?$/.test(fs.readlinkSync(dir))) return true;
+    return /^name:\s*osmatrix\s*$/m.test(fs.readFileSync(path.join(dir, "SKILL.md"), "utf8"));
+  } catch {
+    return false;
   }
-  fs.cpSync(skillDir, target, { recursive: true });
-  return target;
+}
+
+export function installSkills(dest: string, copy: boolean, uninstall: boolean, dry: boolean): { installed: string[]; removedLegacy: string[] } {
+  const installed = skillNames().map((name) => path.join(dest, name));
+  // Skills from before the split would keep triggering next to the new ones; only touch what we created.
+  const removedLegacy = LEGACY_SKILL_NAMES.map((name) => path.join(dest, name)).filter(isOurLegacySkill);
+  if (dry) return { installed: uninstall ? [] : installed, removedLegacy };
+  for (const target of [...removedLegacy, ...installed]) fs.rmSync(target, { recursive: true, force: true });
+  if (uninstall) return { installed: [], removedLegacy };
+  fs.mkdirSync(dest, { recursive: true });
+  for (const target of installed) {
+    const source = path.join(skillsDir, path.basename(target));
+    if (!copy) {
+      try {
+        fs.symlinkSync(source, target, process.platform === "win32" ? "junction" : "dir");
+        continue;
+      } catch {
+        /* fall back to copy (e.g. Windows without symlink rights) */
+      }
+    }
+    fs.cpSync(source, target, { recursive: true });
+  }
+  return { installed, removedLegacy };
 }
 
 export async function installAgents(opts: InstallOptions = {}) {
@@ -119,7 +137,7 @@ export async function installAgents(opts: InstallOptions = {}) {
       // No CLI on PATH (e.g. desktop app only): user-scope servers live in ~/.claude.json.
       done.claudeMcp = setMcpJson(path.join(home, ".claude.json"), opts.uninstall ? undefined : { type: "stdio", ...cmd, env: {} }, dry);
     }
-    done.claudeSkill = installSkill(path.join(home, ".claude", "skills"), copy, !!opts.uninstall, dry);
+    done.claudeSkills = installSkills(path.join(home, ".claude", "skills"), copy, !!opts.uninstall, dry);
   }
   if (agents.includes("cursor")) {
     done.cursorMcp = setMcpJson(path.join(home, ".cursor", "mcp.json"), opts.uninstall ? undefined : { type: "stdio", ...cmd }, dry);
@@ -130,7 +148,7 @@ export async function installAgents(opts: InstallOptions = {}) {
   }
   if (agents.includes("cursor") || agents.includes("codex")) {
     // Shared Agent Skills location read by Codex and Cursor.
-    done.sharedSkill = installSkill(path.join(home, ".agents", "skills"), copy, !!opts.uninstall, dry);
+    done.sharedSkills = installSkills(path.join(home, ".agents", "skills"), copy, !!opts.uninstall, dry);
   }
   return { dryRun: dry, uninstall: !!opts.uninstall, ...done };
 }
