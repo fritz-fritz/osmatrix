@@ -237,7 +237,8 @@ async function setupDockurMac(g: Guest, b: DockurBackend, opts: SetupOptions, ph
   // Phase 4: first boot of the configured system.
   phase("booting the installed system");
   await b.recreate({ picker: false });
-  const s = await waitReady(g, 30 * 60);
+  // First boot of a freshly installed system: an earlier install's boot history does not apply.
+  const s = await waitReady(g, 30 * 60, { detectHang: false });
   if (s.state !== "ready") throw new Error(`ssh did not come up after configuration: ${s.state}`);
   await provisionMac(g);
 }

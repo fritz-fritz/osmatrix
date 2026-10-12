@@ -4,6 +4,7 @@ import { ActJsonParser, actDifferenceHints, powershell } from "../src/ci/run.ts"
 import { defaultGuests, labelMatches, mergeConfig, defaultConfig } from "../src/core/config.ts";
 import { commandLine, quotePosix, quotePwsh, withCwd } from "../src/core/ssh.ts";
 import { encodePng } from "../src/gui.ts";
+import { bootBudget, bootHang } from "../src/env.ts";
 
 test("posix quoting", () => {
   assert.equal(quotePosix("abc"), "abc");
@@ -85,4 +86,18 @@ test("PowerShell scripts run as-is on pwsh endpoints and encoded on cmd ones", (
   const m = /^powershell -NoProfile -NonInteractive -EncodedCommand ([A-Za-z0-9+/=]+)$/.exec(powershell({ shell: "cmd" }, script));
   assert.ok(m);
   assert.equal(Buffer.from(m[1], "base64").toString("utf16le"), script);
+});
+
+test("bootBudget scales with the slowest recent boot", () => {
+  assert.equal(bootBudget([]), 600);
+  assert.equal(bootBudget([40, 60]), 240);
+  assert.equal(bootBudget([90, 200]), 600);
+});
+
+test("bootHang tells a hung boot from a slow one", () => {
+  const base = { elapsedSec: 300, budgetSec: 240, ioIdleSec: 0, resets: 0 };
+  assert.equal(bootHang(base), undefined, "disk still busy: slow, not hung");
+  assert.equal(bootHang({ ...base, elapsedSec: 200, ioIdleSec: 200 }), undefined, "within budget");
+  assert.match(bootHang({ ...base, ioIdleSec: 130 }) ?? "", /disk has been idle/);
+  assert.match(bootHang({ ...base, resets: 3 }) ?? "", /reset loop/);
 });

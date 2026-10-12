@@ -3,7 +3,7 @@ import path from "node:path";
 import { backendFor, type Backend, type GuestStatus } from "./backends/index.ts";
 import { guestWorkdir, loadConfig, readRawConfig, writeConfig, type GuestConfig } from "./core/config.ts";
 import { checkSizing, requirements, type Sizing } from "./core/sizing.ts";
-import { assetsDir } from "./core/paths.ts";
+import { assetsDir, paths } from "./core/paths.ts";
 import { kill, sleep } from "./core/proc.ts";
 import {
   ensureKey,
@@ -59,19 +59,93 @@ export async function status(name?: string): Promise<(GuestStatus & { forwards?:
   );
 }
 
-/** Poll until ssh works. Installs our key automatically when the backend can. */
-export async function waitReady(g: Guest, timeoutSec: number): Promise<GuestStatus> {
-  const deadline = Date.now() + timeoutSec * 1000;
+/** Without boot history, how long an installed guest may take before a quiet boot counts as hung. */
+const DEFAULT_BOOT_BUDGET_SEC = 600;
+/** A hung boot is one past its budget that has also gone this long without disk I/O (or keeps resetting). */
+const IO_IDLE_SEC = 120;
+const RESET_LOOP = 3;
+
+/**
+ * Decides whether a booting guest is hung rather than slow. Slow boots (updates, first boot after a
+ * snapshot) keep the disk busy; a guest stuck in its boot loader or reset loop does not get further.
+ * Returns why it looks hung, or undefined.
+ */
+export function bootHang(p: { elapsedSec: number; budgetSec: number; ioIdleSec: number; resets: number }): string | undefined {
+  if (p.elapsedSec < p.budgetSec) return undefined;
+  if (p.resets >= RESET_LOOP) return `its firmware restarted ${p.resets} times (reset loop)`;
+  if (p.ioIdleSec >= IO_IDLE_SEC) return `its disk has been idle for ${Math.round(p.ioIdleSec)}s`;
+  return undefined;
+}
+
+/** Seconds a boot may take before it can count as hung: 3x the slowest recent boot, at least 4 min. */
+export function bootBudget(history: number[]): number {
+  return history.length ? Math.max(240, 3 * Math.max(...history)) : DEFAULT_BOOT_BUDGET_SEC;
+}
+
+const bootHistoryFile = (name: string) => path.join(paths.guestDir(name), "boot-times.json");
+
+function bootHistory(name: string): number[] {
+  try {
+    const v = JSON.parse(fs.readFileSync(bootHistoryFile(name), "utf8"));
+    return Array.isArray(v) ? v.filter((x) => typeof x === "number") : [];
+  } catch {
+    return [];
+  }
+}
+
+function recordBoot(name: string, sec: number) {
+  const f = bootHistoryFile(name);
+  fs.mkdirSync(path.dirname(f), { recursive: true });
+  fs.writeFileSync(f, JSON.stringify([...bootHistory(name), Math.round(sec)].slice(-5)));
+}
+
+/**
+ * Poll until ssh works. Installs our key automatically when the backend can. For an installed guest
+ * whose backend can report boot activity, a hung boot throws instead of waiting out timeoutSec.
+ */
+export async function waitReady(g: Guest, timeoutSec: number, opts: { detectHang?: boolean } = {}): Promise<GuestStatus> {
+  const start = Date.now();
+  const deadline = start + timeoutSec * 1000;
   let triedKey = false;
+  let polls = 0;
+  const bootProbe = opts.detectHang === false ? undefined : g.backend.bootProbe?.bind(g.backend);
+  // A failed probe only turns hang detection off; it must not fail the wait itself.
+  const probe = bootProbe && (() => bootProbe().catch(() => undefined));
+  const first = probe ? await probe() : undefined;
+  const budget = bootBudget(bootHistory(g.cfg.name));
+  let lastIo = first?.io;
+  let lastIoChange = start;
   for (;;) {
     const s = await g.backend.status();
-    if (s.state === "ready") return s;
+    if (s.state === "ready") {
+      if (first && polls > 0) recordBoot(g.cfg.name, (Date.now() - start) / 1000);
+      return s;
+    }
+    polls++;
     if (s.state === "needs-ssh-setup" && g.backend.authorizeKey && !triedKey) {
       triedKey = true;
       await g.backend.authorizeKey();
       continue;
     }
     if (s.state === "needs-ssh-setup" || s.state === "absent" || s.state === "stopped" || Date.now() > deadline) return s;
+    if (first && probe && s.state === "booting") {
+      const now = await probe();
+      if (now) {
+        if (now.io !== lastIo) {
+          lastIo = now.io;
+          lastIoChange = Date.now();
+        }
+        const elapsedSec = (Date.now() - start) / 1000;
+        const why = bootHang({ elapsedSec, budgetSec: budget, ioIdleSec: (Date.now() - lastIoChange) / 1000, resets: now.boots - first.boots });
+        if (why) {
+          const n = g.cfg.name;
+          throw new Error(
+            `${n} looks hung while booting: no ssh after ${Math.round(elapsedSec / 60)} min and ${why}. ` +
+              `See its screen with \`osmatrix screenshot ${n}\` (MCP: env_screenshot); \`osmatrix reset ${n}\` restores the golden snapshot, \`osmatrix down ${n}\` stops it.`,
+          );
+        }
+      }
+    }
     await sleep(5000);
   }
 }
