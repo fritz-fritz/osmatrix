@@ -1,18 +1,20 @@
 import fs from "node:fs";
 import os from "node:os";
 import { backendFor } from "../backends/index.ts";
-import { dockerBin } from "../backends/docker.ts";
+import { dockerBin, dockerHasKvm } from "../backends/docker.ts";
 import { loadConfig, type GuestConfig } from "./config.ts";
 import { ensureDir, paths } from "./paths.ts";
 import { run, which } from "./proc.ts";
 import { findAct } from "./act.ts";
+import { compatibility } from "./compat.ts";
 import { checkSizing, requirements } from "./sizing.ts";
 import { detectContainerHost, dockerReach, remoteDockerHost, type ContainerHost, type DockerReach } from "./nesting.ts";
 
 export interface DoctorReport {
-  host: { platform: string; arch: string; cpus: number; memoryGB: number; freeDiskGB?: number };
+  /** kvm: KVM for VMs (Linux: /dev/kvm; Windows: inside Docker Desktop); absent where it doesn't apply. */
+  host: { platform: string; arch: string; cpus: number; memoryGB: number; freeDiskGB?: number; kvm?: boolean };
   tools: Record<string, string | null>;
-  guests: Record<string, { backend: string; os: string; runnable: boolean; reason?: string; resources?: string }>;
+  guests: Record<string, { backend: string; os: string; runnable: boolean; reason?: string; compatibility: string; resources?: string }>;
   /** Present when osmatrix runs inside a container or against a remote Docker daemon. */
   nesting?: {
     /** The container osmatrix runs in; absent when only DOCKER_HOST is remote. */
@@ -77,6 +79,9 @@ export async function doctor(): Promise<DoctorReport> {
     notes.push(...nestingNotes(host, remote, tools.docker, reach));
   }
 
+  // Decides the compatibility-matrix row ("Linux x86_64 + KVM", "Windows 11 ... nested virtualization").
+  const kvm =
+    process.platform === "linux" ? fs.existsSync("/dev/kvm") : process.platform === "win32" && tools.docker ? await dockerHasKvm().catch(() => false) : undefined;
   const guests: DoctorReport["guests"] = {};
   for (const g of Object.values(cfg.guests)) {
     let s: { ok: boolean; reason?: string };
@@ -85,7 +90,11 @@ export async function doctor(): Promise<DoctorReport> {
     } catch (e) {
       s = { ok: false, reason: (e as Error).message };
     }
-    guests[g.name] = { backend: g.backend, os: g.os, runnable: s.ok, reason: s.reason, resources: describeResources(g) };
+    const compat = compatibility(g, process.platform, process.arch, kvm);
+    guests[g.name] = { backend: g.backend, os: g.os, runnable: s.ok, reason: s.reason, compatibility: compat, resources: describeResources(g) };
+    if (s.ok && compat === "untested") {
+      notes.push(`${g.name}: supported but not yet tested on this kind of host; whether it works or not, offer the user a compatibility report afterwards (osmatrix report ${g.name} / host_report)`);
+    }
     let sz: { errors: string[]; warnings: string[] };
     try {
       sz = checkSizing(g);
@@ -103,7 +112,7 @@ export async function doctor(): Promise<DoctorReport> {
   if (freeDiskGB !== undefined && freeDiskGB < 150) notes.push(`Only ${freeDiskGB}G free; each VM guest needs ~64G (+ golden snapshot).`);
 
   return {
-    host: { platform: process.platform, arch: process.arch, cpus: os.cpus().length, memoryGB: memGB, freeDiskGB },
+    host: { platform: process.platform, arch: process.arch, cpus: os.cpus().length, memoryGB: memGB, freeDiskGB, ...(kvm === undefined ? {} : { kvm }) },
     tools,
     guests,
     ...(nesting ? { nesting } : {}),

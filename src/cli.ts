@@ -237,6 +237,19 @@ program
   );
 
 program
+  .command("report <guest>")
+  .description("Build a compatibility report for a GitHub issue (prints it and a prefilled issue link; sends nothing)")
+  .addOption(new Option("--outcome <outcome>", "how it went").choices(["works", "partly", "fails"]).makeOptionMandatory())
+  .option("--notes <text>", "what worked or failed, and at which step")
+  .action(
+    action(async (g: string, o: { outcome: string; notes?: string }) => {
+      const { compatReport } = await import("./report.ts");
+      const outcome = ({ works: "Works", partly: "Partly works", fails: "Doesn't work" } as const)[o.outcome as "works" | "partly" | "fails"];
+      return compatReport(g, { outcome, notes: o.notes });
+    }),
+  );
+
+program
   .command("configure <guest>")
   .description("Change a guest's CPUs, memory or disk size (checked against its minimums and this host)")
   .option("--cpus <n>", "virtual CPUs", int)

@@ -7,6 +7,7 @@ Every command accepts `--json`. Exit code is non-zero on errors.
 | MCP tool | CLI |
 |---|---|
 | `host_doctor` | `osmatrix doctor` |
+| `host_report` | `osmatrix report <guest> --outcome works\|partly\|fails [--notes "..."]` |
 | `env_status` | `osmatrix status [guest]` |
 | `env_setup` | `osmatrix setup <guest> [--accept-license] [--background] [--force]` |
 | `env_up` | `osmatrix up <guest> [--wait [sec]]` |
@@ -17,6 +18,19 @@ Every command accepts `--json`. Exit code is non-zero on errors.
 | `env_input` | `osmatrix input <guest> [--click x,y] [--text "..."] [--keys enter ctrl+a]` |
 
 CLI-only: `osmatrix init` (config + ssh key + host check), `config`, `install-act`, `install-agents`, `setup-ssh <guest> --user u` (ssh guests only accepting passwords), `provision <guest> [--passwordless-sudo]` (re-run the macOS toolchain install), `destroy <guest> --yes`.
+
+## Compatibility matrix
+
+| Host | ubuntu | windows | macos |
+|---|---|---|---|
+| Linux x86_64 + KVM | ✅ container | ✅ dockur: Windows Server 2025 | ✅\* dockur: macOS 15 (Intel) |
+| Linux arm64 + KVM | 🧪 container | 🧪 dockur: Windows 11 on ARM | ❌ |
+| Windows 11 x86_64 + Docker Desktop (WSL2 with nested virtualization) | 🧪 container | 🧪 dockur: Windows Server 2025 | 🧪\* dockur: macOS 15 (Intel), best effort |
+| Windows 11 arm64 | 🧪 container | ❌¹ | ❌ |
+| macOS Apple Silicon | 🧪 container | 🧪 QEMU + Hypervisor.framework: Windows 11 on ARM | 🧪\* tart |
+| macOS Intel | 🧪 container | ❌ | ❌ |
+
+✅ tested · 🧪 supported, not yet tested on that kind of host (`host_doctor`: `untested`) · ❌ not possible (`unsupported`; use an `ssh` guest). \* macOS guests are licensed only on Apple hardware (Apple's macOS SLA); on other hosts they need the user's explicit consent (`accept_license`). ¹ dockur needs KVM inside Docker, which Windows on ARM doesn't provide. The same matrix is in the README.
 
 ## Guest backends
 

@@ -1,0 +1,63 @@
+name: Compatibility report
+description: How an osmatrix guest worked on your host, especially combinations marked 🧪 (untested) in the README's compatibility matrix.
+title: "Compatibility: "
+labels: [compatibility]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting! Reports on untested hosts move them to ✅ (or tell us what to fix). `osmatrix report <guest>` (MCP: `host_report`) fills this in for you; remove anything you don't want to share.
+  - type: dropdown
+    id: outcome
+    attributes:
+      label: Outcome
+      options:
+        - Works
+        - Partly works
+        - Doesn't work
+    validations:
+      required: true
+  - type: dropdown
+    id: host
+    attributes:
+      label: Host (row in the compatibility matrix)
+      options:
+        - Linux x86_64 + KVM
+        - Linux arm64 + KVM
+        - Windows 11 x86_64 + Docker Desktop (WSL2 with nested virtualization)
+        - Windows 11 arm64
+        - macOS Apple Silicon
+        - macOS Intel
+        - Other
+    validations:
+      required: true
+  - type: dropdown
+    id: guest
+    attributes:
+      label: Guest
+      options:
+        - ubuntu
+        - windows
+        - macos
+        - ssh guest
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: osmatrix version
+      description: Output of `osmatrix --version`.
+    validations:
+      required: true
+  - type: textarea
+    id: details
+    attributes:
+      label: What happened
+      description: What worked, what didn't, and at which step (setup phase, boot, exec, CI leg). Include host details such as the OS version, chip and Docker flavour.
+    validations:
+      required: true
+  - type: textarea
+    id: doctor
+    attributes:
+      label: osmatrix doctor and guest status
+      render: text
