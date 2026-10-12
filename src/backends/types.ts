@@ -44,6 +44,11 @@ export interface Backend {
   /** Called once ssh answers but rejects our key; backends that can install the key themselves do it here. */
   authorizeKey?(): Promise<boolean>;
   /**
+   * Post-boot housekeeping (e.g. growing a partition after a disk resize); idempotent and cheap once
+   * done. readyEndpoint calls it; backends may also call it from status().
+   */
+  afterReady?(): Promise<void>;
+  /**
    * Activity counters for an installed guest that is booting: disk bytes moved and firmware boots so far.
    * Undefined while the guest is still being installed, when long quiet phases are normal.
    */

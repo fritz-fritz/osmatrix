@@ -56,6 +56,7 @@ Everything binds to 127.0.0.1 only; nothing is exposed to the network. Forwards 
 
 ## Housekeeping
 
-- `env_down` when you're done with a VM (frees 8 GB RAM each). Mention to the user if you leave one running.
+- `env_down` when you're done with a VM (frees its RAM, 8 GB by default). Mention to the user if you leave one running.
+- `env_configure` resizes a guest (`cpus`, `memory`, and `disk` for dockur VMs only, which can only grow; tart and qemu guests reject `disk`). Raise `memory` when builds in the guest run out of memory, `cpus` when they are CPU-bound, `disk` when it fills up. The result shows the guest's minimums and warns when a value is low or too big for the host. Without `apply` the change waits for the next start; `apply` restarts the guest now, so ask the user first if they have work running in it.
 - `env_reset` restores the golden snapshot — use it instead of debugging a guest you've polluted. It discards everything changed inside the guest.
 - `env_snapshot` overwrites the golden snapshot. Only do this when the user asks (e.g. after installing a toolchain they want to keep).

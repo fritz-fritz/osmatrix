@@ -8,6 +8,7 @@ import { run } from "../core/proc.ts";
 import { ensureKey, sshProbe, type Endpoint } from "../core/ssh.ts";
 import { containerState, docker, dockerBin, imageExists, isPortConflict, portBinding, publishedPort } from "./docker.ts";
 import type { Backend, GuestStatus, Support } from "./types.ts";
+import { sizeMiB } from "../core/sizing.ts";
 
 /** Linux guest as a long-lived container (same image act uses for ubuntu-* legs) with sshd added. */
 export class ContainerBackend implements Backend {
@@ -79,6 +80,9 @@ export class ContainerBackend implements Backend {
     let image: string | undefined;
     if (st === "stopped") {
       try {
+        // cpus/memory may have changed since the container was created.
+        const limits = this.limitArgs();
+        if (limits.length) await docker(["update", ...limits, this.container]);
         await docker(["start", this.container]);
         return;
       } catch (e) {
@@ -109,10 +113,20 @@ export class ContainerBackend implements Backend {
       "-e", `AUTHORIZED_KEY=${publicKey}`,
       "--label", "osmatrix.guest=" + this.cfg.name,
     ];
-    if (this.cfg.cpus) args.push("--cpus", String(this.cfg.cpus));
-    if (this.cfg.memory) args.push("--memory", this.cfg.memory.toLowerCase().replace(/b$/, ""));
-    args.push(image);
+    args.push(...this.limitArgs(), image);
     await docker(args);
+  }
+
+  private limitArgs(): string[] {
+    const args: string[] = [];
+    if (this.cfg.cpus) args.push("--cpus", String(this.cfg.cpus));
+    if (this.cfg.memory) {
+      // Same units as the sizing checks (a bare number is GiB); docker would read a bare number as bytes.
+      const mem = `${sizeMiB(this.cfg.memory)}m`;
+      // docker update refuses a memory limit above the existing swap limit; keep them equal (no extra swap).
+      args.push("--memory", mem, "--memory-swap", mem);
+    }
+    return args;
   }
 
   async down(): Promise<void> {

@@ -1,7 +1,8 @@
 import fs from "node:fs";
 import path from "node:path";
 import { backendFor, type Backend, type GuestStatus } from "./backends/index.ts";
-import { guestWorkdir, loadConfig, type GuestConfig } from "./core/config.ts";
+import { guestWorkdir, loadConfig, readRawConfig, writeConfig, type GuestConfig } from "./core/config.ts";
+import { checkSizing, requirements, type Sizing } from "./core/sizing.ts";
 import { assetsDir, paths } from "./core/paths.ts";
 import { kill, sleep } from "./core/proc.ts";
 import {
@@ -155,6 +156,58 @@ export async function up(name: string, waitSec = 0): Promise<GuestStatus> {
   return waitSec > 0 ? waitReady(g, waitSec) : g.backend.status();
 }
 
+export interface ConfigureResult {
+  guest: string;
+  /** Effective sizing after the change. */
+  sizing: Sizing;
+  requirements: ReturnType<typeof requirements>;
+  warnings: string[];
+  /** What happened, or what still has to happen, for the change to take effect. */
+  applied: string;
+  status?: GuestStatus;
+}
+
+/**
+ * Change a guest's cpus/memory/disk in config.toml after checking them against the guest's minimums and
+ * this host. With apply, a running guest is restarted (a stopped one started) and waited for, so the
+ * change is live on return; otherwise it takes effect at the guest's next start.
+ */
+export async function configure(name: string, change: Sizing, opts: { apply?: boolean; waitSec?: number } = {}): Promise<ConfigureResult> {
+  const g = getGuest(name);
+  if (g.cfg.backend === "ssh") throw new Error(`${name} is an ssh guest: osmatrix does not size existing machines`);
+  if (change.disk !== undefined && g.cfg.backend !== "dockur") throw new Error(`disk can only be set for dockur VM guests (${name} uses ${g.cfg.backend})`);
+  const next: GuestConfig = { ...g.cfg };
+  for (const k of ["cpus", "memory", "disk"] as const) if (change[k] !== undefined) (next as unknown as Record<string, unknown>)[k] = change[k];
+  const current = { disk: g.cfg.disk ?? (g.cfg.backend === "dockur" ? "64G" : undefined) };
+  const { errors, warnings } = checkSizing(next, undefined, current);
+  if (errors.length) throw new Error(`${name}: ${errors.join("; ")}`);
+
+  const raw = readRawConfig();
+  const guests = ((raw.guests ??= {}) as Record<string, Record<string, unknown>>);
+  const entry = (guests[name] ??= {});
+  for (const k of ["cpus", "memory", "disk"] as const) if (change[k] !== undefined) entry[k] = change[k];
+  writeConfig(raw);
+
+  const sizing = { cpus: next.cpus, memory: next.memory, disk: next.disk };
+  const base = { guest: name, sizing, requirements: requirements(next), warnings };
+  const st = await g.backend.status();
+  if (!opts.apply) {
+    const applied =
+      st.state === "absent" || st.state === "stopped"
+        ? "saved; takes effect when the guest next starts"
+        : "saved; the running guest keeps its old sizing until it restarts (env_down, then env_up), or call again with apply";
+    return { ...base, applied };
+  }
+  const fresh = getGuest(name);
+  if (st.state !== "absent" && st.state !== "stopped") {
+    await unforward(name, undefined, true);
+    await fresh.backend.down();
+  }
+  await fresh.backend.up();
+  const status = await waitReady(fresh, opts.waitSec ?? 900);
+  return { ...base, applied: status.state === "ready" ? "applied; the guest restarted with the new sizing" : `restarted, but not ready yet (${status.state})`, status };
+}
+
 export async function down(name: string): Promise<GuestStatus> {
   const g = getGuest(name);
   await unforward(name, undefined, true);
@@ -192,7 +245,12 @@ export async function readyEndpoint(name: string): Promise<Endpoint> {
     await sleep(2000);
     p = await sshProbe(ep);
   }
-  if (p === "ok") return ep;
+  if (p === "ok") {
+    // e.g. grow the partition after a disk resize, for callers that never looked at status. Best effort:
+    // status() reports a failure.
+    await g.backend.afterReady?.().catch(() => undefined);
+    return ep;
+  }
   if (p === "auth" && g.backend.authorizeKey && (await g.backend.authorizeKey()) && (await sshProbe(ep)) === "ok") return ep;
   const s = await g.backend.status();
   throw new Error(`guest ${name} is not ready (state: ${s.state}${s.detail ? `; ${s.detail}` : ""}). Run: osmatrix up ${name} --wait`);

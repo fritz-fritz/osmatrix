@@ -6,7 +6,7 @@ import { guestShell, loadConfig, type GuestConfig } from "../core/config.ts";
 import { assertLocalGuestsReachable, dockerReach, localGuestBlockReason } from "../core/nesting.ts";
 import { assetsDir, ensureDir, paths, resourcePrefix } from "../core/paths.ts";
 import { run } from "../core/proc.ts";
-import { ensureKey, sshProbe, type Endpoint } from "../core/ssh.ts";
+import { ensureKey, sshExec, sshProbe, type Endpoint } from "../core/ssh.ts";
 import { containerState, copyVolume, docker, dockerBin, dockerHasKvm, isPortConflict, portBinding, publishedPort, volumeExists } from "./docker.ts";
 import type { Backend, GuestStatus, Support } from "./types.ts";
 
@@ -71,12 +71,29 @@ export class DockurBackend implements Backend {
     return { ok: true };
   }
 
-  private async writeCompose(opts: { picker?: boolean; anyPorts?: boolean } = {}): Promise<void> {
-    const env: Record<string, string> = {
+  /** The settings baked into the container at creation; a stopped container whose label differs is recreated. */
+  private sizing(): Record<string, string> {
+    return {
       VERSION: this.cfg.version ?? (this.cfg.os === "macos" ? "15" : "2025"),
       RAM_SIZE: this.cfg.memory ?? "8G",
       CPU_CORES: String(this.cfg.cpus ?? 4),
       DISK_SIZE: this.cfg.disk ?? "64G",
+    };
+  }
+
+  private settingsKey(): string {
+    return crypto.createHash("sha256").update(JSON.stringify([this.image, this.sizing()])).digest("hex").slice(0, 12);
+  }
+
+  /** True when the container exists but was created with other image/version/cpu/memory/disk settings. */
+  async settingsChanged(): Promise<boolean> {
+    const r = await run(dockerBin(), ["inspect", "-f", '{{index .Config.Labels "osmatrix.settings"}}', this.container]);
+    return r.code === 0 && r.stdout.trim() !== this.settingsKey();
+  }
+
+  private async writeCompose(opts: { picker?: boolean; anyPorts?: boolean } = {}): Promise<void> {
+    const env: Record<string, string> = {
+      ...this.sizing(),
       // Only used in user-mode networking fallback; NAT mode forwards all non-reserved ports already.
       USER_PORTS: "22",
     };
@@ -115,7 +132,7 @@ export class DockurBackend implements Backend {
                 await portBinding(this.cfg.ssh_port ?? 2222, 22),
               ],
           volumes,
-          labels: { "osmatrix.guest": this.cfg.name },
+          labels: { "osmatrix.guest": this.cfg.name, "osmatrix.settings": this.settingsKey() },
           restart: "no",
           stop_grace_period: "2m",
         },
@@ -151,7 +168,11 @@ export class DockurBackend implements Backend {
     const p = await sshProbe(await this.endpoint());
     if (p === "ok") {
       if (!this.everReady()) fs.writeFileSync(path.join(this.dir, ".ready-once"), new Date().toISOString());
-      return { ...base, state: "ready", urls, ports: ports as Record<string, number> };
+      // Runs on whichever look at the guest comes first after a boot (env_status, waitReady, a CI leg),
+      // so a disk resized for "the next start" grows without anyone having to wait for it.
+      // Housekeeping must not make a usable guest look broken: a failure only goes into detail.
+      const err = await this.afterReady().then(() => undefined, (e: Error) => e.message);
+      return { ...base, state: "ready", urls, ports: ports as Record<string, number>, ...(err ? { detail: err } : {}) };
     }
     if (p === "auth") {
       return {
@@ -175,7 +196,8 @@ export class DockurBackend implements Backend {
     await assertLocalGuestsReachable(this.cfg.os);
     const st = await containerState(this.container);
     if (st === "running") return;
-    if (st === "stopped") {
+    // A changed cpus/memory/disk/version only reaches QEMU through a new container (the disk is kept).
+    if (st === "stopped" && !(await this.settingsChanged())) {
       // Keep the existing port mapping; if one of its ports got taken meanwhile, recreate with new ports.
       try {
         await docker(["start", this.container]);
@@ -246,13 +268,31 @@ export class DockurBackend implements Backend {
     if (wasRunning) await this.up();
   }
 
+  private get grownFile() {
+    return path.join(this.dir, ".disk-grown");
+  }
+
+  /**
+   * Grows the system partition into space a bigger `disk` setting added (QEMU's disk image grows at
+   * start, the partition inside does not). Runs once per disk size; a no-op when there is no new space.
+   */
+  async afterReady(): Promise<void> {
+    const want = this.sizing().DISK_SIZE;
+    if (fs.existsSync(this.grownFile) && fs.readFileSync(this.grownFile, "utf8").trim() === want) return;
+    const r = await sshExec(await this.endpoint(), this.cfg.os === "windows" ? GROW_WINDOWS : GROW_MACOS, { timeoutMs: 5 * 60_000 });
+    if (r.code !== 0) throw new Error(`could not grow the system partition to fill the ${want} disk: ${(r.stderr || r.stdout).trim()}`);
+    fs.writeFileSync(this.grownFile, want);
+  }
+
   /** Readiness and boot-time history describe the current disk; a fresh install must not inherit them. */
   private forgetInstall(): void {
-    for (const f of [".ready-once", "boot-times.json"]) fs.rmSync(path.join(this.dir, f), { force: true });
+    for (const f of [".ready-once", "boot-times.json", ".disk-grown"]) fs.rmSync(path.join(this.dir, f), { force: true });
   }
 
   async reset(): Promise<void> {
     await this.down();
+    // The golden snapshot's partition may predate a disk size change.
+    fs.rmSync(this.grownFile, { force: true });
     if (await volumeExists(this.goldenVol)) {
       await copyVolume(this.goldenVol, this.storageVol);
     } else {
@@ -290,3 +330,32 @@ export class DockurBackend implements Backend {
     return { host: "127.0.0.1", port };
   }
 }
+
+// C: is followed by the Recovery partition, which blocks growing it. Guests are disposable, so the
+// Recovery partition is dropped once the disk has grown (WinRE then lives on C:).
+const GROW_WINDOWS = [
+  "$ErrorActionPreference = 'Stop'",
+  "Update-HostStorageCache",
+  "$c = Get-Partition -DriveLetter C",
+  "$disk = Get-Disk -Number $c.DiskNumber",
+  "$end = (Get-Partition -DiskNumber $c.DiskNumber | ForEach-Object { $_.Offset + $_.Size } | Measure-Object -Maximum).Maximum",
+  "if ($disk.Size - $end -lt 100MB -and (Get-PartitionSupportedSize -DriveLetter C).SizeMax -lt $c.Size + 100MB) { 'no new space'; exit 0 }",
+  "$rec = Get-Partition -DiskNumber $c.DiskNumber | Where-Object { $_.Offset -gt $c.Offset -and $_.Type -eq 'Recovery' }",
+  "if ($rec) { reagentc /disable | Out-Null; $rec | Remove-Partition -Confirm:$false; reagentc /enable | Out-Null }",
+  "Resize-Partition -DriveLetter C -Size (Get-PartitionSupportedSize -DriveLetter C).SizeMax",
+  "'grown to ' + [math]::Round((Get-Partition -DriveLetter C).Size / 1GB) + 'G'",
+].join("; ");
+
+// The APFS container is the last partition. repairDisk first moves the GPT backup header to the new end.
+const GROW_MACOS = [
+  "set -e",
+  "store=$(diskutil info -plist / | plutil -extract APFSPhysicalStores.0.APFSPhysicalStore raw -)",
+  "disk=${store%s*}",
+  "total=$(diskutil info -plist \"$disk\" | plutil -extract Size raw -)",
+  "off=$(diskutil info -plist \"$store\" | plutil -extract PartitionMapPartitionOffset raw -)",
+  "size=$(diskutil info -plist \"$store\" | plutil -extract Size raw -)",
+  "if [ $((total - off - size)) -lt 104857600 ]; then echo 'no new space'; exit 0; fi",
+  "yes | sudo diskutil repairDisk \"$disk\" >/dev/null",
+  "sudo diskutil apfs resizeContainer \"$store\" 0 >/dev/null",
+  "echo \"grown $store\"",
+].join("\n");

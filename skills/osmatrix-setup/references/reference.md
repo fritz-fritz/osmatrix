@@ -11,6 +11,7 @@ Every command accepts `--json`. Exit code is non-zero on errors.
 | `env_setup` | `osmatrix setup <guest> [--accept-license] [--background] [--force]` |
 | `env_up` | `osmatrix up <guest> [--wait [sec]]` |
 | `env_down` | `osmatrix down <guest>` |
+| `env_configure` | `osmatrix configure <guest> [--cpus n] [--memory 8G] [--disk 96G] [--apply]` |
 | `env_reset` | `osmatrix reset <guest> [--wait [sec]]` |
 | `env_screenshot` | `osmatrix screenshot <guest> -o shot.png` |
 | `env_input` | `osmatrix input <guest> [--click x,y] [--text "..."] [--keys enter ctrl+a]` |
@@ -51,8 +52,9 @@ max_vms = 2                      # VM guests running CI legs at the same time
 macos_eula_acknowledged = true   # required for dockur macOS on non-Apple hardware
 
 [guests.windows]
-memory = "12G"
-cpus = 6
+memory = "12G"                   # min 4G; prefer env_configure, which checks the values
+cpus = 6                         # min 2
+disk = "96G"                     # dockur VMs; min 40G (Windows 11 ARM 64G, macOS 48G); grow only
 
 [guests.macos]
 enabled = false                  # drop a default guest
