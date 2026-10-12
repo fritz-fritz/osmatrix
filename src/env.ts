@@ -65,11 +65,7 @@ export async function waitReady(g: Guest, timeoutSec: number): Promise<GuestStat
   let triedKey = false;
   for (;;) {
     const s = await g.backend.status();
-    if (s.state === "ready") {
-      // Housekeeping after a boot must not make a usable guest look broken.
-      const err = await g.backend.afterReady?.().then(() => undefined, (e: Error) => e.message);
-      return err ? { ...s, detail: [s.detail, err].filter(Boolean).join("; ") } : s;
-    }
+    if (s.state === "ready") return s;
     if (s.state === "needs-ssh-setup" && g.backend.authorizeKey && !triedKey) {
       triedKey = true;
       await g.backend.authorizeKey();
@@ -175,7 +171,12 @@ export async function readyEndpoint(name: string): Promise<Endpoint> {
     await sleep(2000);
     p = await sshProbe(ep);
   }
-  if (p === "ok") return ep;
+  if (p === "ok") {
+    // e.g. grow the partition after a disk resize, for callers that never looked at status. Best effort:
+    // status() reports a failure.
+    await g.backend.afterReady?.().catch(() => undefined);
+    return ep;
+  }
   if (p === "auth" && g.backend.authorizeKey && (await g.backend.authorizeKey()) && (await sshProbe(ep)) === "ok") return ep;
   const s = await g.backend.status();
   throw new Error(`guest ${name} is not ready (state: ${s.state}${s.detail ? `; ${s.detail}` : ""}). Run: osmatrix up ${name} --wait`);

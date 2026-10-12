@@ -58,11 +58,16 @@ export function requirements(g: Pick<GuestConfig, "os" | "backend" | "image">): 
 /** "8G", "8192M", "8GB", "8" (GiB) -> GiB. */
 export function parseSizeGB(s: string | number): number {
   if (typeof s === "number") return s;
-  const m = /^\s*([\d.]+)\s*([KMGT]?)i?B?\s*$/i.exec(s);
+  const m = /^\s*(\d+(?:\.\d+)?)\s*([KMGT]?)i?B?\s*$/i.exec(s);
   if (!m) throw new Error(`invalid size "${s}" (use e.g. "8G" or "8192M")`);
   const n = Number(m[1]);
   const unit = (m[2] || "G").toUpperCase();
   return { K: n / 1024 ** 2, M: n / 1024, G: n, T: n * 1024 }[unit] ?? n;
+}
+
+/** A size as whole MiB, for tools that take a number (tart) or a unit suffix (docker: `${mib}m`). */
+export function sizeMiB(s: string | number): number {
+  return Math.round(parseSizeGB(s) * 1024);
 }
 
 export interface Sizing {
@@ -77,8 +82,8 @@ export interface SizingCheck {
 }
 
 /**
- * Checks a guest's sizing against its requirements and this host. `others` are the other VM guests
- * that may run at the same time (their memory counts against the host too).
+ * Checks one guest's sizing against its requirements and this host. Memory across all VM guests is
+ * checked by doctor (host.ts), not here.
  */
 export function checkSizing(
   g: GuestConfig,

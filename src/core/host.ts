@@ -86,7 +86,13 @@ export async function doctor(): Promise<DoctorReport> {
       s = { ok: false, reason: (e as Error).message };
     }
     guests[g.name] = { backend: g.backend, os: g.os, runnable: s.ok, reason: s.reason, resources: describeResources(g) };
-    const sz = checkSizing(g);
+    let sz: { errors: string[]; warnings: string[] };
+    try {
+      sz = checkSizing(g);
+    } catch (e) {
+      // e.g. a hand-edited size doctor can't parse: report it instead of failing the whole check.
+      sz = { errors: [(e as Error).message], warnings: [] };
+    }
     for (const m of [...sz.errors, ...sz.warnings]) notes.push(`${g.name}: ${m} (change with env_configure / \`osmatrix configure\`)`);
   }
   const memGB = Math.round(os.totalmem() / 1024 ** 3);

@@ -43,7 +43,10 @@ export interface Backend {
   endpoint(): Promise<Endpoint>;
   /** Called once ssh answers but rejects our key; backends that can install the key themselves do it here. */
   authorizeKey?(): Promise<boolean>;
-  /** Called each time waitReady sees the guest ready (e.g. to grow a partition after a disk resize). */
+  /**
+   * Post-boot housekeeping (e.g. growing a partition after a disk resize); idempotent and cheap once
+   * done. readyEndpoint calls it; backends may also call it from status().
+   */
   afterReady?(): Promise<void>;
   /** VNC endpoint for screenshots/input, when available. */
   vnc?(): Promise<{ host: string; port: number } | undefined>;

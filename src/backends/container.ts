@@ -8,6 +8,7 @@ import { run } from "../core/proc.ts";
 import { ensureKey, sshProbe, type Endpoint } from "../core/ssh.ts";
 import { containerState, docker, dockerBin, imageExists, isPortConflict, portBinding, publishedPort } from "./docker.ts";
 import type { Backend, GuestStatus, Support } from "./types.ts";
+import { sizeMiB } from "../core/sizing.ts";
 
 /** Linux guest as a long-lived container (same image act uses for ubuntu-* legs) with sshd added. */
 export class ContainerBackend implements Backend {
@@ -120,7 +121,8 @@ export class ContainerBackend implements Backend {
     const args: string[] = [];
     if (this.cfg.cpus) args.push("--cpus", String(this.cfg.cpus));
     if (this.cfg.memory) {
-      const mem = this.cfg.memory.toLowerCase().replace(/b$/, "");
+      // Same units as the sizing checks (a bare number is GiB); docker would read a bare number as bytes.
+      const mem = `${sizeMiB(this.cfg.memory)}m`;
       // docker update refuses a memory limit above the existing swap limit; keep them equal (no extra swap).
       args.push("--memory", mem, "--memory-swap", mem);
     }

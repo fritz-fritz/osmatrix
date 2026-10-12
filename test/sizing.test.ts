@@ -34,3 +34,11 @@ test("checkSizing rejects what cannot work and warns below the recommendation", 
   assert.match(checkSizing({ ...win, disk: "48G" }, host, { disk: "64G" }).errors.join(), /can only grow/);
   assert.deepEqual(checkSizing({ ...win, disk: "128G" }, host, { disk: "64G" }).errors, []);
 });
+
+test("sizes reject malformed numbers; sizeMiB gives docker/tart units", async () => {
+  const { sizeMiB } = await import("../src/core/sizing.ts");
+  for (const bad of [".", "1.2.3", "G", "-1G", ""]) assert.throws(() => parseSizeGB(bad), /invalid size/, bad);
+  assert.equal(sizeMiB("8"), 8192);
+  assert.equal(sizeMiB("8G"), 8192);
+  assert.equal(sizeMiB("1536M"), 1536);
+});

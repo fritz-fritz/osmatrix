@@ -168,7 +168,11 @@ export class DockurBackend implements Backend {
     const p = await sshProbe(await this.endpoint());
     if (p === "ok") {
       if (!this.everReady()) fs.writeFileSync(path.join(this.dir, ".ready-once"), new Date().toISOString());
-      return { ...base, state: "ready", urls, ports: ports as Record<string, number> };
+      // Runs on whichever look at the guest comes first after a boot (env_status, waitReady, a CI leg),
+      // so a disk resized for "the next start" grows without anyone having to wait for it.
+      // Housekeeping must not make a usable guest look broken: a failure only goes into detail.
+      const err = await this.afterReady().then(() => undefined, (e: Error) => e.message);
+      return { ...base, state: "ready", urls, ports: ports as Record<string, number>, ...(err ? { detail: err } : {}) };
     }
     if (p === "auth") {
       return {

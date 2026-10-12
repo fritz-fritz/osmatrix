@@ -124,10 +124,10 @@ Change a guest's size with `osmatrix configure` (MCP: `env_configure`). It check
 
 ```bash
 osmatrix configure windows --memory 12G --cpus 6          # takes effect at the next start
-osmatrix configure macos --disk 96G --apply               # restart now; the guest's partition grows to fill the disk
+osmatrix configure windows --disk 96G --apply             # dockur VMs only: restart now; the partition grows to fill the disk
 ```
 
-Disks can only grow. After a disk grows, osmatrix extends the system partition on the next boot. On Windows that removes the Recovery partition that sits after C:, and Windows RE moves onto C:.
+`disk` applies to dockur VMs (Windows and macOS on Linux/Windows hosts); tart and the Apple Silicon QEMU guest keep their image's disk size. Disks can only grow. After a disk grows, osmatrix extends the system partition on the next boot. On Windows that removes the Recovery partition that sits after C:, and Windows RE moves onto C:.
 
 ### Devcontainers, Codespaces and remote Docker
 
