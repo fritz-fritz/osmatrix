@@ -56,13 +56,17 @@ interface RunnerCache {
   error?: string;
 }
 
-/** The newest ubuntu24 runner image release ("ubuntu24/20261004.327"); ubuntu24-arm64 is a separate image. */
+/**
+ * The newest ubuntu24 runner image release ("ubuntu24/20261004.327"); ubuntu24-arm64 is a separate image.
+ * A release stays a prerelease while it rolls out, so most runners have the newest full release; the
+ * newest prerelease counts only when the listing has no full one.
+ */
 export function latestRunnerTag(releases: unknown): string | undefined {
   if (!Array.isArray(releases)) return undefined;
-  for (const r of releases as { tag_name?: unknown; draft?: unknown }[]) {
-    if (!r?.draft && typeof r?.tag_name === "string" && r.tag_name.startsWith("ubuntu24/")) return r.tag_name;
-  }
-  return undefined;
+  const ubuntu = (releases as { tag_name?: unknown; draft?: unknown; prerelease?: unknown }[]).filter(
+    (r) => !r?.draft && typeof r?.tag_name === "string" && r.tag_name.startsWith("ubuntu24/"),
+  );
+  return (ubuntu.find((r) => !r.prerelease) ?? ubuntu[0])?.tag_name as string | undefined;
 }
 
 /** "- Rust 1.99.0" in the readme's "### Rust Tools" section. */

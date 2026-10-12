@@ -42,6 +42,16 @@ test("latestRunnerTag takes the first ubuntu24/ release, not ubuntu24-arm64", ()
   ];
   assert.equal(latestRunnerTag(releases), "ubuntu24/20261004.327");
   assert.equal(latestRunnerTag([{ tag_name: "ubuntu22/1" }]), undefined);
+  // Releases still rolling out (prereleases) and drafts lose to the newest full release...
+  const rolling = [
+    { tag_name: "ubuntu24/20261011.330", prerelease: true },
+    { tag_name: "ubuntu24/20261010.329", draft: true },
+    { tag_name: "ubuntu24/20261004.327", prerelease: false },
+  ];
+  assert.equal(latestRunnerTag(rolling), "ubuntu24/20261004.327");
+  // ...and count only when the listing has no full release.
+  assert.equal(latestRunnerTag(rolling.slice(0, 2)), "ubuntu24/20261011.330");
+  assert.equal(latestRunnerTag([{ tag_name: "ubuntu24/20261010.329", draft: true }]), undefined);
   assert.equal(latestRunnerTag({ message: "API rate limit exceeded" }), undefined);
 });
 
