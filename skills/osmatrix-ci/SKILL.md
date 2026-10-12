@@ -17,7 +17,7 @@ Always pass the repository's **absolute host path** as `repo` to every `ci_*` to
 
 A workflow's matrix is expanded into legs. `ubuntu-*` legs run with act on the host's Docker; `windows-*` / `macos-*` legs run act *inside* the matching VM (host mode), after syncing the repo into it.
 
-Linux legs use `act_linux_image` from the osmatrix config. At its default (`catthehacker/ubuntu:act-24.04`), osmatrix runs them in `osmatrix/ubuntu:act-24.04-<hash>` instead: that image plus rustup stable with rustfmt and clippy, which GitHub's ubuntu runners preinstall. The first Linux leg builds it locally (a few minutes, needs network) and shows it in the leg's log; concurrent runs wait for that one build. A user-set `act_linux_image` is used as is.
+Linux legs use `act_linux_image` from the osmatrix config. At its default (`catthehacker/ubuntu:act-24.04`), osmatrix runs them in `osmatrix/ubuntu:act-24.04-<hash>-rust<version>` instead: that image plus rustup with rustfmt and clippy, at the Rust version of GitHub's latest ubuntu24 runner image (looked up once a day) and installed as `stable`, as on GitHub. The first Linux leg after a new runner release builds it locally (a few minutes, needs network) and says so in the leg's log; concurrent runs wait for that one build. Offline, legs use the newest local `osmatrix/ubuntu` image, or build one with the current stable Rust, and the log notes it. A user-set `act_linux_image` is used as is.
 
 A windows/macos leg needs that guest to be `ready` (`env_status`, CLI `osmatrix status`). If the guest is `absent` or its status `detail` says "not set up", follow `osmatrix-setup` first; VM setup takes 20–60 min. VMs are slow to boot (1–3 min), so **don't start VMs you don't need**, and leave a VM running while you iterate.
 

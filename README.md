@@ -202,7 +202,7 @@ Secrets for CI go in `<repo>/.osmatrix/secrets` (or `.secrets`) as `KEY=value` l
 
 `osmatrix config` prints the effective config and its file path. See [skills/osmatrix-setup/references/reference.md](skills/osmatrix-setup/references/reference.md) for every option, including adding `ssh` guests such as a real Mac on your network.
 
-Linux CI legs run in `act_linux_image`. Its default, `catthehacker/ubuntu:act-24.04`, lacks the Rust toolchain GitHub's ubuntu runners preinstall, so with the default osmatrix builds a thin layer over it once, `osmatrix/ubuntu:act-24.04-<hash>` from [`ubuntu-parity.Dockerfile`](assets/container/ubuntu-parity.Dockerfile), which adds rustup stable with rustfmt and clippy. The hash follows the Dockerfile, so an osmatrix update that changes it rebuilds the image on the next Linux leg. Set `act_linux_image` to another image to use that image unchanged.
+Linux CI legs run in `act_linux_image`. Its default, `catthehacker/ubuntu:act-24.04`, lacks the Rust toolchain GitHub's ubuntu runners preinstall, so with the default osmatrix builds a thin layer over it, `osmatrix/ubuntu:act-24.04-<hash>-rust<version>` from [`ubuntu-parity.Dockerfile`](assets/container/ubuntu-parity.Dockerfile). It adds rustup with rustfmt and clippy at the Rust version of GitHub's latest ubuntu24 runner image, which osmatrix reads from that release's readme once a day, installed as `stable` as on GitHub. The hash follows the Dockerfile, so a runner release or an osmatrix update that changes the Dockerfile rebuilds the image on the next Linux leg. Offline, Linux legs use the newest local image, or build one with the current stable Rust. Set `act_linux_image` to another image to use that image unchanged.
 
 ## What local runs don't reproduce
 

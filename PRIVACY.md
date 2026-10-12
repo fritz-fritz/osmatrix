@@ -11,7 +11,7 @@ osmatrix has no telemetry or analytics and does not independently transmit your 
 ## What osmatrix stores, on your machine
 
 - **Configuration:** `config.toml` in your user config directory (on Linux, `~/.config/osmatrix`).
-- **Data:** guest state, an SSH key generated for your guests, generated guest passwords (`credentials.json`), logs and a downloaded `act` binary, in your user data directory (on Linux, `~/.local/share/osmatrix`).
+- **Data:** guest state, an SSH key generated for your guests, generated guest passwords (`credentials.json`), logs, a downloaded `act` binary and the cached Rust version of GitHub's runner image (`runner-image.json`), in your user data directory (on Linux, `~/.local/share/osmatrix`).
 - **Guest disks and snapshots:** in local Docker volumes or tart VMs.
 - **CI run logs:** in `.osmatrix/runs/` inside each repository you test. That directory is git-ignored automatically.
 
@@ -22,6 +22,7 @@ You can delete all of it at any time: `osmatrix destroy <guest> --yes` for each 
 osmatrix connects to the network only to fetch software that you ask it to set up:
 
 - `act` releases from GitHub
+- the release list and readme of GitHub's runner images (actions/runner-images, at most once a day), to match the Linux CI image's Rust version, and Rust from rustup.rs
 - container images from Docker Hub
 - Windows Server evaluation media from Microsoft
 - macOS recovery and installer images from Apple

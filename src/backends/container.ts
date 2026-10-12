@@ -7,7 +7,7 @@ import { assetsDir, resourcePrefix } from "../core/paths.ts";
 import { run } from "../core/proc.ts";
 import { ensureKey, sshProbe, type Endpoint } from "../core/ssh.ts";
 import { containerState, docker, dockerBin, imageExists, isPortConflict, portBinding, publishedPort } from "./docker.ts";
-import { ensureLinuxImage, linuxImageFor } from "./linux-image.ts";
+import { ensureLinuxImage } from "./linux-image.ts";
 import type { Backend, GuestStatus, Support } from "./types.ts";
 import { sizeMiB } from "../core/sizing.ts";
 
@@ -31,8 +31,7 @@ export class ContainerBackend implements Backend {
     return this.cfg.ssh_port ?? 2221;
   }
 
-  private sshImageTag(): string {
-    const base = linuxImageFor(this.cfg.image ?? DEFAULT_LINUX_IMAGE);
+  private sshImageTag(base: string): string {
     const dir = path.join(assetsDir, "container");
     const h = crypto.createHash("sha256").update(base);
     for (const f of ["Dockerfile", "entrypoint.sh"]) h.update(fs.readFileSync(path.join(dir, f)));
@@ -67,9 +66,9 @@ export class ContainerBackend implements Backend {
   }
 
   private async ensureImage(): Promise<string> {
-    const tag = this.sshImageTag();
+    const base = await ensureLinuxImage(this.cfg.image ?? DEFAULT_LINUX_IMAGE, { pid: process.pid, run: "env", repo: "", leg: `guest ${this.cfg.name}` });
+    const tag = this.sshImageTag(base);
     if (!(await imageExists(tag))) {
-      const base = await ensureLinuxImage(this.cfg.image ?? DEFAULT_LINUX_IMAGE, { pid: process.pid, run: "env", repo: "", leg: `guest ${this.cfg.name}` });
       await docker(
         ["build", "-t", tag, "--build-arg", `BASE=${base}`, path.join(assetsDir, "container")],
         60 * 60_000,

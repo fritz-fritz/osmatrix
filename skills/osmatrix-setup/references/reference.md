@@ -87,7 +87,7 @@ labels = ["macos-*"]
 
 Labels decide which guest serves a `runs-on` label (globs, first match wins). Linux labels are served by act on the host.
 
-`act_linux_image` defaults to `catthehacker/ubuntu:act-24.04`. With the default, Linux legs and the `ubuntu` guest use `osmatrix/ubuntu:act-24.04-<hash>`, a local layer over it that adds rustup stable with rustfmt and clippy (preinstalled on GitHub's ubuntu runners). It's built on first use, in a few minutes, and again when an osmatrix update changes its Dockerfile. Set another image to use it unchanged; it must exist locally or be pullable, and `ci_plan` warns on Linux legs that use Rust, since such an image may lack it.
+`act_linux_image` defaults to `catthehacker/ubuntu:act-24.04`. With the default, Linux legs and the `ubuntu` guest use `osmatrix/ubuntu:act-24.04-<hash>-rust<version>`, a local layer over it that adds rustup with rustfmt and clippy at the Rust version GitHub's latest ubuntu24 runner image preinstalls (read from that release's readme, cached for a day). It's built on first use, in a few minutes, and again after a runner release or an osmatrix update that changes its Dockerfile. Offline, the newest local one is used. Set another image to use it unchanged; it must exist locally or be pullable, and `ci_plan` warns on Linux legs that use Rust, since such an image may lack it.
 
 ## Guest-side layout
 
