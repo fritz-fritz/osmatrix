@@ -13,7 +13,7 @@ Use the **MCP tools** (`host_doctor`, `env_setup`, ...) when they are available:
 
 ## First use
 
-1. `host_doctor` (CLI: `osmatrix doctor`) checks prerequisites and explains why a guest can't run on this host (no Docker, no KVM, not Apple Silicon, ...). Guests a host can't run may be configured as `ssh` guests pointing at another machine (below).
+1. `host_doctor` (CLI: `osmatrix doctor`) checks prerequisites and explains why a guest can't run on this host (no Docker, no KVM, not Apple Silicon, ...). Each guest also has a `compatibility`: `tested`, `untested` (supported, but nobody has reported on this kind of host yet) or `unsupported` (see the matrix in [references/reference.md](references/reference.md)). Mention an `untested` guest to the user before relying on it. Guests a host can't run may be configured as `ssh` guests pointing at another machine (below).
 2. `env_status` (`osmatrix status`) lists the guests and their state.
 3. **Inside a devcontainer, Codespace or against a remote Docker daemon**, `host_doctor` reports `nesting`. If the daemon is outside this environment (Docker-outside-of-Docker), local guests are refused because their ssh ports and bind mounts land on the Docker host, not here. Don't work around the refusal. Tell the user, and offer two options: an `ssh` guest (a real machine; works from anywhere), or running osmatrix on the Docker host. Linux CI legs still run, but artifact/cache steps may fail there. See "Devcontainers and remote Docker" in [references/reference.md](references/reference.md).
 
@@ -53,10 +53,24 @@ labels = ["macos-*"]             # which runs-on labels it serves
 
 `up`/`down` are no-ops for ssh guests and `reset`/`snapshot` are unsupported. Host keys are checked (trust on first use). See [references/reference.md](references/reference.md) for every config option.
 
+## Compatibility reports
+
+The maintainers track which host/guest combinations work through GitHub issues. Offer a report to the user, **never file one without their explicit yes**, when:
+
+- you used a guest whose `compatibility` is `untested` (whether it worked or not), once the task's outcome is clear; or
+- a `tested` guest failed in a way that looks like an osmatrix problem rather than the user's code (setup, boot, ssh, provisioning).
+
+Offer at most once per guest and session, and don't interrupt urgent work for it: offer at a natural stopping point.
+
+1. Build the report: `host_report` (CLI: `osmatrix report <guest> --outcome works|partly|fails --notes "..."`). In `notes`, say what worked or failed and at which step (setup phase, boot, `env_exec`, CI leg), briefly. Never put secrets, IPs, hostnames, user names, or repository code or names in it. The report sanitizes the home directory, user name and host name, but check the rest yourself.
+2. Show the user the `title` and `body` and ask whether to file it on github.com/fritz-fritz/osmatrix. Let them edit or decline.
+3. Only after they agree: check for an existing report first (`gh issue list --repo fritz-fritz/osmatrix --label compatibility --search "<host row> <guest>"`). If one exists, offer to add a comment there instead (`gh issue comment <n> --body-file <file>`). Otherwise write `body` to a temporary file and run `gh issue create --repo fritz-fritz/osmatrix --label compatibility --title "<title>" --body-file <file>`. If `gh` isn't installed or authenticated, give the user the report's `url` instead: it opens the issue form prefilled, for them to submit.
+4. Tell the user the issue link.
+
 ## When a guest is stuck
 
 - During boot or setup: `env_screenshot` shows the VM display; `env_input` can nudge a dialog (`"enter"`, clicks). Windows provisioning logs to `C:\OEM\provision.log` inside the guest.
 - A guest you've polluted: `env_reset` restores the golden snapshot (discards everything changed inside).
 - Broken beyond that: `osmatrix destroy <guest> --yes` (CLI only) then `env_setup` again.
-- A setup that keeps failing on the same phase is usually a host problem: re-run `host_doctor` and report its output to the user.
+- A setup that keeps failing on the same phase is usually a host problem: re-run `host_doctor` and report its output to the user. If it looks like an osmatrix problem, offer a compatibility report (above).
 - `env_down` frees the VM's RAM when it's not needed.

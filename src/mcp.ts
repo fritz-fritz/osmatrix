@@ -40,6 +40,8 @@ const repo = z.string().optional().describe("Absolute repository directory on th
 export const TOOL_ANNOTATIONS: Record<string, { title: string; readOnlyHint: boolean; destructiveHint: boolean; openWorldHint: boolean }> = {
   // Runs throwaway containers (may pull busybox) to probe KVM: not strictly read-only.
   host_doctor: { title: "Check host prerequisites", readOnlyHint: false, destructiveHint: false, openWorldHint: false },
+  // Runs doctor (see host_doctor); builds text only and sends nothing.
+  host_report: { title: "Build a compatibility report", readOnlyHint: false, destructiveHint: false, openWorldHint: false },
   env_status: { title: "Show guest status", readOnlyHint: true, destructiveHint: false, openWorldHint: false },
   env_setup: { title: "Set up a guest OS", readOnlyHint: false, destructiveHint: true, openWorldHint: true },
   env_up: { title: "Start a guest", readOnlyHint: false, destructiveHint: false, openWorldHint: false },
@@ -82,6 +84,23 @@ export async function startMcp(): Promise<void> {
     "host_doctor",
     { description: "Check the host: Docker, KVM/WSL2/tart, ssh, act, RAM/disk, and which guests can run here.", inputSchema: {} },
     safe(async () => text(await doctor())),
+  );
+
+  register(
+    "host_report",
+    {
+      description:
+        "Build a compatibility report about one guest on this host (host and guest details, osmatrix version, sanitized host_doctor output) as a GitHub issue title/body plus a prefilled new-issue link. Sends nothing. Show it to the user and only file it (gh issue create, or the user opens the link) after they explicitly agree; see the osmatrix-setup skill.",
+      inputSchema: {
+        guest,
+        outcome: z.enum(["Works", "Partly works", "Doesn't work"]),
+        notes: z.string().optional().describe("What worked or failed and at which step; no secrets, hostnames, IPs or repository contents"),
+      },
+    },
+    safe(async ({ guest, outcome, notes }) => {
+      const { compatReport } = await import("./report.ts");
+      return text(await compatReport(guest, { outcome, notes }));
+    }),
   );
 
   register(

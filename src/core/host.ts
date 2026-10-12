@@ -6,12 +6,13 @@ import { loadConfig } from "./config.ts";
 import { ensureDir, paths } from "./paths.ts";
 import { run, which } from "./proc.ts";
 import { findAct } from "./act.ts";
+import { compatibility } from "./compat.ts";
 import { detectContainerHost, dockerReach, remoteDockerHost, type ContainerHost, type DockerReach } from "./nesting.ts";
 
 export interface DoctorReport {
   host: { platform: string; arch: string; cpus: number; memoryGB: number; freeDiskGB?: number };
   tools: Record<string, string | null>;
-  guests: Record<string, { backend: string; os: string; runnable: boolean; reason?: string }>;
+  guests: Record<string, { backend: string; os: string; runnable: boolean; reason?: string; compatibility: string }>;
   /** Present when osmatrix runs inside a container or against a remote Docker daemon. */
   nesting?: {
     /** The container osmatrix runs in; absent when only DOCKER_HOST is remote. */
@@ -84,7 +85,11 @@ export async function doctor(): Promise<DoctorReport> {
     } catch (e) {
       s = { ok: false, reason: (e as Error).message };
     }
-    guests[g.name] = { backend: g.backend, os: g.os, runnable: s.ok, reason: s.reason };
+    const compat = compatibility(g);
+    guests[g.name] = { backend: g.backend, os: g.os, runnable: s.ok, reason: s.reason, compatibility: compat };
+    if (s.ok && compat === "untested") {
+      notes.push(`${g.name}: supported but not yet tested on this kind of host; once you've used it, offer the user to file a compatibility report (osmatrix report ${g.name} / host_report)`);
+    }
   }
   const memGB = Math.round(os.totalmem() / 1024 ** 3);
   const vmMem = Object.values(cfg.guests)
