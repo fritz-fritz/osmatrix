@@ -61,6 +61,7 @@ export async function doctor(): Promise<DoctorReport> {
     git: await version(which("git"), ["--version"]),
     act: (await findAct()) ?? null,
     tart: process.platform === "darwin" ? await version(which("tart"), ["--version"]) : null,
+    "qemu-system-aarch64": await version(which("qemu-system-aarch64"), ["--version"]),
   };
   const notes: string[] = [];
   if (!tools.docker) notes.push("Docker is required for the ubuntu guest, dockur VMs and Linux CI legs.");
@@ -90,7 +91,7 @@ export async function doctor(): Promise<DoctorReport> {
   }
   const memGB = Math.round(os.totalmem() / 1024 ** 3);
   const vmMem = Object.values(cfg.guests)
-    .filter((g) => g.backend === "dockur" || g.backend === "tart")
+    .filter((g) => g.backend === "dockur" || g.backend === "tart" || g.backend === "qemu")
     .reduce((a, g) => a + parseInt(g.memory ?? "8", 10), 0);
   if (vmMem > memGB * 0.75) notes.push(`VM guests are configured for ${vmMem}G total but the host has ${memGB}G; keep max_vms low or lower memory per guest.`);
   if (freeDiskGB !== undefined && freeDiskGB < 150) notes.push(`Only ${freeDiskGB}G free; each VM guest needs ~64G (+ golden snapshot).`);

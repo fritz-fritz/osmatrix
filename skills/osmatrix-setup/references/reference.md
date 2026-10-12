@@ -25,6 +25,7 @@ CLI-only: `osmatrix init` (config + ssh key + host check), `config`, `install-ac
 | `container` | ubuntu | docker | act runner image + sshd; ssh port preferably 2221 (actual port in `env_status`) |
 | `dockur` | windows, macos on Linux/Windows hosts | docker compose, disks in docker volumes `osmatrix-<guest>-storage` / `-golden` | needs KVM in containers; web viewer preferably 127.0.0.1:8006 (windows) / 8007 (macos); actual ports in `env_status` |
 | `tart` | macos on Apple Silicon | tart clone/run | key installed automatically via tart guest agent |
+| `qemu` | windows (Windows 11 on ARM) on Apple Silicon | host `qemu-system-aarch64` (HVF; KVM on arm64 Linux, TCG emulation elsewhere); install media prepared once with dockur's `windows-arm` image in Docker; disk under the osmatrix data dir `guests/<guest>/disk`, golden snapshot cloned (APFS `cp -c`) | needs `brew install qemu`; ssh forwarded to 127.0.0.1 (port in `env_status`); VNC display for `env_screenshot`/`env_input` |
 | `ssh` | any existing machine | none (up/down are no-ops; reset/snapshot unsupported) | host keys checked (trust on first use) |
 
 ## Devcontainers and remote Docker
