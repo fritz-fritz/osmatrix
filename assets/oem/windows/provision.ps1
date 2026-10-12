@@ -41,9 +41,12 @@ New-ItemProperty -Path $wu -Name NoAutoRebootWithLoggedOnUsers -Value 1 -Propert
 try { Add-MpPreference -ExclusionPath "$env:SystemDrive\Users" -ErrorAction Stop } catch { Log "defender exclusion skipped: $_" }
 
 # --- toolchain (what a GitHub windows runner step most often assumes) ---
+# Native builds on Windows on ARM (x64 ones would only run emulated).
+$arm = $env:PROCESSOR_ARCHITECTURE -eq 'ARM64'
+Log "architecture: $env:PROCESSOR_ARCHITECTURE"
 Log 'installing PowerShell 7'
 Retry {
-  $u = Get-LatestAsset 'PowerShell/PowerShell' '^PowerShell-[\d.]+-win-x64\.msi$'
+  $u = Get-LatestAsset 'PowerShell/PowerShell' $(if ($arm) { '^PowerShell-[\d.]+-win-arm64\.msi$' } else { '^PowerShell-[\d.]+-win-x64\.msi$' })
   $f = Download $u 'pwsh.msi'
   $p = Start-Process msiexec.exe -Wait -PassThru -ArgumentList "/i `"$f`" /qn ADD_PATH=1 ENABLE_PSREMOTING=0 REGISTER_MANIFEST=1"
   if ($p.ExitCode -ne 0) { throw "msiexec exit $($p.ExitCode)" }
@@ -51,7 +54,7 @@ Retry {
 
 Log 'installing Git'
 Retry {
-  $u = Get-LatestAsset 'git-for-windows/git' '^Git-[\d.]+-64-bit\.exe$'
+  $u = Get-LatestAsset 'git-for-windows/git' $(if ($arm) { '^Git-[\d.]+-arm64\.exe$' } else { '^Git-[\d.]+-64-bit\.exe$' })
   $f = Download $u 'git.exe'
   $p = Start-Process $f -Wait -PassThru -ArgumentList '/VERYSILENT /NORESTART /NOCANCEL /SP- /SUPPRESSMSGBOXES /COMPONENTS="gitlfs,assoc,autoupdate" /o:PathOption=CmdTools'
   if ($p.ExitCode -ne 0) { throw "git installer exit $($p.ExitCode)" }
@@ -61,14 +64,14 @@ Log 'installing Node.js LTS'
 Retry {
   $idx = Invoke-RestMethod -UseBasicParsing 'https://nodejs.org/dist/index.json'
   $v = ($idx | Where-Object { $_.lts } | Select-Object -First 1).version
-  $f = Download "https://nodejs.org/dist/$v/node-$v-x64.msi" 'node.msi'
+  $f = Download "https://nodejs.org/dist/$v/node-$v-$(if ($arm) { 'arm64' } else { 'x64' }).msi" 'node.msi'
   $p = Start-Process msiexec.exe -Wait -PassThru -ArgumentList "/i `"$f`" /qn"
   if ($p.ExitCode -ne 0) { throw "msiexec exit $($p.ExitCode)" }
 } | Out-Null
 
 Log 'installing act'
 Retry {
-  $u = Get-LatestAsset 'nektos/act' '^act_Windows_x86_64\.zip$'
+  $u = Get-LatestAsset 'nektos/act' $(if ($arm) { '^act_Windows_arm64\.zip$' } else { '^act_Windows_x86_64\.zip$' })
   $f = Download $u 'act.zip'
   $dest = 'C:\Program Files\act'
   New-Item -ItemType Directory -Force -Path $dest | Out-Null
@@ -83,7 +86,7 @@ Retry {
   $html = Invoke-WebRequest -UseBasicParsing 'https://www.python.org/downloads/windows/'
   $m = [regex]::Match($html.Content, 'python-(3\.\d+\.\d+)-amd64\.exe')
   $v = $m.Groups[1].Value
-  $f = Download "https://www.python.org/ftp/python/$v/python-$v-amd64.exe" 'python.exe'
+  $f = Download "https://www.python.org/ftp/python/$v/python-$v-$(if ($arm) { 'arm64' } else { 'amd64' }).exe" 'python.exe'
   $p = Start-Process $f -Wait -PassThru -ArgumentList '/quiet InstallAllUsers=1 PrependPath=1 Include_test=0'
   if ($p.ExitCode -ne 0) { throw "python installer exit $($p.ExitCode)" }
 } | Out-Null

@@ -14,14 +14,14 @@ Local **Ubuntu, Windows and macOS** environments plus **local GitHub Actions mat
 
 - **Guests**: `exec`, file push/pull, **port forwarding** (both directions), screenshots and keyboard/mouse input.
 - **Local CI**: `ci plan` / `ci run` expand workflow matrices. `ubuntu-*` legs run with [act](https://github.com/nektos/act) on the host's Docker. `windows-*` and `macos-*` legs run act **inside** the matching VM, so a Windows leg really runs on Windows.
-- **Cross-platform hosts**: Linux, Windows (WSL2) and macOS (Apple Silicon). Guests this host can't run can be any machine you can reach over ssh.
+- **Cross-platform hosts**: Linux, Windows (WSL2) and macOS; see the [compatibility matrix](#compatibility-matrix). Guests this host can't run can be any machine you can reach over ssh.
 
 ```
 Claude Code / Cursor / Codex
   ├─ skills (SKILL.md ×3): when and how
   └─ MCP server (osmatrix mcp, stdio) ─┐
 human / scripts ── osmatrix CLI ───────┴─ core ─┬─ ubuntu  : act runner image + sshd (container)
-                                               ├─ windows : dockur/windows VM (KVM)
+                                               ├─ windows : dockur/windows VM (KVM) | QEMU+HVF (Apple Silicon)
                                                ├─ macos   : dockur/macos VM (KVM) | tart (Apple Silicon)
                                                └─ any     : existing machine over ssh
 ```
@@ -43,7 +43,7 @@ Requirements:
 
 - Node.js 22.18+ with npm.
 - Docker.
-- KVM for the Windows/macOS VMs, or an Apple Silicon Mac for macOS guests (see [Host requirements](#host-requirements)).
+- KVM for the Windows/macOS VMs; on Apple Silicon, QEMU for Windows and tart for macOS (see the [compatibility matrix](#compatibility-matrix)).
 
 The plugin adds three skills, so an agent loads only the guidance a task needs:
 
@@ -83,15 +83,28 @@ Options:
 
 ## Host requirements
 
+### Compatibility matrix
+
 | Host | ubuntu | windows | macos |
 |---|---|---|---|
-| Linux x86_64 with KVM | Docker | dockur (KVM) | dockur (KVM), see licensing note |
-| Windows 11 + Docker Desktop (WSL2, nested virtualization) | Docker | dockur | dockur (best effort) |
-| macOS Apple Silicon | Docker | via `ssh` guest only | tart |
+| Linux x86_64 + KVM | ✅ container | ✅ dockur: Windows Server 2025 | ✅\* dockur: macOS 15 (Intel) |
+| Linux arm64 + KVM | 🧪 container | 🧪 dockur: Windows 11 on ARM | ❌ |
+| Windows 11 x86_64 + Docker Desktop (WSL2 with nested virtualization) | 🧪 container | 🧪 dockur: Windows Server 2025 | 🧪\* dockur: macOS 15 (Intel), best effort |
+| Windows 11 arm64 | 🧪 container | ❌¹ | ❌ |
+| macOS Apple Silicon | 🧪 container | 🧪 QEMU + Hypervisor.framework: Windows 11 on ARM | 🧪\* tart |
+| macOS Intel | 🧪 container | ❌ | ❌ |
+
+- ✅ supported and tested. 🧪 supported by the code but not yet tested on that kind of host (CI covers install, the MCP server and planning on Windows and macOS, but GitHub's runners can't start guests there); please [file an issue](https://github.com/fritz-fritz/osmatrix/issues) if it doesn't work. ❌ not possible on that host.
+- Any cell marked ❌ can still be served by an `ssh` guest: an existing machine you can reach over ssh (see [Configuration](#configuration)).
+- \* **macOS guests are licensed only on Apple hardware.** Apple's [macOS Software License Agreement](https://www.apple.com/legal/sla/) permits macOS virtual machines only on Apple-branded computers, so only the Apple Silicon row is within the licence. On other hosts the dockur macOS guest works technically, but running it is outside Apple's terms; osmatrix asks you to accept the licence before installing it (below).
+- ¹ dockur needs KVM inside Docker, which Docker Desktop on Windows on ARM doesn't provide.
+- macOS guests on arm64 Linux or Windows hosts aren't possible: Apple Silicon macOS only virtualizes on Apple hardware, and the Intel macOS image is x86_64-only (emulating it is 14–27x slower than KVM in our measurements).
+
+On Apple Silicon, the Windows guest runs on the Mac's own QEMU (`brew install qemu`) with Hypervisor.framework. Docker is still needed once: setup runs dockur's `windows-arm` image to download Windows 11 on ARM and build the unattended install media, then boots them with the host's QEMU. The guest is Windows on ARM, so x64-only tools run under Windows' own emulation; osmatrix installs native ARM64 builds of PowerShell, Git, Node.js, Python and act.
 
 Run `osmatrix doctor` to see what this host can do. It also needs an OpenSSH client and `tar`, both built into current Windows, macOS and Linux. `act` is downloaded (checksum-verified) on first use if it isn't on PATH.
 
-> **macOS licensing:** installing a macOS guest accepts Apple's [macOS Software License Agreement](https://www.apple.com/legal/sla/), which only permits macOS on Apple hardware. osmatrix asks for this consent once, through `osmatrix setup macos --accept-license` or an agent's `env_setup` call with `accept_license` after you agree, and records it as `macos_eula_acknowledged = true`.
+> **macOS licensing\*:** installing a macOS guest accepts Apple's [macOS Software License Agreement](https://www.apple.com/legal/sla/), which only permits macOS on Apple hardware. osmatrix asks for this consent once, through `osmatrix setup macos --accept-license` or an agent's `env_setup` call with `accept_license` after you agree, and records it as `macos_eula_acknowledged = true`.
 
 ### Devcontainers, Codespaces and remote Docker
 
