@@ -90,7 +90,7 @@ export async function startMcp(): Promise<void> {
     "host_report",
     {
       description:
-        "Build a compatibility report about one guest on this host (host and guest details, osmatrix version, sanitized host_doctor output) as a GitHub issue title/body plus a prefilled new-issue link. Sends nothing. Show it to the user and only file it (gh issue create, or the user opens the link) after they explicitly agree; see the osmatrix-setup skill.",
+        "Build a compatibility report about one guest on this host (host and guest details, osmatrix version, sanitized host_doctor output) as a GitHub issue title/body plus a prefilled new-issue link. Sends nothing. `differsFromMatrix` says whether the outcome is news relative to the compatibility matrix; offer the report only when it is true. Show it to the user and only file it (gh issue create, or the user opens the link) after they explicitly agree; see the osmatrix-setup skill.",
       inputSchema: {
         guest,
         outcome: z.enum(["Works", "Partly works", "Doesn't work"]),

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import { test } from "node:test";
-import { HOSTS, compatibility, type Compat } from "../src/core/compat.ts";
+import { HOSTS, compatibility, differsFromMatrix, hostKind, type Compat } from "../src/core/compat.ts";
 import { sanitize } from "../src/report.ts";
 
 const MARK: Record<string, Compat> = { "✅": "tested", "🧪": "untested", "❌": "unsupported" };
@@ -42,4 +42,30 @@ test("sanitize removes the home directory, user name and host name", () => {
     "act: ~/.local/bin/act on <host> as <user>; malice stays",
   );
   assert.equal(sanitize("ok", { home: "", user: "a", host: "" }), "ok");
+});
+
+test("differsFromMatrix: report only what the matrix doesn't already say", () => {
+  assert.equal(differsFromMatrix("tested", "Works"), false);
+  assert.equal(differsFromMatrix("tested", "Partly works"), true);
+  assert.equal(differsFromMatrix("tested", "Doesn't work"), true);
+  assert.equal(differsFromMatrix("untested", "Works"), true);
+  assert.equal(differsFromMatrix("untested", "Doesn't work"), true);
+  assert.equal(differsFromMatrix("unsupported", "Works"), true);
+  assert.equal(differsFromMatrix("unsupported", "Doesn't work"), false);
+});
+
+test("hostKind: a host missing what its row requires is Other", () => {
+  assert.equal(hostKind("linux", "x64", true)?.label, "Linux x86_64 + KVM");
+  assert.equal(hostKind("linux", "x64", false), undefined);
+  assert.equal(compatibility({ os: "linux", backend: "container" }, "linux", "x64", false), "untested");
+  assert.equal(hostKind("win32", "x64", false), undefined);
+  assert.equal(hostKind("darwin", "arm64", false)?.label, "macOS Apple Silicon");
+});
+
+test("sanitize: short user names in paths and user@host, endpoints verbatim", () => {
+  const ids = { home: "/home/u", user: "u", host: "box1", secrets: ["ci@mac-mini.lan:22", "mac-mini.lan", "10.0.0.2:2375", "10.0.0.2"] };
+  assert.equal(
+    sanitize("C:\\Users\\u\\x /srv/u/y u@box1 run u times; cannot reach mac-mini.lan:22 via tcp://10.0.0.2:2375", ids),
+    "C:\\Users\\<user>\\x /srv/<user>/y <user>@<host> run u times; cannot reach <redacted>:22 via tcp://<redacted>",
+  );
 });

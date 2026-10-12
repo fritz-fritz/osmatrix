@@ -55,14 +55,17 @@ labels = ["macos-*"]             # which runs-on labels it serves
 
 ## Compatibility reports
 
-The maintainers track which host/guest combinations work through GitHub issues. Offer a report to the user, **never file one without their explicit yes**, when:
+The maintainers track which host/guest combinations work through GitHub issues. Offer a report **only when the result differs from the matrix**, and **never file one without the user's explicit yes**:
 
-- you used a guest whose `compatibility` is `untested` (whether it worked or not), once the task's outcome is clear; or
-- a `tested` guest failed in a way that looks like an osmatrix problem rather than the user's code (setup, boot, ssh, provisioning).
+| guest's `compatibility` | worked | failed (in osmatrix: setup, boot, ssh, provisioning; not the user's code) |
+|---|---|---|
+| `tested` | no report | offer |
+| `untested` | offer (moves it to tested) | offer |
+| `unsupported` | offer (unexpected) | no report |
 
-Offer at most once per guest and session, and don't interrupt urgent work for it: offer at a natural stopping point.
+`host_report` returns `differsFromMatrix` for the outcome you pass; if it's `false`, don't mention a report at all. Offer at most once per guest and session, at a natural stopping point, not in the middle of urgent work.
 
-1. Build the report: `host_report` (CLI: `osmatrix report <guest> --outcome works|partly|fails --notes "..."`). In `notes`, say what worked or failed and at which step (setup phase, boot, `env_exec`, CI leg), briefly. Never put secrets, IPs, hostnames, user names, or repository code or names in it. The report sanitizes the home directory, user name and host name, but check the rest yourself.
+1. Build the report (it sends nothing): `host_report` (CLI: `osmatrix report <guest> --outcome works|partly|fails --notes "..."`). In `notes`, say what worked or failed and at which step (setup phase, boot, `env_exec`, CI leg), briefly. Never put secrets, IPs, hostnames, user names, or repository code or names in it. The report sanitizes the home directory, user name and host name, but check the rest yourself.
 2. Show the user the `title` and `body` and ask whether to file it on github.com/fritz-fritz/osmatrix. Let them edit or decline.
 3. Only after they agree: check for an existing report first (`gh issue list --repo fritz-fritz/osmatrix --label compatibility --search "<host row> <guest>"`). If one exists, offer to add a comment there instead (`gh issue comment <n> --body-file <file>`). Otherwise write `body` to a temporary file and run `gh issue create --repo fritz-fritz/osmatrix --label compatibility --title "<title>" --body-file <file>`. If `gh` isn't installed or authenticated, give the user the report's `url` instead: it opens the issue form prefilled, for them to submit.
 4. Tell the user the issue link.

@@ -2,12 +2,12 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import YAML from "yaml";
-import { ISSUES_URL, compatibility, hostKind } from "./core/compat.ts";
+import { ISSUES_URL, compatibility, differsFromMatrix, hostKind, type Outcome } from "./core/compat.ts";
 import { doctor } from "./core/host.ts";
 import { pkgRoot } from "./core/paths.ts";
 import { getGuest } from "./env.ts";
 
-export type Outcome = "Works" | "Partly works" | "Doesn't work";
+export type { Outcome } from "./core/compat.ts";
 
 export interface Report {
   /** Shown to the user before anything is filed; nothing is sent by building a report. */
@@ -19,20 +19,57 @@ export interface Report {
   /** Equivalent `gh` command; write `body` to the file first. */
   gh: string;
   compatibility: string;
+  /**
+   * True when this outcome is news relative to the compatibility matrix. Only then offer the report
+   * to the user; a tested combination that works needs none.
+   */
+  differsFromMatrix: boolean;
 }
 
-/** Remove what identifies the user or their machine: home directory, user name, host name. */
-export function sanitize(text: string, ids = { home: os.homedir(), user: os.userInfo().username, host: os.hostname() }): string {
+export interface Identifiers {
+  home: string;
+  user: string;
+  host: string;
+  /** Other identifying strings (ssh guest endpoints, a remote DOCKER_HOST, key paths): removed verbatim. */
+  secrets?: string[];
+}
+
+const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+/** Remove what identifies the user or their machines: home directory, user and host names, endpoints. */
+export function sanitize(text: string, ids: Identifiers = localIds()): string {
   let t = text;
+  // Longest first, so "me@box:22" goes before "box".
+  for (const s of [...new Set(ids.secrets ?? [])].filter((s) => s.length >= 2).sort((a, b) => b.length - a.length)) t = t.split(s).join("<redacted>");
   if (ids.home) t = t.split(ids.home).join("~");
-  for (const [v, label] of [
-    [ids.host, "<host>"],
-    [ids.user, "<user>"],
-  ] as const) {
-    // Whole words only, and never anything so short it would mangle ordinary text.
-    if (v && v.length >= 3) t = t.replace(new RegExp(`\\b${v.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "g"), label);
+  if (ids.host && ids.host.length >= 3) t = t.replace(new RegExp(`\\b${escapeRe(ids.host)}\\b`, "g"), "<host>");
+  if (ids.user) {
+    const u = escapeRe(ids.user);
+    // A name as short as "u" can't be replaced everywhere without mangling text, so short names are
+    // removed where user names appear: path segments and user@host.
+    t =
+      ids.user.length >= 3
+        ? t.replace(new RegExp(`\\b${u}\\b`, "g"), "<user>")
+        : t.replace(new RegExp(`(?<=[\\\\/])${u}(?=[\\\\/]|\\s|$)`, "gm"), "<user>").replace(new RegExp(`\\b${u}(?=@)`, "g"), "<user>");
   }
   return t;
+}
+
+function localIds(): Identifiers {
+  return { home: os.homedir(), user: os.userInfo().username, host: os.hostname() };
+}
+
+/** The parts of an endpoint such as "ssh://me@box:22" or "tcp://10.0.0.2:2375" worth redacting. */
+function endpointParts(e: string | undefined): string[] {
+  if (!e) return [];
+  const parts = [e];
+  try {
+    const u = new URL(e);
+    parts.push(u.host, u.hostname, ...(u.username ? [u.username, `${u.username}@${u.hostname}`] : []));
+  } catch {
+    /* not a URL */
+  }
+  return parts.filter(Boolean);
 }
 
 /**
@@ -42,9 +79,18 @@ export function sanitize(text: string, ids = { home: os.homedir(), user: os.user
 export async function compatReport(guest: string, opts: { outcome: Outcome; notes?: string }): Promise<Report> {
   const g = getGuest(guest);
   const version = JSON.parse(fs.readFileSync(path.join(pkgRoot, "package.json"), "utf8")).version as string;
-  const kind = hostKind();
-  const compat = compatibility(g.cfg);
   const [doc, status] = await Promise.all([doctor(), g.backend.status().catch((e: Error) => ({ state: "unknown", detail: e.message }))]);
+  const kind = hostKind(process.platform, process.arch, doc.host.kvm);
+  const compat = compatibility(g.cfg, process.platform, process.arch, doc.host.kvm);
+  const ids: Identifiers = {
+    ...localIds(),
+    secrets: [
+      ...(g.cfg.backend === "ssh" && g.cfg.host ? [`${g.cfg.host}:${g.cfg.port ?? 22}`, g.cfg.host, ...(g.cfg.user ? [`${g.cfg.user}@${g.cfg.host}`] : [])] : []),
+      ...(g.cfg.identity ? [g.cfg.identity] : []),
+      ...endpointParts(doc.nesting?.dockerHost),
+      ...endpointParts(process.env.DOCKER_HOST),
+    ],
+  };
   const { setupState } = await import("./setup.ts");
   const setup = setupState(guest);
   const hostLine = `${os.type()} ${os.release()} ${process.arch}, ${doc.host.cpus} CPUs, ${doc.host.memoryGB}G RAM`;
@@ -61,8 +107,9 @@ export async function compatReport(guest: string, opts: { outcome: Outcome; note
     ]
       .filter((l, i, a) => l !== "" || (i > 0 && a[i - 1] !== ""))
       .join("\n"),
+    ids,
   );
-  const doctorText = sanitize(YAML.stringify({ host: doc.host, tools: doc.tools, guests: doc.guests, notes: doc.notes }));
+  const doctorText = sanitize(YAML.stringify({ host: doc.host, tools: doc.tools, guests: doc.guests, notes: doc.notes }), ids);
   const title = `Compatibility: ${guestKind} on ${kind?.label ?? `${process.platform} ${process.arch}`}: ${opts.outcome}`;
   const body = [
     `### Outcome\n\n${opts.outcome}`,
@@ -83,8 +130,14 @@ export async function compatReport(guest: string, opts: { outcome: Outcome; note
     details,
     doctor: doctorText,
   });
-  // Browsers and GitHub cap URL length; the doctor output is the part worth dropping.
-  if (`${ISSUES_URL}/new?${params}`.length > 7000) params.delete("doctor");
+  // Browsers and GitHub cap URL length: drop the doctor output first, then shorten the details. The
+  // body (shown to the user and used with gh) always has everything.
+  const LIMIT = 7000;
+  const fits = () => `${ISSUES_URL}/new?${params}`.length <= LIMIT;
+  if (!fits()) params.delete("doctor");
+  for (let keep = details.length; !fits() && keep > 0; keep -= 200) {
+    params.set("details", details.slice(0, Math.max(0, keep - 200)) + "\n\n… (shortened; paste the full report)");
+  }
   return {
     title,
     body,
@@ -92,5 +145,6 @@ export async function compatReport(guest: string, opts: { outcome: Outcome; note
     url: `${ISSUES_URL}/new?${params}`,
     gh: `gh issue create --repo fritz-fritz/osmatrix --label compatibility --title ${JSON.stringify(title)} --body-file <file with body>`,
     compatibility: compat,
+    differsFromMatrix: differsFromMatrix(compat, opts.outcome),
   };
 }
