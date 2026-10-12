@@ -2,6 +2,8 @@
 
 Thanks for your interest! Bug reports, fixes, new guest backends, docs and ideas are all welcome.
 
+Using an AI coding agent is fine, and so is letting one help you file an issue. Read the [AI policy](AI_POLICY.md) first: you're responsible for what you submit, you say when AI did substantial work, and agents post only with their user's explicit consent.
+
 ## Licensing of contributions
 
 osmatrix is MIT-licensed, and its copyright is held by "osmatrix contributors". By submitting a contribution (a pull request, patch or suggested change), you agree that it is licensed under the [MIT License](LICENSE), on the same terms as the rest of the project. You also confirm that you have the right to contribute it. Don't submit code you can't license this way, such as code copied from projects under incompatible licenses.
@@ -102,6 +104,6 @@ The workflow must run while checks are still pending: GitHub refuses to enable a
    Start the branch name with its type: `fix`, `feat`, `docs`, `ci`, `chore` or `security`, followed by `/`, `-` or `_`. A leading name segment is fine, so the defaults of coding agents work: `fix/login`, `claude/fix-login-x7k2`, `cursor/feat-guest-3f9a` and `copilot/fix-123` are all recognized. The type labels the PR (`bug`, `enhancement`, `documentation`, `ci`, `chore`, `security`), and the label decides its section in the release notes ([`.github/release.yml`](.github/release.yml)).
    If the PR closes an issue (write `Fixes #12` in the description), it also gets that issue's type labels (`bug`, `enhancement`, `breaking` and so on), so a fix for an issue filed as a bug report is labeled `bug` whatever the branch is called. Maintainers add `breaking` by hand, and `skip-release-notes` leaves a PR out. A label removed by hand stays removed on later pushes; add it back by hand to undo that.
 2. Before you push, run `npm run verify` (or at least `npm run check` and `npm run ci:local:linux`); see [Checks before you push](#checks-before-you-push).
-3. Describe what changed, why, and how you tested it, including which host OS and guests.
+3. Describe what changed, why, and how you tested it, including which host OS and guests. If an AI tool wrote a substantial part of it, say which tool and what it did ([AI policy](AI_POLICY.md)); the pull request template asks.
 
 Maintainers squash-merge pull requests. Releases are cut by maintainers by pushing a `v<x.y.z>` tag (see "Releasing" in the README); please don't bump the version in PRs.
