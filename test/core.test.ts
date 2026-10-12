@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { test } from "node:test";
-import { ActJsonParser, actDifferenceHints, powershell } from "../src/ci/run.ts";
+import { ActJsonParser, actDifferenceHints, macToolCacheCmd, powershell } from "../src/ci/run.ts";
 import { defaultGuests, labelMatches, mergeConfig, defaultConfig } from "../src/core/config.ts";
 import { commandLine, quotePosix, quotePwsh, withCwd } from "../src/core/ssh.ts";
 import { encodePng } from "../src/gui.ts";
@@ -86,6 +90,28 @@ test("PowerShell scripts run as-is on pwsh endpoints and encoded on cmd ones", (
   const m = /^powershell -NoProfile -NonInteractive -EncodedCommand ([A-Za-z0-9+/=]+)$/.exec(powershell({ shell: "cmd" }, script));
   assert.ok(m);
   assert.equal(Buffer.from(m[1], "base64").toString("utf16le"), script);
+});
+
+test("macOS tool cache check calls sudo only when the directory isn't writable", { skip: process.platform === "win32" }, () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "osmatrix-toolcache-"));
+  try {
+    // A stand-in sudo that records its arguments, so the test needs no root and changes nothing.
+    const calls = path.join(tmp, "sudo-calls");
+    fs.mkdirSync(path.join(tmp, "bin"));
+    fs.writeFileSync(path.join(tmp, "bin", "sudo"), `#!/bin/sh\necho "$*" >> ${JSON.stringify(calls)}\n`, { mode: 0o755 });
+    const sh = (cmd: string) => spawnSync("sh", ["-c", cmd], { env: { ...process.env, PATH: `${path.join(tmp, "bin")}:${process.env.PATH}` } });
+    const missing = path.join(tmp, "runner", "hostedtoolcache");
+    assert.equal(sh(macToolCacheCmd(missing)).status, 0);
+    const lines = fs.readFileSync(calls, "utf8").trim().split("\n");
+    assert.deepEqual(lines[0], `-n mkdir -p ${missing}`);
+    assert.match(lines[1], new RegExp(`^-n chown -R \\S+:staff ${path.join(tmp, "runner")}$`));
+    fs.rmSync(calls);
+    fs.mkdirSync(missing, { recursive: true });
+    assert.equal(sh(macToolCacheCmd(missing)).status, 0);
+    assert.equal(fs.existsSync(calls), false);
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
 });
 
 test("bootBudget scales with the slowest recent boot", () => {

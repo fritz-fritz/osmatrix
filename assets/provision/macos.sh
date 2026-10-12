@@ -23,6 +23,14 @@ if [ "${1:-}" = "--passwordless-sudo" ]; then
   sudo chmod 440 /etc/sudoers.d/osmatrix
 fi
 
+# The macOS tool packages that actions/setup-python and the other actions/*-versions installers download
+# are built for GitHub's runner layout: they install into /Users/runner/hostedtoolcache whatever
+# RUNNER_TOOL_CACHE says. The guest user isn't `runner`, so create that path and give it to this user.
+# (`osmatrix ci run` repeats this check before each macOS leg, for guests provisioned before it was added.)
+log "creating GitHub's tool cache at /Users/runner/hostedtoolcache"
+sudo mkdir -p /Users/runner/hostedtoolcache
+sudo chown -R "$(id -un)":staff /Users/runner
+
 log "disabling sleep"
 sudo pmset -a sleep 0 displaysleep 0 disksleep 0 >/dev/null 2>&1 || true
 

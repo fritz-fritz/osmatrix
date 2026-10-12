@@ -317,6 +317,7 @@ async function runLeg(repo: string, dir: string, cfg: Config, leg: Leg, sf: Stat
         await sshExec(ep, withCwd(ep.shell, remote, init), { timeoutMs: 120_000 });
       }
       if (g.cfg.os === "windows" && leg.linuxNeeds?.length) await bashForLinuxNeeds(ep, repo, remote, leg, r, log);
+      if (g.cfg.os === "macos" && ep.shell === "posix") await ensureMacToolCache(ep, r, log);
       const args = [event, ...commonActArgs(leg), "--artifact-server-path", ".osmatrix-artifacts"];
       for (const l of new Set([...leg.runsOn, ...(leg.needsLabels ?? [])])) args.push("-P", `${l}=-self-hosted`);
       if (sf.s.options.eventPayload) {
@@ -415,6 +416,31 @@ async function bashForLinuxNeeds(ep: Endpoint, repo: string, remote: string, leg
   if (!changed.length) return;
   await writeRemoteFile(ep, remote, leg.workflow, text);
   log.write(`[osmatrix] Linux needs ${changed.join(", ")}: run: steps without shell: use ${bash} in this leg\n`);
+}
+
+/** Where the macOS packages behind actions/setup-python & co. install, as on GitHub's runners. */
+export const MAC_TOOL_CACHE = "/Users/runner/hostedtoolcache";
+
+/**
+ * A posix command that makes `dir` exist and belong to the ssh user, and does nothing when it's already
+ * writable. The actions/*-versions macOS packages install into /Users/runner/hostedtoolcache whatever
+ * RUNNER_TOOL_CACHE says, and act's host mode can't redirect them. Provisioning creates it; this covers
+ * guests provisioned before it did, and golden snapshots taken then, without re-provisioning.
+ */
+export function macToolCacheCmd(dir: string = MAC_TOOL_CACHE): string {
+  const d = quoteFor("posix", dir);
+  const owner = quoteFor("posix", path.posix.dirname(dir));
+  // sudo -n: never wait for a password prompt that no one will answer.
+  return `[ -w ${d} ] || { sudo -n mkdir -p ${d} && sudo -n chown -R "$(id -un)":staff ${owner}; }`;
+}
+
+async function ensureMacToolCache(ep: Endpoint, r: LegResult, log: fs.WriteStream) {
+  const res = await sshExec(ep, macToolCacheCmd(), { timeoutMs: 120_000 });
+  if (res.code === 0) return;
+  // Not fatal: only workflows using the actions/*-versions installers (setup-python, …) need it.
+  const msg = `could not create ${MAC_TOOL_CACHE} in the guest (needs passwordless sudo; try \`osmatrix provision <guest> --passwordless-sudo\`); actions/setup-python and similar installers fail with "mkdir: /Users/runner: Permission denied"`;
+  r.warnings.push(msg);
+  log.write(`[osmatrix] warning: ${msg}\n`);
 }
 
 /**
