@@ -5,6 +5,7 @@ import { run, runOk, spawnDetached, which } from "../core/proc.ts";
 import { ensureKey, sshProbe, type Endpoint } from "../core/ssh.ts";
 import { updateState } from "../core/state.ts";
 import type { Backend, GuestStatus, Support } from "./types.ts";
+import { sizeMiB } from "../core/sizing.ts";
 
 /** macOS (or Linux) VMs on Apple Silicon via cirruslabs/tart (Virtualization.framework). */
 export class TartBackend implements Backend {
@@ -63,13 +64,14 @@ export class TartBackend implements Backend {
     const me = vms.find((v) => v.Name === this.vm);
     if (!me) {
       await runOk(this.tart(), ["clone", this.cfg.image ?? "ghcr.io/cirruslabs/macos-sequoia-base:latest", this.vm], { timeoutMs: 2 * 60 * 60_000 });
-      const set = ["set", this.vm];
-      if (this.cfg.cpus) set.push("--cpu", String(this.cfg.cpus));
-      if (this.cfg.memory) set.push("--memory", String(parseSizeMb(this.cfg.memory)));
-      if (set.length > 2) await runOk(this.tart(), set);
     } else if (me.State === "running") {
       return;
     }
+    // Applied on every start, so changed cpus/memory take effect at the next boot.
+    const set = ["set", this.vm];
+    if (this.cfg.cpus) set.push("--cpu", String(this.cfg.cpus));
+    if (this.cfg.memory) set.push("--memory", String(sizeMiB(this.cfg.memory)));
+    if (set.length > 2) await runOk(this.tart(), set);
     const log = path.join(ensureDir(paths.guestDir(this.cfg.name)), "tart-run.log");
     const pid = spawnDetached(this.tart(), ["run", "--no-graphics", this.vm], { logFile: log });
     updateState((s) => {
@@ -124,11 +126,4 @@ export class TartBackend implements Backend {
       checkHostKey: false,
     };
   }
-}
-
-function parseSizeMb(s: string): number {
-  const m = /^(\d+(?:\.\d+)?)\s*([KMGT]?)i?B?$/i.exec(s.trim());
-  if (!m) throw new Error(`bad size: ${s}`);
-  const mult: Record<string, number> = { "": 1 / (1024 * 1024), K: 1 / 1024, M: 1, G: 1024, T: 1024 * 1024 };
-  return Math.round(Number(m[1]) * mult[m[2].toUpperCase()]);
 }

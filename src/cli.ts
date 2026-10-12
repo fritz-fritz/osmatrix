@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import fs from "node:fs";
 import path from "node:path";
-import { Command, Option } from "commander";
+import { Command, InvalidArgumentError, Option } from "commander";
 import YAML from "yaml";
 import { ciLogs, ciPlan, ciRun, ciStatus, listRuns, worker } from "./ci/run.ts";
 import { ensureAct } from "./core/act.ts";
@@ -40,10 +40,10 @@ function action<A extends unknown[]>(fn: (...a: A) => Promise<unknown> | unknown
   };
 }
 
+// Whole numbers only: parseInt would quietly turn "2.5" or "2cores" into 2.
 const int = (v: string) => {
-  const n = parseInt(v, 10);
-  if (Number.isNaN(n)) throw new Error(`not a number: ${v}`);
-  return n;
+  if (!/^\s*\d+\s*$/.test(v)) throw new InvalidArgumentError(`not a whole number: ${v}`);
+  return Number(v);
 };
 
 // ---------- setup ----------
@@ -247,6 +247,19 @@ program
       const outcome = ({ works: "Works", partly: "Partly works", fails: "Doesn't work" } as const)[o.outcome as "works" | "partly" | "fails"];
       return compatReport(g, { outcome, notes: o.notes });
     }),
+  );
+
+program
+  .command("configure <guest>")
+  .description("Change a guest's CPUs, memory or disk size (checked against its minimums and this host)")
+  .option("--cpus <n>", "virtual CPUs", int)
+  .option("--memory <size>", 'RAM, e.g. "8G"')
+  .option("--disk <size>", 'virtual disk (dockur VMs; grow only), e.g. "96G"')
+  .option("--apply", "restart the guest now so the change takes effect")
+  .action(
+    action((g: string, o: { cpus?: number; memory?: string; disk?: string; apply?: boolean }) =>
+      env.configure(g, { cpus: o.cpus, memory: o.memory, disk: o.disk }, { apply: o.apply }),
+    ),
   );
 
 program

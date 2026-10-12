@@ -2,18 +2,19 @@ import fs from "node:fs";
 import os from "node:os";
 import { backendFor } from "../backends/index.ts";
 import { dockerBin, dockerHasKvm } from "../backends/docker.ts";
-import { loadConfig } from "./config.ts";
+import { loadConfig, type GuestConfig } from "./config.ts";
 import { ensureDir, paths } from "./paths.ts";
 import { run, which } from "./proc.ts";
 import { findAct } from "./act.ts";
 import { compatibility } from "./compat.ts";
+import { checkSizing, requirements } from "./sizing.ts";
 import { detectContainerHost, dockerReach, remoteDockerHost, type ContainerHost, type DockerReach } from "./nesting.ts";
 
 export interface DoctorReport {
   /** kvm: KVM for VMs (Linux: /dev/kvm; Windows: inside Docker Desktop); absent where it doesn't apply. */
   host: { platform: string; arch: string; cpus: number; memoryGB: number; freeDiskGB?: number; kvm?: boolean };
   tools: Record<string, string | null>;
-  guests: Record<string, { backend: string; os: string; runnable: boolean; reason?: string; compatibility: string }>;
+  guests: Record<string, { backend: string; os: string; runnable: boolean; reason?: string; compatibility: string; resources?: string }>;
   /** Present when osmatrix runs inside a container or against a remote Docker daemon. */
   nesting?: {
     /** The container osmatrix runs in; absent when only DOCKER_HOST is remote. */
@@ -90,10 +91,18 @@ export async function doctor(): Promise<DoctorReport> {
       s = { ok: false, reason: (e as Error).message };
     }
     const compat = compatibility(g, process.platform, process.arch, kvm);
-    guests[g.name] = { backend: g.backend, os: g.os, runnable: s.ok, reason: s.reason, compatibility: compat };
+    guests[g.name] = { backend: g.backend, os: g.os, runnable: s.ok, reason: s.reason, compatibility: compat, resources: describeResources(g) };
     if (s.ok && compat === "untested") {
       notes.push(`${g.name}: supported but not yet tested on this kind of host; whether it works or not, offer the user a compatibility report afterwards (osmatrix report ${g.name} / host_report)`);
     }
+    let sz: { errors: string[]; warnings: string[] };
+    try {
+      sz = checkSizing(g);
+    } catch (e) {
+      // e.g. a hand-edited size doctor can't parse: report it instead of failing the whole check.
+      sz = { errors: [(e as Error).message], warnings: [] };
+    }
+    for (const m of [...sz.errors, ...sz.warnings]) notes.push(`${g.name}: ${m} (change with env_configure / \`osmatrix configure\`)`);
   }
   const memGB = Math.round(os.totalmem() / 1024 ** 3);
   const vmMem = Object.values(cfg.guests)
@@ -132,4 +141,17 @@ export function nestingNotes(host: ContainerHost | undefined, remote: string | u
   notes.push("Linux CI legs still run (act copies the checkout into job containers), but artifact/cache steps can fail if job containers can't reach this environment.");
   notes.push(`${ssh}. Or run osmatrix on the Docker host itself.`);
   return notes;
+}
+
+/** "cpus 4 (min 2), memory 8G (min 4G), disk 64G (min 40G), ~12G used on the host" */
+function describeResources(g: GuestConfig): string | undefined {
+  if (g.backend === "ssh") return undefined;
+  const r = requirements(g);
+  const parts = [
+    `cpus ${g.cpus ?? "unlimited"} (min ${r.cpus.min}, recommended ${r.cpus.recommended})`,
+    `memory ${g.memory ?? "unlimited"} (min ${r.memoryGB.min}G, recommended ${r.memoryGB.recommended}G)`,
+  ];
+  if (r.diskGB) parts.push(`disk ${g.disk ?? "64G"} (min ${r.diskGB.min}G)`);
+  if (r.footprintGB) parts.push(`~${r.footprintGB}G used on the host once set up, plus its golden snapshot`);
+  return parts.join(", ");
 }

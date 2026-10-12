@@ -106,6 +106,29 @@ Run `osmatrix doctor` to see what this host can do. It also needs an OpenSSH cli
 
 > **macOS licensing\*:** installing a macOS guest accepts Apple's [macOS Software License Agreement](https://www.apple.com/legal/sla/), which only permits macOS on Apple hardware. osmatrix asks for this consent once, through `osmatrix setup macos --accept-license` or an agent's `env_setup` call with `accept_license` after you agree, and records it as `macos_eula_acknowledged = true`.
 
+### Guest resources
+
+| Guest | CPUs (min / default) | RAM (min / default) | Virtual disk (min / default) | Host disk once set up |
+|---|---|---|---|---|
+| ubuntu (container) | 1 / unlimited | 1G / unlimited | none | the act image |
+| windows: Server 2025, x86_64 | 2 / 4 | 4G / 8G | 40G / 64G | ~12G (measured), plus the install ISO (~6G) during first setup |
+| windows: Windows 11 ARM | 2 / 4 | 4G / 8G | 64G / 64G | ~20G (estimate) |
+| macos: dockur (Intel) | 2 / 4 | 4G / 8G | 48G / 64G | ~25G (measured) |
+| macos: tart | 2 / 4 | 4G / 8G | from the image (50G) | ~25G (estimate) |
+
+- VM disks are sparse: the host only stores what the guest has written. Each VM's golden snapshot is another copy (less on copy-on-write filesystems such as btrfs).
+- Each running VM holds its full RAM. Running Windows and macOS together at the defaults takes 16G for the guests alone, so plan on 24G or more of host RAM; on a 16G host, run one VM at a time (`max_vms = 1`).
+- The minimums are what the OS and osmatrix's provisioning still work with. Builds go faster with the defaults or more.
+
+Change a guest's size with `osmatrix configure` (MCP: `env_configure`). It checks the new values against the minimums and what the host has:
+
+```bash
+osmatrix configure windows --memory 12G --cpus 6          # takes effect at the next start
+osmatrix configure windows --disk 96G --apply             # dockur VMs only: restart now; the partition grows to fill the disk
+```
+
+`disk` applies to dockur VMs (Windows and macOS on Linux/Windows hosts); tart and the Apple Silicon QEMU guest keep their image's disk size. Disks can only grow. After a disk grows, osmatrix extends the system partition on the next boot. On Windows that removes the Recovery partition that sits after C:, and Windows RE moves onto C:.
+
 ### Devcontainers, Codespaces and remote Docker
 
 osmatrix expects to run on the machine that runs Docker. Each local guest is a container. osmatrix reaches it over ssh on a port that Docker publishes on `127.0.0.1`, and the Windows guest receives its unattended-install files through a bind mount of a directory in the osmatrix data dir. Both of those only work when the Docker daemon shares osmatrix's loopback and filesystem.

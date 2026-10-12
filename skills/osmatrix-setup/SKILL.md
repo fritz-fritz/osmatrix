@@ -27,7 +27,7 @@ Use the **MCP tools** (`host_doctor`, `env_setup`, ...) when they are available:
 | `needs-ssh-setup` | `ssh` guest without key access yet | `osmatrix setup-ssh <guest> --user u` (CLI only; asks for the password once) |
 | `ready` | usable | use `osmatrix-guests` / `osmatrix-ci` |
 
-Only start the guests a task needs: each VM takes 8 GB RAM.
+Only start the guests a task needs: each VM takes its full RAM (8 GB by default). `host_doctor` lists each guest's `resources` (configured vs minimum and recommended) and notes sizing problems; resize with `env_configure`.
 
 ## Setting up a guest
 

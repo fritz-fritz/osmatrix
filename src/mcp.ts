@@ -47,6 +47,8 @@ export const TOOL_ANNOTATIONS: Record<string, { title: string; readOnlyHint: boo
   env_up: { title: "Start a guest", readOnlyHint: false, destructiveHint: false, openWorldHint: false },
   env_down: { title: "Stop a guest", readOnlyHint: false, destructiveHint: true, openWorldHint: false },
   env_reset: { title: "Reset a guest to its snapshot", readOnlyHint: false, destructiveHint: true, openWorldHint: false },
+  // Rewrites config.toml and, with apply, restarts the guest (interrupting work and closing forwards).
+  env_configure: { title: "Resize a guest", readOnlyHint: false, destructiveHint: true, openWorldHint: false },
   env_snapshot: { title: "Save a guest snapshot", readOnlyHint: false, destructiveHint: true, openWorldHint: false },
   env_exec: { title: "Run a command in a guest", readOnlyHint: false, destructiveHint: true, openWorldHint: true },
   env_push: { title: "Copy files into a guest", readOnlyHint: false, destructiveHint: true, openWorldHint: false },
@@ -153,6 +155,22 @@ export async function startMcp(): Promise<void> {
       inputSchema: { guest, wait_seconds: z.number().int().min(0).max(1800).optional() },
     },
     safe(async ({ guest, wait_seconds }) => text(await env.reset(guest, wait_seconds ?? 0))),
+  );
+
+  register(
+    "env_configure",
+    {
+      description:
+        "Resize a guest: virtual CPUs, memory, and (dockur VMs) virtual disk, which can only grow. Values are checked against the guest's minimums and this host; the result lists the requirements and any warnings. Without apply the change takes effect at the guest's next start; with apply a running guest restarts now (forwards close). Raise memory when builds in the guest run out of memory, cpus when they are CPU-bound, disk when it fills up; keep the host's other VMs in mind (host_doctor shows host RAM and CPUs).",
+      inputSchema: {
+        guest,
+        cpus: z.number().int().min(1).optional(),
+        memory: z.string().regex(/^\d+(\.\d+)?\s*[KMGT]?i?B?$/i).optional().describe('e.g. "8G"'),
+        disk: z.string().regex(/^\d+(\.\d+)?\s*[KMGT]?i?B?$/i).optional().describe('e.g. "96G"; grow only'),
+        apply: z.boolean().optional().describe("Restart the guest now and wait until it is ready"),
+      },
+    },
+    safe(async ({ guest, cpus, memory, disk, apply }) => text(await env.configure(guest, { cpus, memory, disk }, { apply }))),
   );
 
   register(
