@@ -4,7 +4,7 @@ import path from "node:path";
 import { Command, InvalidArgumentError, Option } from "commander";
 import YAML from "yaml";
 import { ciLogs, ciPlan, ciRun, ciStatus, listRuns, worker } from "./ci/run.ts";
-import { ensureAct } from "./core/act.ts";
+import { ALL_GUEST_TARGETS, ensureAct } from "./core/act.ts";
 import { defaultConfig, readRawConfig, writeConfig, loadConfig } from "./core/config.ts";
 import { doctor } from "./core/host.ts";
 import { paths, pkgRoot } from "./core/paths.ts";
@@ -86,8 +86,9 @@ program.command("doctor").description("Check host capabilities and which guests 
 
 program
   .command("install-act")
-  .description("Download the pinned act release into the osmatrix data dir (if act is not on PATH)")
-  .action(action(async () => ({ act: await ensureAct() })));
+  .description("Build osmatrix's patched act for this host and its guests now (it otherwise builds on the first `ci run`; needs Docker)")
+  .option("--all-targets", "also build every guest platform osmatrix knows (windows/darwin, amd64/arm64), not only the configured guests'")
+  .action(action(async (o: { allTargets?: boolean }) => ({ act: await ensureAct({ targets: o.allTargets ? ALL_GUEST_TARGETS : [] }) })));
 
 program
   .command("install-agents")

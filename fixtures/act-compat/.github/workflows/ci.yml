@@ -1,0 +1,117 @@
+# Regression checks for the act differences osmatrix patches (assets/act/): they fail with stock act
+# 0.2.89 and pass on GitHub and with osmatrix's patched act. download needs upload, so run it by itself
+# (a whole-workflow run skips it, since upload already runs as its own leg):
+#   osmatrix ci run --repo fixtures/act-compat --only linux --job file-commands --wait
+#   osmatrix ci run --repo fixtures/act-compat --only linux --job docker-action --wait
+#   osmatrix ci run --repo fixtures/act-compat --only linux --job download --wait
+name: act-compat
+on:
+  push:
+  pull_request:
+
+jobs:
+  # File commands live under RUNNER_TEMP, and writing to them still works (#23).
+  file-commands:
+    name: file-commands (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: File-command paths are inside RUNNER_TEMP
+        run: node scripts/check-file-commands.js
+      - name: Write GITHUB_OUTPUT, GITHUB_ENV and GITHUB_PATH
+        id: write
+        shell: bash
+        run: |
+          echo "greeting=hello" >> "$GITHUB_OUTPUT"
+          echo "OSMATRIX_COMPAT=env-ok" >> "$GITHUB_ENV"
+          echo "$RUNNER_TEMP/osmatrix-compat-bin" >> "$GITHUB_PATH"
+      - name: The values arrive in the next step
+        shell: bash
+        env:
+          GREETING: ${{ steps.write.outputs.greeting }}
+        run: |
+          echo "output=$GREETING env=$OSMATRIX_COMPAT"
+          test "$GREETING" = hello
+          test "$OSMATRIX_COMPAT" = env-ok
+          case "$PATH" in *osmatrix-compat-bin*) echo "path ok" ;; *) echo "::error::GITHUB_PATH entry missing from PATH"; exit 1 ;; esac
+
+  # A Docker container action runs in its own container; its GITHUB_OUTPUT/GITHUB_ENV writes must still
+  # reach the job (act shares the file-command directory with it through a per-job volume). Linux only:
+  # GitHub runs Docker actions on Linux runners only.
+  docker-action:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Docker action writes file commands
+        id: docker
+        uses: ./.github/actions/docker-file-commands
+      - name: Its output and env arrive in the next step
+        env:
+          GREETING: ${{ steps.docker.outputs.greeting }}
+        run: |
+          echo "output=[$GREETING] env=[$OSMATRIX_DOCKER_ACTION]"
+          test "$GREETING" = hello-from-docker
+          test "$OSMATRIX_DOCKER_ACTION" = set
+
+  # actions/upload-artifact v7 -> actions/download-artifact between jobs (#24): a zipped directory, and a
+  # single file uploaded without a zip (archive: false), which must download under its own name.
+  upload:
+    name: upload (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - name: Create the artifact
+        shell: bash
+        run: |
+          mkdir -p hand-off
+          echo "hello from ${{ matrix.os }}" > hand-off/message.txt
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: hand-off-${{ matrix.os }}
+          path: hand-off/
+          retention-days: 1
+      - name: Create the single file
+        shell: bash
+        run: echo "report from ${{ matrix.os }}" > "report-${{ matrix.os }}.txt"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          # archive: false names the artifact after the file and ignores name:.
+          path: report-${{ matrix.os }}.txt
+          archive: false
+          retention-days: 1
+
+  download:
+    name: download (${{ matrix.os }})
+    needs: upload
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: hand-off-${{ matrix.os }}
+          path: hand-off
+      - name: The artifact arrived intact
+        shell: bash
+        run: |
+          cat hand-off/message.txt
+          test "$(cat hand-off/message.txt)" = "hello from ${{ matrix.os }}"
+      # download-artifact v8 saves unzipped artifacts under the name the server returns.
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: report-${{ matrix.os }}.txt
+          path: single
+      - name: The single file kept its name
+        shell: bash
+        run: |
+          ls -la single
+          test "$(cat "single/report-${{ matrix.os }}.txt")" = "report from ${{ matrix.os }}"

@@ -14,6 +14,7 @@
     "assets/provision",
     "assets/macos",
     "assets/qemu",
+    "assets/act",
     "README.md",
     "skills",
     "LICENSE",
