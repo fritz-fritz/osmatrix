@@ -210,16 +210,27 @@ export class DockurBackend implements Backend {
   }
 
   /** Total bytes read+written by the VM container (a progress signal while installing). */
-  async ioBytes(): Promise<number> {
+  async ioBytes(opts: { strict?: boolean } = {}): Promise<number> {
     const r = await run(dockerBin(), ["stats", "--no-stream", "--format", "{{.BlockIO}}", this.container]);
+    if (opts.strict && r.code !== 0) throw new Error(`docker stats failed: ${(r.stderr || r.stdout).trim()}`);
     const units: Record<string, number> = { B: 1, kB: 1e3, KB: 1e3, MB: 1e6, GB: 1e9, TB: 1e12 };
     return [...r.stdout.matchAll(/([\d.]+)\s*([kKMGT]?B)/g)].reduce((a, m) => a + Number(m[1]) * (units[m[2]] ?? 1), 0);
   }
 
   /** Number of times the VM firmware has booted since the container started. */
-  async bootCount(): Promise<number> {
+  async bootCount(opts: { strict?: boolean } = {}): Promise<number> {
     const r = await run(dockerBin(), ["logs", this.container]);
-    return ((r.stdout + r.stderr).match(/OC: Loaded configuration/g) ?? []).length;
+    if (opts.strict && r.code !== 0) throw new Error(`docker logs failed: ${(r.stderr || r.stdout).trim()}`);
+    const mark = this.cfg.os === "macos" ? /OC: Loaded configuration/g : /BdsDxe: starting /g;
+    return ((r.stdout + r.stderr).match(mark) ?? []).length;
+  }
+
+  async bootProbe(): Promise<{ io: number; boots: number } | undefined> {
+    if (!this.everReady()) return undefined;
+    // Strict: a failed docker call must disable hang detection (waitReady drops a rejected probe),
+    // not read as zero disk activity.
+    const [io, boots] = await Promise.all([this.ioBytes({ strict: true }), this.bootCount({ strict: true })]);
+    return { io, boots };
   }
 
   async down(): Promise<void> {
@@ -235,11 +246,17 @@ export class DockurBackend implements Backend {
     if (wasRunning) await this.up();
   }
 
+  /** Readiness and boot-time history describe the current disk; a fresh install must not inherit them. */
+  private forgetInstall(): void {
+    for (const f of [".ready-once", "boot-times.json"]) fs.rmSync(path.join(this.dir, f), { force: true });
+  }
+
   async reset(): Promise<void> {
     await this.down();
     if (await volumeExists(this.goldenVol)) {
       await copyVolume(this.goldenVol, this.storageVol);
     } else {
+      this.forgetInstall();
       if (fs.existsSync(this.composeFile)) await this.compose(["down", "-v"]);
       await run(dockerBin(), ["volume", "rm", "-f", this.storageVol]);
     }
@@ -250,6 +267,7 @@ export class DockurBackend implements Backend {
     if (fs.existsSync(this.composeFile)) await this.compose(["down", "-v"]);
     await run(dockerBin(), ["rm", "-f", this.container]);
     await run(dockerBin(), ["volume", "rm", "-f", this.storageVol, this.goldenVol]);
+    this.forgetInstall();
   }
 
   async endpoint(): Promise<Endpoint> {
