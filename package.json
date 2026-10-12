@@ -13,6 +13,7 @@
     "assets/oem",
     "assets/provision",
     "assets/macos",
+    "assets/qemu",
     "README.md",
     "skills",
     "LICENSE",

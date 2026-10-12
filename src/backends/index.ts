@@ -1,6 +1,7 @@
 import type { GuestConfig } from "../core/config.ts";
 import { ContainerBackend } from "./container.ts";
 import { DockurBackend } from "./dockur.ts";
+import { QemuBackend } from "./qemu.ts";
 import { SshBackend } from "./ssh.ts";
 import { TartBackend } from "./tart.ts";
 import type { Backend } from "./types.ts";
@@ -13,6 +14,8 @@ export function backendFor(cfg: GuestConfig): Backend {
       return new DockurBackend(cfg);
     case "tart":
       return new TartBackend(cfg);
+    case "qemu":
+      return new QemuBackend(cfg);
     case "ssh":
       return new SshBackend(cfg);
     default:

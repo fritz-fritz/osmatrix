@@ -186,7 +186,12 @@ export async function destroy(name: string): Promise<void> {
 export async function readyEndpoint(name: string): Promise<Endpoint> {
   const g = getGuest(name);
   const ep = await g.backend.endpoint();
-  const p = await sshProbe(ep);
+  let p = await sshProbe(ep);
+  // A busy or emulated guest can miss the probe's short connect timeout; give it a couple more tries.
+  for (let i = 0; p === "down" && i < 2; i++) {
+    await sleep(2000);
+    p = await sshProbe(ep);
+  }
   if (p === "ok") return ep;
   if (p === "auth" && g.backend.authorizeKey && (await g.backend.authorizeKey()) && (await sshProbe(ep)) === "ok") return ep;
   const s = await g.backend.status();

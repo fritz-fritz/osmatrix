@@ -4,7 +4,7 @@ import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
 import { ensureDir, paths } from "./paths.ts";
 
 export type OsFamily = "linux" | "windows" | "macos";
-export type BackendKind = "container" | "dockur" | "tart" | "ssh";
+export type BackendKind = "container" | "dockur" | "tart" | "qemu" | "ssh";
 export type Shell = "posix" | "pwsh" | "cmd";
 
 export interface GuestConfig {
@@ -35,6 +35,8 @@ export interface GuestConfig {
   workdir?: string;
   /** Seconds to wait for the guest to become reachable during CI. */
   boot_timeout?: number;
+  /** qemu backend: accelerator override ("hvf", "kvm" or "tcg"); defaults to the best the host has. */
+  accel?: string;
 }
 
 export interface Config {
@@ -67,6 +69,21 @@ export function defaultGuests(platform = process.platform, arch = process.arch):
     ubuntu: { name: "ubuntu", os: "linux", backend: "container", image: DEFAULT_LINUX_IMAGE, ssh_port: 2221, user: "root" },
   };
   if (platform === "darwin") {
+    if (arch === "arm64") {
+      // Windows 11 on ARM with the host's QEMU and Hypervisor.framework (tart only runs macOS and Linux).
+      g.windows = {
+        name: "windows",
+        os: "windows",
+        backend: "qemu",
+        image: "dockurr/windows-arm",
+        version: "11",
+        cpus: 4,
+        memory: "8G",
+        disk: "64G",
+        ssh_port: 2222,
+        vnc_port: 5901,
+      };
+    }
     g.macos = {
       name: "macos",
       os: "macos",
