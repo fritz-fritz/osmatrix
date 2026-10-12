@@ -20,5 +20,6 @@ CLI-only: `osmatrix ci runs` (list runs of a repo).
 - Repos synced into a guest by `ci_run`: `~/work/<name>` (Windows: `C:\Users\<user>\work\<name>`).
 - Run artifacts and logs: `<repo>/.osmatrix/runs/<id>/` on the host.
 - Secrets: `<repo>/.osmatrix/secrets` or `<repo>/.secrets`, `KEY=value` lines.
+- Linux legs' image: `act_linux_image` in the osmatrix config. Left at the default `catthehacker/ubuntu:act-24.04`, legs run in the locally built `osmatrix/ubuntu:act-24.04-<hash>` (adds rustup stable with rustfmt and clippy, as on GitHub's runners; the hash follows osmatrix's Dockerfile, so an update rebuilds it once). Any other value is passed to act unchanged and must have what the workflows expect.
 - `max_vms` in the osmatrix config limits how many VM guests run CI legs at the same time (default 2).
 - Labels in the config decide which guest serves a `runs-on` label (globs, first match wins); Linux labels are served by act on the host. See `osmatrix-setup` for the config file.

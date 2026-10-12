@@ -7,10 +7,14 @@ import { assetsDir, resourcePrefix } from "../core/paths.ts";
 import { run } from "../core/proc.ts";
 import { ensureKey, sshProbe, type Endpoint } from "../core/ssh.ts";
 import { containerState, docker, dockerBin, imageExists, isPortConflict, portBinding, publishedPort } from "./docker.ts";
+import { ensureLinuxImage, linuxImageFor } from "./linux-image.ts";
 import type { Backend, GuestStatus, Support } from "./types.ts";
 import { sizeMiB } from "../core/sizing.ts";
 
-/** Linux guest as a long-lived container (same image act uses for ubuntu-* legs) with sshd added. */
+/**
+ * Linux guest as a long-lived container with sshd added, on the image act uses for ubuntu-* legs
+ * (including the parity layer over act's default image).
+ */
 export class ContainerBackend implements Backend {
   readonly cfg: GuestConfig;
   constructor(cfg: GuestConfig) {
@@ -28,7 +32,7 @@ export class ContainerBackend implements Backend {
   }
 
   private sshImageTag(): string {
-    const base = this.cfg.image ?? DEFAULT_LINUX_IMAGE;
+    const base = linuxImageFor(this.cfg.image ?? DEFAULT_LINUX_IMAGE);
     const dir = path.join(assetsDir, "container");
     const h = crypto.createHash("sha256").update(base);
     for (const f of ["Dockerfile", "entrypoint.sh"]) h.update(fs.readFileSync(path.join(dir, f)));
@@ -65,8 +69,9 @@ export class ContainerBackend implements Backend {
   private async ensureImage(): Promise<string> {
     const tag = this.sshImageTag();
     if (!(await imageExists(tag))) {
+      const base = await ensureLinuxImage(this.cfg.image ?? DEFAULT_LINUX_IMAGE, { pid: process.pid, run: "env", repo: "", leg: `guest ${this.cfg.name}` });
       await docker(
-        ["build", "-t", tag, "--build-arg", `BASE=${this.cfg.image ?? DEFAULT_LINUX_IMAGE}`, path.join(assetsDir, "container")],
+        ["build", "-t", tag, "--build-arg", `BASE=${base}`, path.join(assetsDir, "container")],
         60 * 60_000,
       );
     }

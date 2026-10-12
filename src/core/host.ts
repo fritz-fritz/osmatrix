@@ -1,7 +1,8 @@
 import fs from "node:fs";
 import os from "node:os";
 import { backendFor } from "../backends/index.ts";
-import { dockerBin, dockerHasKvm } from "../backends/docker.ts";
+import { dockerBin, dockerHasKvm, imageExists } from "../backends/docker.ts";
+import { linuxImageFor } from "../backends/linux-image.ts";
 import { loadConfig, type GuestConfig } from "./config.ts";
 import { ensureDir, paths } from "./paths.ts";
 import { run, which } from "./proc.ts";
@@ -68,6 +69,12 @@ export async function doctor(): Promise<DoctorReport> {
   const notes: string[] = [];
   if (!tools.docker) notes.push("Docker is required for the ubuntu guest, dockur VMs and Linux CI legs.");
   if (!tools.act) notes.push("act not found; it will be downloaded automatically on first `ci run` (or run `osmatrix install-act`).");
+  if (tools.docker) {
+    const image = linuxImageFor(cfg.act_linux_image);
+    if (image !== cfg.act_linux_image && !(await imageExists(image))) {
+      notes.push(`Linux CI legs run in ${image} (act's default image plus the Rust toolchain GitHub's ubuntu runners preinstall). It isn't built yet; the first Linux leg builds it, which takes a few minutes and needs network access.`);
+    }
+  }
   if (!tools.ssh) notes.push("Install an OpenSSH client (built into Windows 10 1809+, macOS and most Linux distros).");
 
   const host = detectContainerHost();

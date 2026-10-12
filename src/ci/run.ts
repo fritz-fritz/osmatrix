@@ -4,6 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 import YAML from "yaml";
 import { DockurBackend } from "../backends/dockur.ts";
+import { ensureLinuxImage } from "../backends/linux-image.ts";
 import { ensureAct } from "../core/act.ts";
 import { guestWorkdir, loadConfig, type Config } from "../core/config.ts";
 import { acquireLocks } from "../core/locks.ts";
@@ -271,8 +272,10 @@ async function runLeg(repo: string, dir: string, cfg: Config, leg: Leg, sf: Stat
     let code: number;
     if (leg.target === "host") {
       const act = await ensureAct();
+      // The parity image is in no registry, so it's built here before act looks for it.
+      const image = await ensureLinuxImage(cfg.act_linux_image, { pid: process.pid, run: sf.s.id, repo, leg: leg.id }, (l) => log.write(l + "\n"));
       const args = [event, ...commonActArgs(leg), "--pull=false", "--rm", "--artifact-server-path", path.join(dir, "artifacts")];
-      for (const l of new Set([...leg.runsOn, ...(leg.needsLabels ?? [])])) args.push("-P", `${l}=${cfg.act_linux_image}`);
+      for (const l of new Set([...leg.runsOn, ...(leg.needsLabels ?? [])])) args.push("-P", `${l}=${image}`);
       // act mounts the Docker socket into job containers; SELinux (Fedora, openSUSE, RHEL) denies
       // that unless the container runs unconfined, which matches GitHub's runners.
       if (selinuxEnforcing()) args.push("--container-options", "--security-opt label=disable");

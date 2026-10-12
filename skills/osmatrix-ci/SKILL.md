@@ -17,6 +17,8 @@ Always pass the repository's **absolute host path** as `repo` to every `ci_*` to
 
 A workflow's matrix is expanded into legs. `ubuntu-*` legs run with act on the host's Docker; `windows-*` / `macos-*` legs run act *inside* the matching VM (host mode), after syncing the repo into it.
 
+Linux legs use `act_linux_image` from the osmatrix config. At its default (`catthehacker/ubuntu:act-24.04`), osmatrix runs them in `osmatrix/ubuntu:act-24.04-<hash>` instead: that image plus rustup stable with rustfmt and clippy, which GitHub's ubuntu runners preinstall. The first Linux leg builds it locally (a few minutes, needs network) and shows it in the leg's log; concurrent runs wait for that one build. A user-set `act_linux_image` is used as is.
+
 A windows/macos leg needs that guest to be `ready` (`env_status`, CLI `osmatrix status`). If the guest is `absent` or its status `detail` says "not set up", follow `osmatrix-setup` first; VM setup takes 20–60 min. VMs are slow to boot (1–3 min), so **don't start VMs you don't need**, and leave a VM running while you iterate.
 
 ## The loop
@@ -39,7 +41,7 @@ Secrets: put `KEY=value` lines in `.osmatrix/secrets` (or act's default `.secret
 ## Reading results honestly
 
 Local green is strong evidence, not proof. Report anything that didn't run or differs from GitHub:
-- `ci_plan` warnings: `services:` on non-Linux legs, OIDC (`id-token`), `needs:` that cross OSes (act runs the needed job inside the same environment), matrices built from expressions, remote reusable workflows (skipped).
+- `ci_plan` warnings: `services:` on non-Linux legs, OIDC (`id-token`), `needs:` that cross OSes (act runs the needed job inside the same environment), matrices built from expressions, remote reusable workflows (skipped), and Linux legs that use Rust (a Rust setup action, `rustup`/`cargo`/`rustc` in `run:`, or a `rust-toolchain(.toml)` file) while a user-set `act_linux_image` may lack the Rust GitHub preinstalls.
 - File-command paths: act puts `GITHUB_OUTPUT`, `GITHUB_ENV`, `GITHUB_PATH`, `GITHUB_STATE` and `GITHUB_STEP_SUMMARY` under its own `act/workflow/` directory (`/var/run/act/workflow/` in containers), not under `RUNNER_TEMP` as GitHub does. A script that refuses those paths unless they're inside `RUNNER_TEMP`/`GITHUB_WORKSPACE` fails only locally; the failed leg's `warnings` point this out. Report it as an act difference; the workflow can skip such checks when `env.ACT` is set.
 - macOS guests on Linux/Windows hosts are Intel (x86_64) and have no Homebrew (it dropped Intel support): steps that `brew install` fail there. On Apple Silicon hosts (tart) Homebrew is available.
 - Guests are leaner than GitHub-hosted images: preinstalled SDKs (Xcode versions, Visual Studio, Android SDK, many language versions) may be missing. Prefer `setup-*` actions; if a tool is missing in a guest, say so instead of concluding the code is broken.

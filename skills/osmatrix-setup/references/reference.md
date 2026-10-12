@@ -36,7 +36,7 @@ CLI-only: `osmatrix init` (config + ssh key + host check), `config`, `install-ac
 
 | backend | used for | lifecycle | notes |
 |---|---|---|---|
-| `container` | ubuntu | docker | act runner image + sshd; ssh port preferably 2221 (actual port in `env_status`) |
+| `container` | ubuntu | docker | act runner image (with osmatrix's Rust layer when it's the default) + sshd; ssh port preferably 2221 (actual port in `env_status`) |
 | `dockur` | windows, macos on Linux/Windows hosts | docker compose, disks in docker volumes `osmatrix-<guest>-storage` / `-golden` | needs KVM in containers; web viewer preferably 127.0.0.1:8006 (windows) / 8007 (macos); actual ports in `env_status` |
 | `tart` | macos on Apple Silicon | tart clone/run | key installed automatically via tart guest agent |
 | `qemu` | windows (Windows 11 on ARM) on Apple Silicon | host `qemu-system-aarch64` (HVF; KVM on arm64 Linux, TCG emulation elsewhere); install media prepared once with dockur's `windows-arm` image in Docker; disk under the osmatrix data dir `guests/<guest>/disk`, golden snapshot cloned (APFS `cp -c`) | needs `brew install qemu`; ssh forwarded to 127.0.0.1 (port in `env_status`); VNC display for `env_screenshot`/`env_input` |
@@ -64,6 +64,7 @@ Linux: `~/.config/osmatrix/config.toml` · macOS: `~/Library/Preferences/osmatri
 ```toml
 max_vms = 2                      # VM guests running CI legs at the same time
 macos_eula_acknowledged = true   # required for dockur macOS on non-Apple hardware
+# act_linux_image = "catthehacker/ubuntu:full-24.04"  # another image for Linux CI legs (see below)
 
 [guests.windows]
 memory = "12G"                   # min 4G; prefer env_configure, which checks the values
@@ -85,6 +86,8 @@ labels = ["macos-*"]
 `ssh_port`, `web_port` and `vnc_port` are preferences: a busy port is replaced by a free one when the guest starts, and `osmatrix status` shows the ports in use.
 
 Labels decide which guest serves a `runs-on` label (globs, first match wins). Linux labels are served by act on the host.
+
+`act_linux_image` defaults to `catthehacker/ubuntu:act-24.04`. With the default, Linux legs and the `ubuntu` guest use `osmatrix/ubuntu:act-24.04-<hash>`, a local layer over it that adds rustup stable with rustfmt and clippy (preinstalled on GitHub's ubuntu runners). It's built on first use, in a few minutes, and again when an osmatrix update changes its Dockerfile. Set another image to use it unchanged; it must exist locally or be pullable, and `ci_plan` warns on Linux legs that use Rust, since such an image may lack it.
 
 ## Guest-side layout
 

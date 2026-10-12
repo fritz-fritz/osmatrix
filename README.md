@@ -167,7 +167,7 @@ Agents use `env_setup` and poll `env_status`. Afterwards, `osmatrix reset <guest
 
 How each guest gets there:
 
-- **ubuntu**: a container built from `catthehacker/ubuntu:act-24.04` with sshd added.
+- **ubuntu**: a container built from the same image as Linux CI legs (see [Configuration](#configuration)) with sshd added.
 - **windows**: dockur downloads Windows Server 2025 (evaluation) from Microsoft and installs it unattended. [`provision.ps1`](assets/oem/windows/provision.ps1) installs PowerShell 7, Git, Node LTS, Python and act, then enables sshd. Its log is at `C:\OEM\provision.log`.
 - **macos (dockur)**:
   1. osmatrix boots macOS Recovery. It drives Recovery's Terminal through the VNC display and a small [command bridge](assets/macos/bridge.py) inside the container, erases the disk, and runs `startosinstall --agreetolicense`.
@@ -202,6 +202,8 @@ Secrets for CI go in `<repo>/.osmatrix/secrets` (or `.secrets`) as `KEY=value` l
 
 `osmatrix config` prints the effective config and its file path. See [skills/osmatrix-setup/references/reference.md](skills/osmatrix-setup/references/reference.md) for every option, including adding `ssh` guests such as a real Mac on your network.
 
+Linux CI legs run in `act_linux_image`. Its default, `catthehacker/ubuntu:act-24.04`, lacks the Rust toolchain GitHub's ubuntu runners preinstall, so with the default osmatrix builds a thin layer over it once, `osmatrix/ubuntu:act-24.04-<hash>` from [`ubuntu-parity.Dockerfile`](assets/container/ubuntu-parity.Dockerfile), which adds rustup stable with rustfmt and clippy. The hash follows the Dockerfile, so an osmatrix update that changes it rebuilds the image on the next Linux leg. Set `act_linux_image` to another image to use that image unchanged.
+
 ## What local runs don't reproduce
 
 `ci plan` warns about each of these:
@@ -211,6 +213,7 @@ Secrets for CI go in `<repo>/.osmatrix/secrets` (or `.secrets`) as `KEY=value` l
 - `needs:` across OSes. act runs the dependency in the same environment; on Windows legs, osmatrix runs a needed Linux job's `run:` steps without a `shell:` with Git Bash.
 - Matrices built from expressions.
 - Remote reusable workflows.
+- Linux legs that use Rust when `act_linux_image` is set to an image other than the default, which may lack the Rust GitHub preinstalls.
 
 act also keeps the file-command files (`GITHUB_OUTPUT`, `GITHUB_ENV`, …) outside `RUNNER_TEMP`, so scripts that check those paths stay inside `RUNNER_TEMP` fail only locally. A failed leg says so in its warnings; skip such checks when `env.ACT` is set.
 

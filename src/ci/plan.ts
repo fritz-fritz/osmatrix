@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import YAML from "yaml";
-import { labelMatches, type Config, type GuestConfig } from "../core/config.ts";
+import { DEFAULT_LINUX_IMAGE, labelMatches, type Config, type GuestConfig } from "../core/config.ts";
 
 export type Scalar = string | number | boolean | null;
 export type MatrixCombo = Record<string, unknown>;
@@ -152,6 +152,24 @@ export function pickTarget(labels: string[], cfg: Config): { target?: string; os
   return {};
 }
 
+const RUST_ACTIONS = /^(dtolnay\/rust-toolchain|actions-rs\/toolchain|actions-rust-lang\/setup-rust-toolchain)@/;
+
+/**
+ * Why a job looks like it relies on the Rust toolchain GitHub's ubuntu images preinstall (undefined when
+ * it doesn't): a Rust setup action, rustup/cargo/rustc in a run: step, or the repo's toolchain file.
+ */
+export function rustUse(job: Record<string, unknown>, toolchainFile?: string): string | undefined {
+  const steps = Array.isArray(job.steps) ? (job.steps as Record<string, unknown>[]) : [];
+  for (const s of steps) {
+    if (typeof s?.uses === "string" && RUST_ACTIONS.test(s.uses)) return `the job uses ${s.uses.split("@")[0]}`;
+  }
+  for (const s of steps) {
+    const m = typeof s?.run === "string" ? /\b(rustup|cargo|rustc)\b/.exec(s.run) : null;
+    if (m) return `the job runs ${m[1]}`;
+  }
+  return toolchainFile ? `the repo has ${toolchainFile}` : undefined;
+}
+
 // ---------- workflows ----------
 
 export function listWorkflows(repo: string): string[] {
@@ -180,6 +198,7 @@ export function plan(repo: string, cfg: Config, filter: PlanFilter = {}): Plan {
     if (!workflows.length) throw new Error(`workflow "${filter.workflow}" not found under .github/workflows`);
   }
   if (!workflows.length) warnings.push(`no workflows found in ${repo}/.github/workflows`);
+  const toolchainFile = ["rust-toolchain.toml", "rust-toolchain"].find((f) => fs.existsSync(path.join(repo, f)));
 
   const legs: Leg[] = [];
   const seen = new Set<string>();
@@ -215,6 +234,14 @@ export function plan(repo: string, cfg: Config, filter: PlanFilter = {}): Plan {
         if (!target && !skip) skip = `no configured guest serves runs-on ${JSON.stringify(labels)}`;
         if (job.services && os && os !== "linux") lw.push("job services: are only supported on Linux legs");
         if (job.permissions && JSON.stringify(job.permissions).includes("id-token")) lw.push("OIDC (id-token) is not available locally");
+        if (target === "host" && cfg.act_linux_image !== DEFAULT_LINUX_IMAGE) {
+          const why = rustUse(job, toolchainFile);
+          if (why) {
+            lw.push(
+              `${why}, and act_linux_image is set to ${cfg.act_linux_image}: GitHub's ubuntu runners preinstall rustup stable with rustfmt and clippy, which this image may lack. Rust setup failures here may be an image difference`,
+            );
+          }
+        }
         let id = legId(jobId, combo);
         if (workflows.length > 1) id = `${path.posix.basename(wf).replace(/\.ya?ml$/, "")}.${id}`;
         while (seen.has(id)) id += "_";

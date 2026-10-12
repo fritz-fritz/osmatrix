@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
 import YAML from "yaml";
-import { expandMatrix, plan, setDefaultRunShell, substitute } from "../src/ci/plan.ts";
+import { expandMatrix, plan, rustUse, setDefaultRunShell, substitute } from "../src/ci/plan.ts";
 import { defaultConfig, mergeConfig } from "../src/core/config.ts";
 
 test("expandMatrix: cartesian product", () => {
@@ -230,4 +230,37 @@ jobs:
   const ship = plan(repo, linuxCfg(), { job: "ship" }).legs[0];
   assert.deepEqual(ship.linuxNeeds, []);
   assert.ok(ship.warnings.some((w) => w.includes(`needs "build" runs on Linux and other OSes`)));
+});
+
+test("rustUse: setup actions, run steps and toolchain files", () => {
+  assert.equal(rustUse({ steps: [{ uses: "dtolnay/rust-toolchain@stable" }] }), "the job uses dtolnay/rust-toolchain");
+  assert.equal(rustUse({ steps: [{ run: "echo hi" }, { run: "rustup component add clippy" }] }), "the job runs rustup");
+  assert.equal(rustUse({ steps: [{ run: "cargo test --locked" }] }), "the job runs cargo");
+  assert.equal(rustUse({ steps: [{ run: "npm test" }, { uses: "actions/checkout@v4" }] }), undefined);
+  assert.equal(rustUse({ steps: [{ run: "npm test" }] }, "rust-toolchain.toml"), "the repo has rust-toolchain.toml");
+  assert.equal(rustUse({ uses: "./.github/workflows/x.yml" }), undefined);
+});
+
+test("plan warns about Rust only on a user-configured Linux image", () => {
+  const repo = tmpRepo(`
+on: push
+jobs:
+  rs:
+    runs-on: \${{ matrix.os }}
+    strategy: { matrix: { os: [ubuntu-latest, windows-latest] } }
+    steps: [{ uses: dtolnay/rust-toolchain@stable }, { run: cargo test }]
+  js:
+    runs-on: ubuntu-latest
+    steps: [{ run: npm test }]
+`);
+  const rust = (cfg: ReturnType<typeof linuxCfg>, job: string, os = "ubuntu-latest") =>
+    plan(repo, cfg).legs.find((l) => l.job === job && l.runsOn.includes(os))!.warnings.filter((w) => w.includes("rustup stable"));
+  assert.deepEqual(rust(linuxCfg(), "rs"), []);
+  const custom = mergeConfig(linuxCfg(), { act_linux_image: "example/ubuntu:24.04" });
+  assert.equal(rust(custom, "rs").length, 1);
+  assert.match(rust(custom, "rs")[0], /dtolnay\/rust-toolchain, and act_linux_image is set to example\/ubuntu:24\.04/);
+  assert.deepEqual(rust(custom, "rs", "windows-latest"), []);
+  assert.deepEqual(rust(custom, "js"), []);
+  fs.writeFileSync(path.join(repo, "rust-toolchain.toml"), '[toolchain]\nchannel = "stable"\n');
+  assert.match(rust(custom, "js")[0], /the repo has rust-toolchain\.toml/);
 });
