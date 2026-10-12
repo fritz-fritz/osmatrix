@@ -6,7 +6,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        Thanks for reporting! Reports on untested hosts move them to ✅ (or tell us what to fix). `osmatrix report <guest>` (MCP: `host_report`) fills this in for you; remove anything you don't want to share.
+        Thanks for reporting! Reports on untested hosts move them to ✅ (or tell us what to fix). `osmatrix report <guest>` (MCP: `host_report`) fills this in for you; remove anything you don't want to share. Agents may draft this report but post it only with your consent ([AI policy](https://github.com/fritz-fritz/osmatrix/blob/main/AI_POLICY.md)).
   - type: dropdown
     id: outcome
     attributes:

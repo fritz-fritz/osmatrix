@@ -220,6 +220,8 @@ Guests are also leaner than GitHub's hosted images, so prefer `setup-*` actions.
 
 osmatrix runs on your machine, with no telemetry or accounts, and does not independently transmit your data to FritzTech. See [PRIVACY.md](PRIVACY.md) and [TERMS.md](TERMS.md). The Codex/ChatGPT listing links to both.
 
+osmatrix is developed with AI coding agents under human review. [AI_POLICY.md](AI_POLICY.md) covers how the project uses AI, what's expected of AI-assisted contributions, and the rules for agents that file issues or pull requests for their users.
+
 ## Repository structure
 
 ```

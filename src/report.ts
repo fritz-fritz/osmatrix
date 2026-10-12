@@ -118,6 +118,8 @@ export async function compatReport(guest: string, opts: { outcome: Outcome; note
     `### osmatrix version\n\n${version}`,
     `### What happened\n\n${details}`,
     "### osmatrix doctor and guest status\n\n```text\n" + doctorText.trim() + "\n```",
+    // Disclosure per AI_POLICY.md: the report is generated, possibly by an agent for the user.
+    "_Drafted with `osmatrix report`._",
   ].join("\n\n");
 
   const params = new URLSearchParams({
