@@ -38,8 +38,9 @@ export interface GuestConfig {
   /** qemu backend: accelerator override ("hvf", "kvm" or "tcg"); defaults to the best the host has. */
   accel?: string;
   /**
-   * Intel macOS guests: the pinned Homebrew to install, or false for none. Missing fields take the
-   * DEFAULT_HOMEBREW pins. Apple Silicon guests always get current Homebrew.
+   * macOS guests' Homebrew. Intel: the pinned brew tag and homebrew-core commit (missing fields take
+   * DEFAULT_HOMEBREW), or false for none. Apple Silicon: `brew` pins the brew tag; without it brew
+   * matches GitHub's arm64 runner image, and false leaves brew as it is.
    */
   homebrew?: false | HomebrewPins;
 }
@@ -238,10 +239,28 @@ export function guestHomebrew(g: GuestConfig): Required<HomebrewPins> | undefine
   return pins;
 }
 
-/** Environment for the macOS provisioning script: which Homebrew an Intel guest gets (Apple Silicon ignores it). */
-export function homebrewProvisionEnv(g: GuestConfig): Record<string, string> {
+/**
+ * The brew tag an Apple Silicon guest is pinned to by its config, if any. Without one it matches GitHub's
+ * arm64 runner image for its macOS version (looked up at provisioning); `homebrew = false` leaves its
+ * brew where it is (Homebrew provides the toolchain there, so it can't be skipped).
+ */
+export function guestArm64Brew(g: GuestConfig): string | false | undefined {
+  if (g.homebrew === false) return false;
+  return g.homebrew?.brew === undefined ? undefined : guestHomebrew(g)!.brew;
+}
+
+/**
+ * Environment for the macOS provisioning script: the Intel pins (or OSMATRIX_HOMEBREW=0) and, when known,
+ * the brew tag for Apple Silicon. The script uses whichever matches the guest's architecture.
+ */
+export function homebrewProvisionEnv(g: GuestConfig, arm64Brew?: string): Record<string, string> {
   const pins = guestHomebrew(g);
-  return pins ? { OSMATRIX_BREW_TAG: pins.brew, OSMATRIX_BREW_CORE: pins.core } : { OSMATRIX_HOMEBREW: "0" };
+  const env: Record<string, string> = pins ? { OSMATRIX_BREW_TAG: pins.brew, OSMATRIX_BREW_CORE: pins.core } : { OSMATRIX_HOMEBREW: "0" };
+  if (arm64Brew !== undefined) {
+    if (!/^\d+\.\d+\.\d+$/.test(arm64Brew)) throw new Error(`not a Homebrew release tag: ${arm64Brew}`);
+    env.OSMATRIX_BREW_ARM64_TAG = arm64Brew;
+  }
+  return env;
 }
 
 function globToRegExp(glob: string): RegExp {

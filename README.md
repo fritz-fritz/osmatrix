@@ -175,7 +175,7 @@ How each guest gets there:
   3. Finally [`macos.sh`](assets/provision/macos.sh) installs the Xcode command-line tools, Node, Python and act, and Homebrew.
 
   These guests are Intel (x86_64). Homebrew stopped building Intel bottles in August 2026 and its installer no longer supports Intel, so osmatrix installs Homebrew into `/usr/local` (as on GitHub's Intel runner) pinned to brew 6.0.22 and the last homebrew-core commit whose formulae have Intel bottles. `brew install` then pours bottles instead of compiling, at the formula versions of that commit, which are older than on GitHub's runners. The `homebrew` guest setting changes the pins or turns Homebrew off ([reference](skills/osmatrix-setup/references/reference.md)). Guests set up before this get it with `osmatrix provision macos`, then `osmatrix snapshot macos` to keep it in the golden snapshot.
-- **macos (tart)**: clones a cirruslabs image, installs the key through the guest agent, then provisions with Homebrew.
+- **macos (tart)**: clones a cirruslabs image, installs the key through the guest agent, then provisions with Homebrew, set to the brew version GitHub's arm64 runner image for that macOS ships (looked up in actions/runner-images, cached for a day).
 
 The generated guest passwords are stored in the osmatrix data dir under `guests/<name>/credentials.json`, for RDP or the VNC viewer.
 

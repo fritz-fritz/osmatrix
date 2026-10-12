@@ -86,18 +86,22 @@ labels = ["macos-*"]
 
 Labels decide which guest serves a `runs-on` label (globs, first match wins). Linux labels are served by act on the host.
 
-`homebrew` (Intel macOS guests: dockur, or an Intel Mac as an `ssh` guest; Apple Silicon guests always get current Homebrew):
+`homebrew` (macOS guests):
 
 ```toml
 [guests.macos]
-homebrew = { brew = "6.0.22", core = "a5783fb0df65b1eeeaee4dbdf7e0c41b133c72ac" }  # the defaults; a missing field keeps its default
-# homebrew = false                                                                   # no Homebrew
+homebrew = { brew = "6.0.22", core = "a5783fb0df65b1eeeaee4dbdf7e0c41b133c72ac" }  # Intel defaults; a missing field keeps its default
+# homebrew = false                                                                   # Intel: no Homebrew
 ```
 
-Homebrew stopped building Intel bottles on 2026-08-27 and its installer no longer supports Intel. Intel guests get Homebrew in `/usr/local`, as on GitHub's Intel runner, with brew cloned at the `brew` tag and homebrew-core checked out at the `core` commit. The defaults are brew 6.0.22 (the last release before 7.0.0 made Intel Tier 3) and the last homebrew-core commit before updates stopped getting Intel bottles. `HOMEBREW_NO_INSTALL_FROM_API`, `HOMEBREW_NO_AUTO_UPDATE` and `HOMEBREW_NO_INSTALL_CLEANUP` are set for ssh sessions and CI steps, so formulae come from that commit. The tradeoff: `brew install` pours bottles instead of building from source, but formula versions stay as they were then, older than on GitHub's runners. Moving `core` later trades bottles for newer versions: formulae updated after the cutoff build from source (slow, and often failing). A step that runs `brew update` moves the guest off the pins until `reset`. Changes apply at the next `osmatrix provision <guest>` (then `osmatrix snapshot <guest>` to keep them); `homebrew = false` skips Homebrew for guests provisioned afterwards (it doesn't remove an installed one).
+All macOS guests get the Homebrew settings of GitHub's macOS runner images (their `bashrc`) for ssh sessions and CI steps: `HOMEBREW_NO_AUTO_UPDATE=1`, `HOMEBREW_NO_INSTALL_CLEANUP=1` and `HOMEBREW_CASK_OPTS="--no-quarantine"`, plus `brew analytics off`.
+
+**Apple Silicon** guests (tart, or an Apple Silicon Mac as an `ssh` guest): `osmatrix provision` checks brew out at the version GitHub's arm64 runner image for the guest's macOS ships (`macos-15-arm64` for Sequoia). The version comes from the `- Homebrew x.y.z` line of that image's readme at its newest full release in actions/runner-images (main's readme if none is listed), and is cached for a day in the data dir. Formulae come from Homebrew's live API, as on the runner, so formula versions are current. With auto-update off, brew stays at that version until the next `osmatrix provision`. If the lookup fails, the guest keeps its brew and provisioning says why. `homebrew = { brew = "x.y.z" }` pins a version instead; `homebrew = false` leaves brew as it is (Homebrew provides the toolchain there, so it isn't skipped); `core` doesn't apply.
+
+**Intel** guests (dockur, or an Intel Mac as an `ssh` guest): Homebrew stopped building Intel bottles on 2026-08-27 and its installer no longer supports Intel. Intel guests get Homebrew in `/usr/local`, as on GitHub's Intel runner, with brew cloned at the `brew` tag and homebrew-core checked out at the `core` commit. The defaults are brew 6.0.22 (the last release before 7.0.0 made Intel Tier 3) and the last homebrew-core commit before updates stopped getting Intel bottles. Unlike GitHub's runners, `HOMEBREW_NO_INSTALL_FROM_API` is also set, so formulae come from that commit. The tradeoff: `brew install` pours bottles instead of building from source, but formula versions stay as they were then, older than on GitHub's runners. Moving `core` later trades bottles for newer versions: formulae updated after the cutoff build from source (slow, and often failing). A step that runs `brew update` moves the guest off the pins until `reset`. Changes apply at the next `osmatrix provision <guest>` (then `osmatrix snapshot <guest>` to keep them); `homebrew = false` skips Homebrew for guests provisioned afterwards (it doesn't remove an installed one).
 
 ## Guest-side layout
 
 - Windows: user `osmatrix` (admin), sshd default shell `pwsh`, tools: Git (+bash), Node LTS, Python, PowerShell 7, act. Provisioning log: `C:\OEM\provision.log`.
-- macOS: user `osmatrix` (admin, passwordless sudo, auto-login to the desktop), Xcode Command Line Tools, git, Node LTS, Python, act, jq; Homebrew (current on Apple Silicon; pinned on Intel, see `homebrew` under Config). Password in the host's osmatrix data dir (`guests/<name>/credentials.json`).
+- macOS: user `osmatrix` (admin, passwordless sudo, auto-login to the desktop), Xcode Command Line Tools, git, Node LTS, Python, act, jq; Homebrew (see `homebrew` under Config). Password in the host's osmatrix data dir (`guests/<name>/credentials.json`).
 - Data dir (guest state, ssh key, credentials, logs, downloaded act): Linux `~/.local/share/osmatrix`.

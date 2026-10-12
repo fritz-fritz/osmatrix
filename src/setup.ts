@@ -8,7 +8,7 @@ import { loadConfig, readRawConfig, writeConfig } from "./core/config.ts";
 import { assetsDir, cliEntry, ensureDir, paths } from "./core/paths.ts";
 import { isAlive, run, sleep, spawnDetached } from "./core/proc.ts";
 import { ensureKey, sshExec } from "./core/ssh.ts";
-import { getGuest, macProvisionCommand, readyEndpoint, waitReady, type Guest } from "./env.ts";
+import { getGuest, macProvisionPlan, readyEndpoint, waitReady, type Guest } from "./env.ts";
 import { input, screenBrightness } from "./gui.ts";
 
 /**
@@ -246,7 +246,8 @@ async function setupDockurMac(g: Guest, b: DockurBackend, opts: SetupOptions, ph
 async function provisionMac(g: Guest) {
   const ep = await readyEndpoint(g.cfg.name);
   const script = fs.readFileSync(path.join(assetsDir, "provision", "macos.sh"), "utf8");
-  const r = await sshExec(ep, macProvisionCommand(g.cfg, "-s"), { input: script, timeoutMs: 2 * 3600_000, maxBytes: 64 * 1024 });
+  const { command } = await macProvisionPlan(ep, g.cfg, "-s");
+  const r = await sshExec(ep, command, { input: script, timeoutMs: 2 * 3600_000, maxBytes: 64 * 1024 });
   if (r.code !== 0) throw new Error(`provisioning failed (exit ${r.code}):\n${(r.stdout + r.stderr).slice(-3000)}`);
 }
 

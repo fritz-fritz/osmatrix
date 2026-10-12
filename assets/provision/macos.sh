@@ -34,18 +34,51 @@ if ! xcode-select -p >/dev/null 2>&1; then
   rm -f /tmp/.com.apple.dt.CommandLineTools.installondemand.in-progress
 fi
 
+# Append a line to ~/.zshenv and ~/.bashrc once: sshd's non-interactive shells (and so act and its steps)
+# read only these (zsh reads .zshenv for every invocation).
+persist() {
+  grep -qxF "$1" ~/.zshenv 2>/dev/null || echo "$1" >> ~/.zshenv
+  grep -qxF "$1" ~/.bashrc 2>/dev/null || echo "$1" >> ~/.bashrc
+}
+
+# Homebrew settings of GitHub's macOS runner images (images/macos/assets/bashrc in actions/runner-images):
+# brew stays at the version the image shipped, and installs don't clean up. act's host mode passes its
+# environment on to steps, so they see these as on GitHub.
+brew_env() {
+  export HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_CLEANUP=1 HOMEBREW_CASK_OPTS="--no-quarantine"
+  persist 'export HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_CLEANUP=1 HOMEBREW_CASK_OPTS="--no-quarantine"'
+}
+
+# Check the brew repository out at a release tag, as `brew update` does (branch "stable" at the tag).
+pin_brew() { # repo tag
+  [ "$(git -C "$1" describe --tags --exact-match 2>/dev/null)" = "$2" ] && return 0
+  log "switching Homebrew to $2"
+  if [ -f "$1/.git/shallow" ]; then
+    git -C "$1" fetch -q --force --depth 1 origin "refs/tags/$2:refs/tags/$2"
+  else
+    git -C "$1" fetch -q --force origin "refs/tags/$2:refs/tags/$2"
+  fi
+  git -C "$1" checkout -q -f -B stable "refs/tags/$2"
+}
+
 if [ "$(uname -m)" = "arm64" ]; then
-  # Apple Silicon (tart): Homebrew, like GitHub's macOS runners.
+  # Apple Silicon (tart): Homebrew at the version GitHub's arm64 runner image for this macOS ships (osmatrix
+  # looks it up and passes OSMATRIX_BREW_ARM64_TAG), with formulae from the live API, as on the runner.
   if ! command -v brew >/dev/null 2>&1 && [ ! -x /opt/homebrew/bin/brew ]; then
     log "installing Homebrew"
     NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
   fi
   BREW=$(command -v brew || echo /opt/homebrew/bin/brew)
   eval "$("$BREW" shellenv)"
-  # Make brew visible to non-interactive ssh sessions (zsh reads .zshenv for every invocation).
-  line="eval \"\$($BREW shellenv)\""
-  grep -qxF "$line" ~/.zshenv 2>/dev/null || echo "$line" >> ~/.zshenv
-  grep -qxF "$line" ~/.bashrc 2>/dev/null || echo "$line" >> ~/.bashrc
+  persist "eval \"\$($BREW shellenv)\""
+  brew_env
+  if [ -n "${OSMATRIX_BREW_ARM64_TAG:-}" ]; then
+    pin_brew "$(brew --repository)" "$OSMATRIX_BREW_ARM64_TAG"
+  else
+    log "no Homebrew version given; keeping $(brew --version | sed -n 1p)"
+  fi
+  # GitHub's images turn analytics off too.
+  brew analytics off
   log "installing toolchain"
   brew install --quiet git node python act jq
 else
@@ -79,9 +112,7 @@ else
   fi
   rm -rf "$tmp"
   # sshd gives non-login shells only /usr/bin:/bin:/usr/sbin:/sbin; path_helper (/etc/paths) runs for login shells only.
-  line='export PATH="/usr/local/bin:$PATH"'
-  grep -qxF "$line" ~/.zshenv 2>/dev/null || echo "$line" >> ~/.zshenv
-  grep -qxF "$line" ~/.bashrc 2>/dev/null || echo "$line" >> ~/.bashrc
+  persist 'export PATH="/usr/local/bin:$PATH"'
   export PATH="/usr/local/bin:$PATH"
 
   # Homebrew in /usr/local, as on GitHub's Intel runner, pinned to where Intel bottles exist. Homebrew stopped
@@ -93,19 +124,19 @@ else
   elif [ -z "${OSMATRIX_BREW_TAG:-}" ] || [ -z "${OSMATRIX_BREW_CORE:-}" ]; then
     log "no Homebrew pins given (run this through osmatrix provision); skipping Homebrew"
   else
-    # Formula definitions come from the pinned tap, not the live JSON API (whose versions have no Intel
-    # bottles); brew must not update itself or the tap away from the pins.
-    export HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_FROM_API=1 HOMEBREW_NO_INSTALL_CLEANUP=1
+    brew_env
+    # Unlike on GitHub's runners, formula definitions come from the pinned tap, not the live JSON API
+    # (whose versions have no Intel bottles).
+    export HOMEBREW_NO_INSTALL_FROM_API=1
+    persist 'export HOMEBREW_NO_INSTALL_FROM_API=1'
     repo=/usr/local/Homebrew
     if [ ! -d "$repo/.git" ]; then
       log "installing Homebrew $OSMATRIX_BREW_TAG into /usr/local"
       sudo mkdir -p "$repo"
       sudo chown "$USER:admin" "$repo"
       git -c advice.detachedHead=false clone -q --depth 1 --branch "$OSMATRIX_BREW_TAG" https://github.com/Homebrew/brew "$repo"
-    elif [ "$(git -C "$repo" describe --tags --exact-match 2>/dev/null)" != "$OSMATRIX_BREW_TAG" ]; then
-      log "switching Homebrew to $OSMATRIX_BREW_TAG"
-      git -C "$repo" fetch -q --depth 1 origin tag "$OSMATRIX_BREW_TAG"
-      git -C "$repo" -c advice.detachedHead=false checkout -q -f "$OSMATRIX_BREW_TAG"
+    else
+      pin_brew "$repo" "$OSMATRIX_BREW_TAG"
     fi
     # What Homebrew's installer sets up: the prefix directories, owned by the user (not recursively:
     # the Node.js, Python and act files already in /usr/local stay root-owned).
@@ -133,10 +164,7 @@ else
     fi
     # Also installs Homebrew's portable Ruby now rather than in the first CI step that uses brew.
     brew config >/dev/null
-    # act's host mode passes its own environment to steps, so non-interactive ssh shells need these too.
-    line='export HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_FROM_API=1 HOMEBREW_NO_INSTALL_CLEANUP=1'
-    grep -qxF "$line" ~/.zshenv 2>/dev/null || echo "$line" >> ~/.zshenv
-    grep -qxF "$line" ~/.bashrc 2>/dev/null || echo "$line" >> ~/.bashrc
+    brew analytics off
     log "$(brew --version | sed -n 1p), homebrew/core pinned at ${OSMATRIX_BREW_CORE:0:12}"
   fi
 fi

@@ -25,7 +25,7 @@ osmatrix connects to the network only to fetch software that you ask it to set u
 - container images from Docker Hub
 - Windows Server evaluation media from Microsoft
 - macOS recovery and installer images from Apple
-- guest toolchains from their publishers: Node.js (nodejs.org), Python (python.org), Git for Windows and PowerShell (GitHub), Homebrew and its packages for macOS guests (GitHub and ghcr.io)
+- guest toolchains from their publishers: Node.js (nodejs.org), Python (python.org), Git for Windows and PowerShell (GitHub), Homebrew and its packages for macOS guests (GitHub and ghcr.io), and the Homebrew version of GitHub's runner images (actions/runner-images on GitHub) for Apple Silicon macOS guests
 - the osmatrix package itself from npm, when started through `npx`
 
 Each of those services handles requests under its own privacy policy. The commands and CI workflow steps that you, or an AI agent acting for you, run inside guests may contact other services; osmatrix does not inspect or restrict them.
