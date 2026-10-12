@@ -214,6 +214,48 @@ jobs:
   assert.deepEqual(setDefaultRunShell(wfDefault, ["plan"], "x").changed, []);
 });
 
+test("setDefaultRunShell edits only the lines it adds", () => {
+  const src = `on:
+  push:
+    branches: [main]   # spacing kept
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    steps: [{ run: "echo ok" }]
+  wd:
+    defaults:
+      run:
+        working-directory: sub
+    runs-on: ubuntu-latest
+    steps: [{ run: echo }]
+  partial:
+    defaults:
+      other: 1
+    runs-on: ubuntu-latest
+    steps: [{ run: echo }]
+`;
+  const shell = `"C:/Program Files/Git/bin/bash.exe" -e {0}`;
+  const { text, changed } = setDefaultRunShell(src, ["plan", "wd", "partial"], shell);
+  assert.deepEqual(changed, ["plan", "wd", "partial"]);
+  // Only added lines; everything else is byte for byte the original.
+  const q = `'"C:/Program Files/Git/bin/bash.exe" -e {0}'`;
+  const expected = src
+    .replace("  plan:\n", `  plan:\n    defaults:\n      run:\n        shell: ${q}\n`)
+    .replace("      run:\n        working-directory", `      run:\n        shell: ${q}\n        working-directory`)
+    .replace("      other: 1\n", `      run:\n        shell: ${q}\n      other: 1\n`);
+  assert.equal(text, expected);
+  const jobs = YAML.parse(text).jobs;
+  for (const j of changed) assert.equal(jobs[j].defaults.run.shell, shell);
+  assert.equal(jobs.wd.defaults.run["working-directory"], "sub");
+  assert.equal(jobs.partial.defaults.other, 1);
+  // CRLF files get CRLF lines.
+  const crlf = setDefaultRunShell(src.replace(/\n/g, "\r\n"), ["plan"], shell).text;
+  assert.ok(!/[^\r]\n/.test(crlf));
+  // Flow-style jobs can't take inserted lines; the document is re-serialised instead.
+  const flow = setDefaultRunShell("jobs:\n  plan: { runs-on: ubuntu-latest, steps: [{ run: echo }] }\n", ["plan"], shell);
+  assert.equal(YAML.parse(flow.text).jobs.plan.defaults.run.shell, shell);
+});
+
 test("needed jobs with legs on Linux and other OSes are not given a bash default", () => {
   const repo = tmpRepo(`
 on: push

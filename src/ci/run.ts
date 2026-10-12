@@ -308,7 +308,8 @@ async function runLeg(repo: string, dir: string, cfg: Config, leg: Leg, sf: Stat
       const s = await waitReady(g, g.cfg.boot_timeout ?? 3600);
       if (s.state !== "ready") throw new Error(`guest ${g.cfg.name} not ready: ${s.state}${s.detail ? ` (${s.detail})` : ""}`);
       const ep = await readyEndpoint(g.cfg.name);
-      const remote = `${guestWorkdir(g.cfg)}/${path.basename(repo)}`;
+      const workdir = guestWorkdir(g.cfg);
+      const remote = `${workdir}/${path.basename(repo)}`;
       log.write(`[osmatrix] syncing ${repo} -> ${g.cfg.name}:${remote}\n`);
       await sshPush(ep, repo, remote, { clean: true, includeGit: true });
       if (!fs.existsSync(path.join(repo, ".git"))) {
@@ -316,21 +317,31 @@ async function runLeg(repo: string, dir: string, cfg: Config, leg: Leg, sf: Stat
         const init = "git init -q; git add -A; git -c user.name=osmatrix -c user.email=osmatrix@localhost commit -qm osmatrix";
         await sshExec(ep, withCwd(ep.shell, remote, init), { timeoutMs: 120_000 });
       }
-      if (g.cfg.os === "windows" && leg.linuxNeeds?.length) await bashForLinuxNeeds(ep, repo, remote, leg, r, log);
-      const args = [event, ...commonActArgs(leg), "--artifact-server-path", ".osmatrix-artifacts"];
-      for (const l of new Set([...leg.runsOn, ...(leg.needsLabels ?? [])])) args.push("-P", `${l}=-self-hosted`);
-      if (sf.s.options.eventPayload) {
-        await writeRemoteFile(ep, remote, ".osmatrix-event.json", JSON.stringify(sf.s.options.eventPayload));
-        args.push("-e", ".osmatrix-event.json");
+      // The work tree must match the commit, as on GitHub, so this leg's own files go next to it.
+      const own = guestLegDir(workdir, sf.s.id, leg.id);
+      try {
+        let workflow = leg.workflow;
+        if (g.cfg.os === "windows" && leg.linuxNeeds?.length) {
+          const derived = await bashForLinuxNeeds(ep, repo, leg, r, log);
+          if (derived !== undefined) workflow = await writeDerivedWorkflow(ep, dir, own, leg, derived, log);
+        }
+        const args = [event, ...commonActArgs(leg, workflow), "--artifact-server-path", `${own.fromWorkTree}/artifacts`];
+        for (const l of new Set([...leg.runsOn, ...(leg.needsLabels ?? [])])) args.push("-P", `${l}=-self-hosted`);
+        if (sf.s.options.eventPayload) {
+          await writeRemoteFile(ep, `${own.path}/event.json`, JSON.stringify(sf.s.options.eventPayload));
+          args.push("-e", `${own.fromWorkTree}/event.json`);
+        }
+        if (secretFile) {
+          await writeRemoteFile(ep, `${own.path}/secrets`, fs.readFileSync(secretFile, "utf8"));
+          args.push("--secret-file", `${own.fromWorkTree}/secrets`);
+        }
+        log.write(`$ act ${args.join(" ")}\n`);
+        const command = withCwd(ep.shell, remote, commandLine(ep.shell, ["act", ...args]));
+        code = await streamProcess(sshBin(), sshArgs(ep, ["-T"]).concat([command]), undefined, parser, timeoutMs);
+      } finally {
+        // Per-run files only (secrets among them); the next leg on this guest starts its own.
+        await sshExec(ep, removeCmd(ep, own.run), { timeoutMs: 120_000 }).catch(() => undefined);
       }
-      if (secretFile) {
-        await writeRemoteFile(ep, remote, ".osmatrix-secrets", fs.readFileSync(secretFile, "utf8"));
-        args.push("--secret-file", ".osmatrix-secrets");
-      }
-      log.write(`$ act ${args.join(" ")}\n`);
-      const command = withCwd(ep.shell, remote, commandLine(ep.shell, ["act", ...args]));
-      code = await streamProcess(sshBin(), sshArgs(ep, ["-T"]).concat([command]), undefined, parser, timeoutMs);
-      if (secretFile) await sshExec(ep, removeCmd(ep, `${remote}/.osmatrix-secrets`)).catch(() => undefined);
     }
     parser.flush();
     r.steps = parser.steps;
@@ -367,8 +378,40 @@ export function actDifferenceHints(log: string): string[] {
   ];
 }
 
-function commonActArgs(leg: Leg): string[] {
-  const a = ["-W", leg.workflow, "-j", leg.job, "--json"];
+/**
+ * Where a VM leg keeps the files osmatrix gives act (a derived workflow, the event payload, secrets,
+ * act's artifact store): `<workdir>/.osmatrix/<run>/<leg>`, a sibling of the synced work trees, so the
+ * checkout stays identical to the commit. `fromWorkTree` is the same directory relative to
+ * `<workdir>/<repo>`, where act runs; `run` is the run's directory, removed when the leg ends.
+ */
+export function guestLegDir(workdir: string, runId: string, legId: string): { path: string; fromWorkTree: string; run: string } {
+  const rel = `.osmatrix/${runId}/${legId}`;
+  return { path: `${workdir}/${rel}`, fromWorkTree: `../${rel}`, run: `${workdir}/.osmatrix/${runId}` };
+}
+
+/**
+ * Write a leg's derived workflow next to the work tree (keeping its file name, which act falls back to for
+ * the workflow's name) and a copy into the run directory for debugging. Returns the path to pass to -W.
+ */
+async function writeDerivedWorkflow(
+  ep: Endpoint,
+  dir: string,
+  own: ReturnType<typeof guestLegDir>,
+  leg: Leg,
+  text: string,
+  log: fs.WriteStream,
+): Promise<string> {
+  const name = path.posix.basename(leg.workflow);
+  await writeRemoteFile(ep, `${own.path}/${name}`, text);
+  const copy = path.join(dir, `${leg.id}.workflow.yml`);
+  fs.writeFileSync(copy, text);
+  log.write(`[osmatrix] act runs a derived copy of ${leg.workflow} (saved as ${copy}); the checkout is unchanged\n`);
+  return `${own.fromWorkTree}/${name}`;
+}
+
+/** act's arguments for a leg; `workflow` replaces the leg's own workflow file (a derived copy outside the work tree). */
+export function commonActArgs(leg: Leg, workflow = leg.workflow): string[] {
+  const a = ["-W", workflow, "-j", leg.job, "--json"];
   for (const [k, v] of Object.entries(leg.matrix)) {
     if (v === null || ["string", "number", "boolean"].includes(typeof v)) a.push("--matrix", `${k}:${String(v)}`);
   }
@@ -399,22 +442,23 @@ function resolveSecretFile(repo: string, explicit?: string): string | undefined 
 
 /**
  * act runs a Windows leg's Linux needs in the VM, where run: steps without a shell: default to pwsh.
- * GitHub would run them with bash, so point those jobs at Git Bash in the guest's copy of the workflow.
+ * GitHub would run them with bash, so point those jobs at Git Bash. Returns the derived workflow, or
+ * undefined when nothing changes.
  */
-async function bashForLinuxNeeds(ep: Endpoint, repo: string, remote: string, leg: Leg, r: LegResult, log: fs.WriteStream) {
+async function bashForLinuxNeeds(ep: Endpoint, repo: string, leg: Leg, r: LegResult, log: fs.WriteStream): Promise<string | undefined> {
   // Git Bash's launcher (bin\bash.exe) sets up PATH; System32\bash.exe would be WSL, so don't rely on PATH.
   const find = `$g = Get-Command git -ErrorAction SilentlyContinue; $c = @('C:\\Program Files\\Git\\bin\\bash.exe'); if ($g) { $c = @((Join-Path (Split-Path (Split-Path $g.Source)) 'bin\\bash.exe'), (Join-Path (Split-Path (Split-Path (Split-Path $g.Source))) 'bin\\bash.exe')) + $c }; $c | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1`;
   const bash = (await sshExec(ep, powershell(ep, find), { timeoutMs: 60_000 })).stdout.trim().replace(/\\/g, "/");
   if (!bash) {
     r.warnings.push(`Git Bash not found in the guest; Linux needs (${leg.linuxNeeds!.join(", ")}) run their run: steps under pwsh`);
-    return;
+    return undefined;
   }
   // GitHub's default for a run: step without shell: on Linux is `bash -e {0}`. Double quotes: act splits
   // the string to find the program, but on Windows hands the raw string to CreateProcess as the command line.
   const { text, changed } = setDefaultRunShell(fs.readFileSync(path.join(repo, leg.workflow), "utf8"), leg.linuxNeeds!, `"${bash}" -e {0}`);
-  if (!changed.length) return;
-  await writeRemoteFile(ep, remote, leg.workflow, text);
+  if (!changed.length) return undefined;
   log.write(`[osmatrix] Linux needs ${changed.join(", ")}: run: steps without shell: use ${bash} in this leg\n`);
+  return text;
 }
 
 /**
@@ -426,20 +470,36 @@ export function powershell(ep: Pick<Endpoint, "shell">, script: string): string 
   return `powershell -NoProfile -NonInteractive -EncodedCommand ${Buffer.from(script, "utf16le").toString("base64")}`;
 }
 
-async function writeRemoteFile(ep: Endpoint, dir: string, name: string, content: string) {
-  const target = `${dir}/${name}`;
+/**
+ * A PowerShell expression for a guest path relative to the home directory (or absolute, kept as is).
+ * Always a quoted string: in an expression a bare word such as work/x would be parsed as division.
+ */
+export function pwshHomePath(p: string): string {
+  return `[IO.Path]::Combine($HOME, '${p.replace(/'/g, "''")}')`;
+}
+
+/** Write a file in the guest (relative to its home, or absolute), creating its directory. */
+async function writeRemoteFile(ep: Endpoint, target: string, content: string) {
+  const dir = path.posix.dirname(target);
   // PowerShell reads stdin in the console's code page; base64 keeps non-ASCII content intact.
+  // Path.Combine keeps an absolute target as is; .NET's current directory isn't the home directory.
   const cmd =
     ep.shell === "posix"
-      ? `umask 077; cat > ${quoteFor("posix", target)}`
-      : powershell(ep, `[IO.File]::WriteAllBytes((Join-Path $HOME ${quoteFor("pwsh", target)}), [Convert]::FromBase64String([Console]::In.ReadToEnd()))`);
+      ? `umask 077; mkdir -p ${quoteFor("posix", dir)} && cat > ${quoteFor("posix", target)}`
+      : powershell(
+          ep,
+          `$p = ${pwshHomePath(target)}; [void][IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($p)); [IO.File]::WriteAllBytes($p, [Convert]::FromBase64String([Console]::In.ReadToEnd()))`,
+        );
   const input = ep.shell === "posix" ? content : Buffer.from(content, "utf8").toString("base64");
   const r = await sshExec(ep, cmd, { input, timeoutMs: 60_000 });
   if (r.code !== 0) throw new Error(`failed to write ${target}: ${r.stderr}`);
 }
 
-function removeCmd(ep: Endpoint, file: string): string {
-  return ep.shell === "posix" ? `rm -f ${quoteFor("posix", file)}` : powershell(ep, `Remove-Item -Force -LiteralPath ${quoteFor("pwsh", file)}`);
+/** Remove a file or directory tree in the guest (relative to its home, or absolute); missing is fine. */
+function removeCmd(ep: Endpoint, target: string): string {
+  return ep.shell === "posix"
+    ? `rm -rf ${quoteFor("posix", target)}`
+    : powershell(ep, `Remove-Item -Recurse -Force -ErrorAction SilentlyContinue -LiteralPath (${pwshHomePath(target)})`);
 }
 
 function streamProcess(cmd: string, args: string[], cwd: string | undefined, parser: ActJsonParser, timeoutMs: number): Promise<number> {
