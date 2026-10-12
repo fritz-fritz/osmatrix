@@ -16,13 +16,18 @@ stock act differs from GitHub's runners in ways that break real workflows:
   Source: nektos/act#6174 (open, unmerged), head commit 8e8385ed6b45b72ad119c206daf4cd034596ff3a,
   artifacts_v4.go only (its tests and testdata are left out). Upstream issues: nektos/act#6022, #6114,
   #6173; https://github.com/fritz-fritz/osmatrix/issues/24.
+  osmatrix additions on top of #6174 (suggested in our review of it, not in the PR):
+  - buildArtifactURL signs with base64.RawURLEncoding, so no "=" appears in the query; verifySignature
+    still accepts padded signatures, so URLs issued earlier keep working.
+  - artifactV4ContentType reads the proto3 JSON lowerCamelCase key mimeType as well as mime_type
+    (mime_type wins when both are set).
 
 Drop a part once an act release osmatrix moves to includes it. Changing this file changes the build's
 cache key, so osmatrix rebuilds act on its next run. Apply it with `git apply` or `patch -p1` in the
 root of the v0.2.89 source tree.
 
 diff --git a/pkg/artifacts/artifacts_v4.go b/pkg/artifacts/artifacts_v4.go
-index 9cbe0b3..a88b472 100644
+index 9cbe0b3..91cbf5a 100644
 --- a/pkg/artifacts/artifacts_v4.go
 +++ b/pkg/artifacts/artifacts_v4.go
 @@ -82,11 +82,13 @@ import (
@@ -53,7 +58,18 @@ index 9cbe0b3..a88b472 100644
  type artifactV4Routes struct {
  	prefix  string
  	fs      WriteFS
-@@ -219,7 +226,8 @@ func (r artifactV4Routes) verifySignature(ctx *ArtifactContext, endp string) (in
+@@ -209,8 +216,9 @@ func (r artifactV4Routes) buildSignature(endp, expires, artifactName string, tas
+ 
+ func (r artifactV4Routes) buildArtifactURL(endp, artifactName string, taskID int64) string {
+ 	expires := time.Now().Add(60 * time.Minute).Format("2006-01-02 15:04:05.999999999 -0700 MST")
++	// Unpadded, so no "=" in the query for clients to drop or re-encode; verifySignature accepts both forms.
+ 	uploadURL := "http://" + strings.TrimSuffix(r.AppURL, "/") + strings.TrimSuffix(r.prefix, "/") +
+-		"/" + endp + "?sig=" + base64.URLEncoding.EncodeToString(r.buildSignature(endp, expires, artifactName, taskID)) + "&expires=" + url.QueryEscape(expires) + "&artifactName=" + url.QueryEscape(artifactName) + "&taskID=" + fmt.Sprint(taskID)
++		"/" + endp + "?sig=" + base64.RawURLEncoding.EncodeToString(r.buildSignature(endp, expires, artifactName, taskID)) + "&expires=" + url.QueryEscape(expires) + "&artifactName=" + url.QueryEscape(artifactName) + "&taskID=" + fmt.Sprint(taskID)
+ 	return uploadURL
+ }
+ 
+@@ -219,7 +227,8 @@ func (r artifactV4Routes) verifySignature(ctx *ArtifactContext, endp string) (in
  	sig := ctx.Req.URL.Query().Get("sig")
  	expires := ctx.Req.URL.Query().Get("expires")
  	artifactName := ctx.Req.URL.Query().Get("artifactName")
@@ -63,7 +79,7 @@ index 9cbe0b3..a88b472 100644
  	taskID, _ := strconv.ParseInt(rawTaskID, 10, 64)
  
  	expecedsig := r.buildSignature(endp, expires, artifactName, taskID)
-@@ -237,20 +245,73 @@ func (r artifactV4Routes) verifySignature(ctx *ArtifactContext, endp string) (in
+@@ -237,20 +246,82 @@ func (r artifactV4Routes) verifySignature(ctx *ArtifactContext, endp string) (in
  	return taskID, artifactName, true
  }
  
@@ -89,16 +105,25 @@ index 9cbe0b3..a88b472 100644
 +}
 +
 +func artifactV4ContentType(body []byte) string {
++	// The proto3 JSON mapping allows the field name (mime_type) and its lowerCamelCase form (mimeType).
 +	var request struct {
-+		MimeType string `json:"mime_type"`
++		MimeType      string `json:"mime_type"`
++		MimeTypeCamel string `json:"mimeType"`
 +	}
-+	if err := json.Unmarshal(body, &request); err != nil || request.MimeType == "" {
++	if err := json.Unmarshal(body, &request); err != nil {
 +		return ArtifactV4ContentEncoding
 +	}
-+	if _, _, err := mime.ParseMediaType(request.MimeType); err != nil {
++	mimeType := request.MimeType
++	if mimeType == "" {
++		mimeType = request.MimeTypeCamel
++	}
++	if mimeType == "" {
 +		return ArtifactV4ContentEncoding
 +	}
-+	return request.MimeType
++	if _, _, err := mime.ParseMediaType(mimeType); err != nil {
++		return ArtifactV4ContentEncoding
++	}
++	return mimeType
 +}
 +
 +func (r artifactV4Routes) artifactV4Path(runID int64, artifactName string) string {
@@ -142,7 +167,7 @@ index 9cbe0b3..a88b472 100644
  }
  
  func (r *artifactV4Routes) sendProtbufBody(ctx *ArtifactContext, req protoreflect.ProtoMessage) {
-@@ -268,7 +329,8 @@ func (r *artifactV4Routes) sendProtbufBody(ctx *ArtifactContext, req protoreflec
+@@ -268,7 +339,8 @@ func (r *artifactV4Routes) sendProtbufBody(ctx *ArtifactContext, req protoreflec
  func (r *artifactV4Routes) createArtifact(ctx *ArtifactContext) {
  	var req CreateArtifactRequest
  
@@ -152,7 +177,7 @@ index 9cbe0b3..a88b472 100644
  		return
  	}
  	_, runID, ok := validateRunIDV4(ctx, req.WorkflowRunBackendId)
-@@ -278,15 +340,17 @@ func (r *artifactV4Routes) createArtifact(ctx *ArtifactContext) {
+@@ -278,15 +350,17 @@ func (r *artifactV4Routes) createArtifact(ctx *ArtifactContext) {
  
  	artifactName := req.Name
  
@@ -174,7 +199,7 @@ index 9cbe0b3..a88b472 100644
  
  	respData := CreateArtifactResponse{
  		Ok:              true,
-@@ -304,12 +368,7 @@ func (r *artifactV4Routes) uploadArtifact(ctx *ArtifactContext) {
+@@ -304,12 +378,7 @@ func (r *artifactV4Routes) uploadArtifact(ctx *ArtifactContext) {
  	comp := ctx.Req.URL.Query().Get("comp")
  	switch comp {
  	case "block", "appendBlock":
@@ -188,7 +213,7 @@ index 9cbe0b3..a88b472 100644
  
  		if err != nil {
  			panic(err)
-@@ -339,7 +398,7 @@ func (r *artifactV4Routes) uploadArtifact(ctx *ArtifactContext) {
+@@ -339,7 +408,7 @@ func (r *artifactV4Routes) uploadArtifact(ctx *ArtifactContext) {
  func (r *artifactV4Routes) finalizeArtifact(ctx *ArtifactContext) {
  	var req FinalizeArtifactRequest
  
@@ -197,7 +222,7 @@ index 9cbe0b3..a88b472 100644
  		return
  	}
  	_, _, ok := validateRunIDV4(ctx, req.WorkflowRunBackendId)
-@@ -357,7 +416,7 @@ func (r *artifactV4Routes) finalizeArtifact(ctx *ArtifactContext) {
+@@ -357,7 +426,7 @@ func (r *artifactV4Routes) finalizeArtifact(ctx *ArtifactContext) {
  func (r *artifactV4Routes) listArtifacts(ctx *ArtifactContext) {
  	var req ListArtifactsRequest
  
@@ -206,7 +231,7 @@ index 9cbe0b3..a88b472 100644
  		return
  	}
  	_, runID, ok := validateRunIDV4(ctx, req.WorkflowRunBackendId)
-@@ -402,7 +461,7 @@ func (r *artifactV4Routes) listArtifacts(ctx *ArtifactContext) {
+@@ -402,7 +471,7 @@ func (r *artifactV4Routes) listArtifacts(ctx *ArtifactContext) {
  func (r *artifactV4Routes) getSignedArtifactURL(ctx *ArtifactContext) {
  	var req GetSignedArtifactURLRequest
  
@@ -215,7 +240,7 @@ index 9cbe0b3..a88b472 100644
  		return
  	}
  	_, runID, ok := validateRunIDV4(ctx, req.WorkflowRunBackendId)
-@@ -424,19 +483,27 @@ func (r *artifactV4Routes) downloadArtifact(ctx *ArtifactContext) {
+@@ -424,19 +493,27 @@ func (r *artifactV4Routes) downloadArtifact(ctx *ArtifactContext) {
  		return
  	}
  
