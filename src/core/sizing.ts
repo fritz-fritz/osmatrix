@@ -14,6 +14,8 @@ export interface Requirements {
 
 /** Disk the VS 2022 Build Tools C++ workload (MSVC, Windows SDK, CMake) uses in a Windows guest. */
 export const MSVC_GB = 8;
+/** Smallest disk Windows Server 2025 and the base toolchain work with. */
+const WINDOWS_SERVER_DISK_GB = 40;
 
 /**
  * What each kind of guest needs. Minimums are what the OS and osmatrix's provisioning still work with;
@@ -38,7 +40,9 @@ export function requirements(g: Pick<GuestConfig, "os" | "backend" | "image" | "
       cpus: { min: 2, recommended: 4 },
       memoryGB: { min: 4, recommended: 8 },
       // Windows 11 (the ARM image) refuses to install on less than 64G; Server 2025 needs 32G plus room for the toolchain.
-      diskGB: arm ? { min: 64, recommended: 64 } : { min: 40 + msvc, recommended: 64 },
+      // The hard minimum stays the OS's: guests sized 40G before the Build Tools existed must keep working.
+      // checkSizing warns below WINDOWS_SERVER_DISK_GB + MSVC_GB instead.
+      diskGB: arm ? { min: 64, recommended: 64 } : { min: WINDOWS_SERVER_DISK_GB, recommended: 64 },
       footprintGB: (arm ? 20 : 12) + msvc,
       note:
         "First setup also downloads the install ISO (~6G) into the guest's volume." +
@@ -117,10 +121,11 @@ export function checkSizing(
   }
   if (g.disk !== undefined && r.diskGB) {
     const disk = parseSizeGB(g.disk);
-    if (disk < r.diskGB.min) {
-      const without = requirements({ ...g, msvc: false }).diskGB?.min ?? r.diskGB.min;
-      const why = without < r.diskGB.min ? ` (it includes the MSVC Build Tools; msvc = false lowers it to ${without}G)` : "";
-      errors.push(`disk = ${g.disk} is below the minimum of ${r.diskGB.min}G${why}`);
+    if (disk < r.diskGB.min) errors.push(`disk = ${g.disk} is below the minimum of ${r.diskGB.min}G`);
+    else if (guestMsvc(g) && disk < WINDOWS_SERVER_DISK_GB + MSVC_GB) {
+      warnings.push(
+        `disk = ${g.disk} leaves little room: the MSVC Build Tools need about ${MSVC_GB}G more (${WINDOWS_SERVER_DISK_GB + MSVC_GB}G or more); raise disk or set msvc = false`,
+      );
     }
     if (current?.disk !== undefined && disk < parseSizeGB(current.disk)) {
       errors.push(`disk can only grow (currently ${current.disk}); shrinking a VM disk is not supported`);

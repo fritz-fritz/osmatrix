@@ -111,7 +111,7 @@ Run `osmatrix doctor` to see what this host can do. It also needs an OpenSSH cli
 | Guest | CPUs (min / default) | RAM (min / default) | Virtual disk (min / default) | Host disk once set up |
 |---|---|---|---|---|
 | ubuntu (container) | 1 / unlimited | 1G / unlimited | none | the act image |
-| windows: Server 2025, x86_64 | 2 / 4 | 4G / 8G | 48G / 64G (40G with `msvc = false`) | ~20G (estimate: ~12G measured without the MSVC Build Tools), plus the install ISO (~6G) during first setup |
+| windows: Server 2025, x86_64 | 2 / 4 | 4G / 8G | 40G / 64G (48G or more with the MSVC Build Tools) | ~20G (estimate: ~12G measured without the MSVC Build Tools), plus the install ISO (~6G) during first setup |
 | windows: Windows 11 ARM | 2 / 4 | 4G / 8G | 64G / 64G | ~28G (estimate) |
 | macos: dockur (Intel) | 2 / 4 | 4G / 8G | 48G / 64G | ~25G (measured) |
 | macos: tart | 2 / 4 | 4G / 8G | from the image (50G) | ~25G (estimate) |

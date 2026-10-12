@@ -68,7 +68,7 @@ macos_eula_acknowledged = true   # required for dockur macOS on non-Apple hardwa
 [guests.windows]
 memory = "12G"                   # min 4G; prefer env_configure, which checks the values
 cpus = 6                         # min 2
-disk = "96G"                     # dockur VMs; min 48G (40G with msvc = false; Windows 11 ARM 64G, macOS 48G); grow only
+disk = "96G"                     # dockur VMs; min 40G, 48G+ with msvc (Windows 11 ARM 64G, macOS 48G); grow only
 msvc = false                     # Windows: skip the MSVC Build Tools + Windows SDK (default true: ~8G, +10-20 min setup)
 
 [guests.macos]
