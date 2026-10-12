@@ -21,8 +21,16 @@ export interface Leg {
   needs: string[];
   /** Every job this leg's job transitively needs (act -j runs them all). */
   needsAll?: string[];
-  /** Needed jobs (transitively) that target Linux, when this leg doesn't: act runs them in this leg's OS. */
+  /**
+   * Needed jobs (transitively) that target Linux, when this leg doesn't, and that can't be replayed (see
+   * replayNeeds): act runs them in this leg's OS.
+   */
   linuxNeeds?: string[];
+  /**
+   * Needed jobs (transitively) that target Linux, when this leg doesn't, and whose own needs do too:
+   * osmatrix runs them once on the host and replays their outputs and artifacts into this leg.
+   */
+  replayNeeds?: string[];
   /** "host" = act on the host docker (Linux legs); otherwise a guest name. */
   target?: string;
   targetOs?: string;
@@ -268,9 +276,26 @@ export function plan(repo: string, cfg: Config, filter: PlanFilter = {}): Plan {
       const crossOs = leg.needsAll.filter((n) => [...osOf(n)].some((o) => o !== leg.targetOs));
       // Only jobs that target Linux alone: a job-wide shell default would also change a mixed-OS job's other legs.
       const linuxOnly = (n: string) => [...osOf(n)].every((o) => o === "linux");
-      if (leg.targetOs !== "linux") leg.linuxNeeds = crossOs.filter(linuxOnly);
+      if (leg.targetOs !== "linux") {
+        // Linux jobs whose own needs are all on Linux too run once on the host, as on GitHub, and are
+        // replayed into this leg. Reusable workflow calls keep running inside the leg.
+        const memo = new Map<string, boolean>();
+        const replayable = (n: string): boolean => {
+          if (!memo.has(n)) {
+            memo.set(n, true); // a needs cycle is invalid anyway; don't recurse forever
+            memo.set(n, osOf(n).size > 0 && linuxOnly(n) && typeof jobs[n]?.uses !== "string" && needsOf(n).every(replayable));
+          }
+          return memo.get(n)!;
+        };
+        leg.replayNeeds = crossOs.filter(replayable);
+        leg.linuxNeeds = crossOs.filter((n) => linuxOnly(n) && !leg.replayNeeds!.includes(n));
+      }
       for (const n of crossOs) {
-        if (leg.targetOs === "windows" && osOf(n).has("linux") && !linuxOnly(n)) {
+        if (leg.replayNeeds?.includes(n)) {
+          leg.warnings.push(
+            `needs "${n}" targets Linux; osmatrix runs it once on the host (act on Docker) and replays its outputs and artifacts into this leg, as GitHub would hand them over from a Linux runner`,
+          );
+        } else if (leg.targetOs === "windows" && osOf(n).has("linux") && !linuxOnly(n)) {
           leg.warnings.push(
             `needs "${n}" runs on Linux and other OSes; act runs all of its matrix legs inside this Windows leg, where its run: steps without a shell: use pwsh, so its Linux legs will likely fail. Check it on its own legs instead`,
           );
