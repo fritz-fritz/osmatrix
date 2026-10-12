@@ -172,9 +172,9 @@ How each guest gets there:
 - **macos (dockur)**:
   1. osmatrix boots macOS Recovery. It drives Recovery's Terminal through the VNC display and a small [command bridge](assets/macos/bridge.py) inside the container, erases the disk, and runs `startosinstall --agreetolicense`.
   2. After the install it boots Recovery again and runs [`configure.sh`](assets/macos/configure.sh) on the new system. That creates the `osmatrix` admin user with the SSH key, Remote Login, passwordless sudo and auto-login, and skips Setup Assistant.
-  3. Finally [`macos.sh`](assets/provision/macos.sh) installs the Xcode command-line tools, Node, Python and act.
+  3. Finally [`macos.sh`](assets/provision/macos.sh) installs the Xcode command-line tools, Node, Python and act, and Homebrew.
 
-  These guests are Intel (x86_64), so they have no Homebrew; Homebrew dropped Intel support.
+  These guests are Intel (x86_64). Homebrew stopped building Intel bottles in August 2026 and its installer no longer supports Intel, so osmatrix installs Homebrew into `/usr/local` (as on GitHub's Intel runner) pinned to brew 6.0.22 and the last homebrew-core commit whose formulae have Intel bottles. `brew install` then pours bottles instead of compiling, at the formula versions of that commit, which are older than on GitHub's runners. The `homebrew` guest setting changes the pins or turns Homebrew off ([reference](skills/osmatrix-setup/references/reference.md)). Guests set up before this get it with `osmatrix provision macos`, then `osmatrix snapshot macos` to keep it in the golden snapshot.
 - **macos (tart)**: clones a cirruslabs image, installs the key through the guest agent, then provisions with Homebrew.
 
 The generated guest passwords are stored in the osmatrix data dir under `guests/<name>/credentials.json`, for RDP or the VNC viewer.
@@ -211,6 +211,7 @@ Secrets for CI go in `<repo>/.osmatrix/secrets` (or `.secrets`) as `KEY=value` l
 - `needs:` across OSes. act runs the dependency in the same environment; on Windows legs, osmatrix runs a needed Linux job's `run:` steps without a `shell:` with Git Bash.
 - Matrices built from expressions.
 - Remote reusable workflows.
+- `brew` steps on Intel macOS guests, whose Homebrew is pinned to older formula versions.
 
 act also keeps the file-command files (`GITHUB_OUTPUT`, `GITHUB_ENV`, …) outside `RUNNER_TEMP`, so scripts that check those paths stay inside `RUNNER_TEMP` fail only locally. A failed leg says so in its warnings; skip such checks when `env.ACT` is set.
 

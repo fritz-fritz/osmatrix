@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { backendFor, type Backend, type GuestStatus } from "./backends/index.ts";
-import { guestWorkdir, loadConfig, readRawConfig, writeConfig, type GuestConfig } from "./core/config.ts";
+import { guestWorkdir, homebrewProvisionEnv, loadConfig, readRawConfig, writeConfig, type GuestConfig } from "./core/config.ts";
 import { checkSizing, requirements, type Sizing } from "./core/sizing.ts";
 import { assetsDir, paths } from "./core/paths.ts";
 import { kill, sleep } from "./core/proc.ts";
@@ -452,19 +452,32 @@ export async function setupSsh(name: string, user?: string): Promise<GuestStatus
   return g.backend.status();
 }
 
+/** `bash <args>` with the provisioning script's settings for this guest (the pinned Homebrew of Intel guests) in its environment. */
+export function macProvisionCommand(cfg: GuestConfig, bashArgs: string): string {
+  const env = Object.entries(homebrewProvisionEnv(cfg)).map(([k, v]) => `${k}=${quotePosix(v)}`);
+  return [...env, "bash", bashArgs].join(" ");
+}
+
 /**
  * Run the bundled provisioning script for the guest OS (macOS: Xcode CLT, Homebrew, git, node, python, act).
- * Interactive: runs in a terminal so sudo can ask for the guest password once.
+ * Interactive: runs in a terminal so sudo can ask for the guest password once. Idempotent, so it also adds
+ * what newer osmatrix versions provision (such as Homebrew on Intel guests) to an existing guest.
  */
 export async function provision(name: string, opts: { passwordlessSudo?: boolean } = {}) {
   const g = getGuest(name);
   if (g.cfg.os !== "macos") throw new Error("provision is only needed for macOS guests (Windows provisions itself at install, the ubuntu image is preconfigured)");
+  const cmd = macProvisionCommand(g.cfg, `~/.osmatrix-provision.sh${opts.passwordlessSudo ? " --passwordless-sudo" : ""}`);
   const script = fs.readFileSync(path.join(assetsDir, "provision", "macos.sh"), "utf8");
   const ep = await readyEndpoint(name);
   const up = await sshExec(ep, "cat > ~/.osmatrix-provision.sh && chmod +x ~/.osmatrix-provision.sh", { input: script, timeoutMs: 60_000 });
   if (up.code !== 0) throw new Error(`failed to copy provisioning script: ${up.stderr}`);
   const { spawnSync } = await import("node:child_process");
-  const cmd = `bash ~/.osmatrix-provision.sh${opts.passwordlessSudo ? " --passwordless-sudo" : ""}`;
   const r = spawnSync(sshBin(), [...sshArgs(ep, ["-t"]), cmd], { stdio: "inherit" });
-  return { guest: name, exitCode: r.status ?? 1 };
+  const exitCode = r.status ?? 1;
+  // The golden snapshot still has the old toolchain; `reset` would drop what was just installed.
+  const hint =
+    exitCode === 0 && g.cfg.backend !== "ssh"
+      ? `Run \`osmatrix snapshot ${name}\` (MCP: env_snapshot) to keep this in the golden snapshot; \`osmatrix reset ${name}\` restores the old one otherwise.`
+      : undefined;
+  return { guest: name, exitCode, ...(hint ? { hint } : {}) };
 }

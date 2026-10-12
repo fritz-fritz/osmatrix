@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import YAML from "yaml";
-import { labelMatches, type Config, type GuestConfig } from "../core/config.ts";
+import { guestHomebrew, labelMatches, type Config, type GuestConfig } from "../core/config.ts";
 
 export type Scalar = string | number | boolean | null;
 export type MatrixCombo = Record<string, unknown>;
@@ -152,6 +152,39 @@ export function pickTarget(labels: string[], cfg: Config): { target?: string; os
   return {};
 }
 
+/**
+ * dockur macOS guests are Intel, where Homebrew is pinned to the last homebrew-core with Intel bottles
+ * (or absent with `homebrew = false`). Tell the agent before a `brew` step behaves differently than on GitHub.
+ */
+export function brewWarnings(job: Record<string, unknown>, g: GuestConfig): string[] {
+  if (g.os !== "macos" || g.backend !== "dockur" || !Array.isArray(job.steps)) return [];
+  const brew = (job.steps as Record<string, unknown>[])
+    // Steps guarded to another OS (the usual `if: runner.os == 'Linux'`) don't run here.
+    .filter((s) => s && typeof s.run === "string" && !/runner\.os\s*==\s*['"](Linux|Windows)['"]/.test(String(s.if ?? "")))
+    .map((s) => s.run)
+    .join("\n");
+  if (!/\bbrew\s/.test(brew)) return [];
+  let pins;
+  try {
+    pins = guestHomebrew(g);
+  } catch (e) {
+    return [(e as Error).message];
+  }
+  if (!pins) return [`steps run brew, but guest ${g.name} has no Homebrew (homebrew = false in its config)`];
+  const w: string[] = [];
+  if (/\bbrew\s+(install|reinstall|bundle)\b/.test(brew)) {
+    w.push(
+      `steps run brew install: guest ${g.name} is Intel macOS, where Homebrew ${pins.brew} is pinned to homebrew-core ${pins.core.slice(0, 12)} (the last with Intel bottles). Formulae install at those versions, older than on GitHub's runners; a formula without an Intel bottle there builds from source`,
+    );
+  }
+  if (/\bbrew\s+(update|upgrade)\b/.test(brew)) {
+    w.push(
+      `steps run brew update/upgrade: on Intel guest ${g.name} that moves Homebrew off its pins to formulae without Intel bottles (builds from source); \`osmatrix reset ${g.name}\` restores the pinned state`,
+    );
+  }
+  return w;
+}
+
 // ---------- workflows ----------
 
 export function listWorkflows(repo: string): string[] {
@@ -214,6 +247,7 @@ export function plan(repo: string, cfg: Config, filter: PlanFilter = {}): Plan {
         const { target, os } = pickTarget(labels, cfg);
         if (!target && !skip) skip = `no configured guest serves runs-on ${JSON.stringify(labels)}`;
         if (job.services && os && os !== "linux") lw.push("job services: are only supported on Linux legs");
+        if (target && cfg.guests[target]) lw.push(...brewWarnings(job, cfg.guests[target]));
         if (job.permissions && JSON.stringify(job.permissions).includes("id-token")) lw.push("OIDC (id-token) is not available locally");
         let id = legId(jobId, combo);
         if (workflows.length > 1) id = `${path.posix.basename(wf).replace(/\.ya?ml$/, "")}.${id}`;

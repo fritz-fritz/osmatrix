@@ -1,10 +1,19 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { ActJsonParser, actDifferenceHints, powershell } from "../src/ci/run.ts";
-import { defaultGuests, labelMatches, mergeConfig, defaultConfig } from "../src/core/config.ts";
+import {
+  DEFAULT_HOMEBREW,
+  defaultConfig,
+  defaultGuests,
+  guestHomebrew,
+  homebrewProvisionEnv,
+  labelMatches,
+  mergeConfig,
+  type GuestConfig,
+} from "../src/core/config.ts";
 import { commandLine, quotePosix, quotePwsh, withCwd } from "../src/core/ssh.ts";
 import { encodePng } from "../src/gui.ts";
-import { bootBudget, bootHang } from "../src/env.ts";
+import { bootBudget, bootHang, macProvisionCommand } from "../src/env.ts";
 
 test("posix quoting", () => {
   assert.equal(quotePosix("abc"), "abc");
@@ -100,4 +109,35 @@ test("bootHang tells a hung boot from a slow one", () => {
   assert.equal(bootHang({ ...base, elapsedSec: 200, ioIdleSec: 200 }), undefined, "within budget");
   assert.match(bootHang({ ...base, ioIdleSec: 130 }) ?? "", /disk has been idle/);
   assert.match(bootHang({ ...base, resets: 3 }) ?? "", /reset loop/);
+});
+
+test("Intel macOS guests get the pinned Homebrew by default", () => {
+  const mac = defaultGuests("linux", "x64").macos;
+  assert.deepEqual(mac.homebrew, DEFAULT_HOMEBREW);
+  assert.deepEqual(guestHomebrew(mac), DEFAULT_HOMEBREW);
+  assert.match(DEFAULT_HOMEBREW.core, /^[0-9a-f]{40}$/);
+  assert.deepEqual(homebrewProvisionEnv(mac), { OSMATRIX_BREW_TAG: DEFAULT_HOMEBREW.brew, OSMATRIX_BREW_CORE: DEFAULT_HOMEBREW.core });
+  // ssh guests have no default entry; they get the default pins too.
+  assert.deepEqual(guestHomebrew({ name: "mini", os: "macos", backend: "ssh" }), DEFAULT_HOMEBREW);
+  // Apple Silicon (tart) guests install current Homebrew; the provisioning script ignores the pins there.
+  assert.equal(defaultGuests("darwin", "arm64").macos.homebrew, undefined);
+});
+
+test("homebrew config: opt out, partial override, invalid values", () => {
+  const off = mergeConfig(defaultConfig(), { guests: { macos: { os: "macos", backend: "dockur", homebrew: false } } }).guests.macos;
+  assert.equal(guestHomebrew(off), undefined);
+  assert.deepEqual(homebrewProvisionEnv(off), { OSMATRIX_HOMEBREW: "0" });
+  const sha = "0".repeat(40);
+  const core = mergeConfig(defaultConfig(), { guests: { macos: { os: "macos", backend: "dockur", homebrew: { core: sha } } } }).guests.macos;
+  assert.deepEqual(guestHomebrew(core), { brew: DEFAULT_HOMEBREW.brew, core: sha });
+  const g = (homebrew: unknown) => ({ name: "m", os: "macos", backend: "dockur", homebrew }) as GuestConfig;
+  assert.throws(() => guestHomebrew(g({ core: "a5783fb" })), /full 40-character/);
+  assert.throws(() => guestHomebrew(g({ brew: "6.0.22; rm -rf /" })), /release tag/);
+  assert.throws(() => guestHomebrew(g(true)), /false or a table/);
+});
+
+test("macOS provisioning command carries the Homebrew pins", () => {
+  const mac = defaultGuests("linux", "x64").macos;
+  assert.equal(macProvisionCommand(mac, "-s"), `OSMATRIX_BREW_TAG=${DEFAULT_HOMEBREW.brew} OSMATRIX_BREW_CORE=${DEFAULT_HOMEBREW.core} bash -s`);
+  assert.equal(macProvisionCommand({ ...mac, homebrew: false }, "~/p.sh --passwordless-sudo"), "OSMATRIX_HOMEBREW=0 bash ~/p.sh --passwordless-sudo");
 });

@@ -37,6 +37,18 @@ export interface GuestConfig {
   boot_timeout?: number;
   /** qemu backend: accelerator override ("hvf", "kvm" or "tcg"); defaults to the best the host has. */
   accel?: string;
+  /**
+   * Intel macOS guests: the pinned Homebrew to install, or false for none. Missing fields take the
+   * DEFAULT_HOMEBREW pins. Apple Silicon guests always get current Homebrew.
+   */
+  homebrew?: false | HomebrewPins;
+}
+
+export interface HomebrewPins {
+  /** Homebrew/brew release tag. */
+  brew?: string;
+  /** Full Homebrew/homebrew-core commit SHA the core tap is checked out at. */
+  core?: string;
 }
 
 export interface Config {
@@ -52,6 +64,20 @@ export interface Config {
 
 export const DEFAULT_ACT_VERSION = "v0.2.89";
 export const DEFAULT_LINUX_IMAGE = "catthehacker/ubuntu:act-24.04";
+
+/**
+ * Homebrew stopped building Intel macOS bottles on 2026-08-27 (Homebrew/brew#23677) and made Intel
+ * Tier 3 in 7.0.0, so Intel guests get Homebrew pinned to where bottles still exist on ghcr.io:
+ * - brew 6.0.22, the last release before 7.0.0;
+ * - homebrew-core a5783fb (2026-08-27 21:04 UTC), the last commit before the first update that
+ *   shipped without an Intel bottle (apify-cli 1.9.0, merged 22:03 UTC).
+ * Formula versions are frozen there: older than on GitHub's runners, but they pour bottles instead
+ * of building from source.
+ */
+export const DEFAULT_HOMEBREW: Required<HomebrewPins> = {
+  brew: "6.0.22",
+  core: "a5783fb0df65b1eeeaee4dbdf7e0c41b133c72ac",
+};
 
 export const DEFAULT_LABELS: Record<OsFamily, string[]> = {
   linux: ["ubuntu-*", "linux"],
@@ -121,6 +147,7 @@ export function defaultGuests(platform = process.platform, arch = process.arch):
       ssh_port: 2223,
       web_port: 8007,
       vnc_port: 5902,
+      homebrew: { ...DEFAULT_HOMEBREW },
     };
   }
   return g;
@@ -188,6 +215,33 @@ export function guestShell(g: GuestConfig): Shell {
 
 export function guestWorkdir(g: GuestConfig): string {
   return g.workdir ?? "work";
+}
+
+/**
+ * The Homebrew pins an Intel macOS guest is provisioned with, or undefined for `homebrew = false`.
+ * Checked strictly: the values end up in a shell command in the guest.
+ */
+export function guestHomebrew(g: GuestConfig): Required<HomebrewPins> | undefined {
+  const h: unknown = g.homebrew;
+  if (h === false) return undefined;
+  if (h !== undefined && (typeof h !== "object" || h === null || Array.isArray(h))) {
+    throw new Error(`config: guest "${g.name}": homebrew must be false or a table like { brew = "${DEFAULT_HOMEBREW.brew}", core = "<commit sha>" }`);
+  }
+  const over = (h ?? {}) as HomebrewPins;
+  const pins = { brew: over.brew ?? DEFAULT_HOMEBREW.brew, core: over.core ?? DEFAULT_HOMEBREW.core };
+  if (typeof pins.brew !== "string" || !/^\d+\.\d+\.\d+$/.test(pins.brew)) {
+    throw new Error(`config: guest "${g.name}": homebrew.brew must be a Homebrew/brew release tag such as "${DEFAULT_HOMEBREW.brew}"`);
+  }
+  if (typeof pins.core !== "string" || !/^[0-9a-f]{40}$/.test(pins.core)) {
+    throw new Error(`config: guest "${g.name}": homebrew.core must be a full 40-character homebrew-core commit SHA`);
+  }
+  return pins;
+}
+
+/** Environment for the macOS provisioning script: which Homebrew an Intel guest gets (Apple Silicon ignores it). */
+export function homebrewProvisionEnv(g: GuestConfig): Record<string, string> {
+  const pins = guestHomebrew(g);
+  return pins ? { OSMATRIX_BREW_TAG: pins.brew, OSMATRIX_BREW_CORE: pins.core } : { OSMATRIX_HOMEBREW: "0" };
 }
 
 function globToRegExp(glob: string): RegExp {
