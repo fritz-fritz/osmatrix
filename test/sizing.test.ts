@@ -17,7 +17,12 @@ test("parseSizeGB accepts docker/QEMU style sizes", () => {
 });
 
 test("requirements differ by guest kind", () => {
-  assert.equal(requirements(win).diskGB?.min, 40);
+  // The MSVC Build Tools (default) need room on top of Server 2025's 40G.
+  assert.equal(requirements(win).diskGB?.min, 48);
+  assert.equal(requirements({ ...win, msvc: false }).diskGB?.min, 40);
+  assert.equal(requirements(win).footprintGB, 20);
+  assert.equal(requirements({ ...win, msvc: false }).footprintGB, 12);
+  assert.match(requirements(win).note ?? "", /msvc = false/);
   assert.equal(requirements({ ...win, image: "dockurr/windows-arm" }).diskGB?.min, 64);
   assert.equal(requirements({ os: "macos", backend: "tart" }).diskGB, undefined);
   assert.equal(requirements({ os: "linux", backend: "container" }).memoryGB.min, 1);
@@ -30,7 +35,8 @@ test("checkSizing rejects what cannot work and warns below the recommendation", 
   assert.match(checkSizing({ ...win, memory: "30G" }, host).errors.join(), /too little for the host/);
   assert.match(checkSizing({ ...win, cpus: 32 }, host).errors.join(), /exceeds the host's 16/);
   assert.match(checkSizing({ ...win, cpus: 1 }, host).errors.join(), /below the minimum of 2/);
-  assert.match(checkSizing({ ...win, disk: "32G" }, host).errors.join(), /below the minimum of 40G/);
+  assert.match(checkSizing({ ...win, disk: "40G" }, host).errors.join(), /below the minimum of 48G/);
+  assert.deepEqual(checkSizing({ ...win, msvc: false, disk: "40G" }, host).errors, []);
   assert.match(checkSizing({ ...win, disk: "48G" }, host, { disk: "64G" }).errors.join(), /can only grow/);
   assert.deepEqual(checkSizing({ ...win, disk: "128G" }, host, { disk: "64G" }).errors, []);
 });

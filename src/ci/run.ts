@@ -5,14 +5,14 @@ import path from "node:path";
 import YAML from "yaml";
 import { DockurBackend } from "../backends/dockur.ts";
 import { ensureAct } from "../core/act.ts";
-import { guestWorkdir, loadConfig, type Config } from "../core/config.ts";
+import { guestMsvc, guestWorkdir, loadConfig, type Config, type GuestConfig } from "../core/config.ts";
 import { acquireLocks } from "../core/locks.ts";
 import { dockerReach, selinuxEnforcing } from "../core/nesting.ts";
 import { cliEntry, ensureDir } from "../core/paths.ts";
 import { isAlive, spawnDetached } from "../core/proc.ts";
 import { commandLine, freePort, push as sshPush, quoteFor, sshArgs, sshBin, sshExec, withCwd, type Endpoint } from "../core/ssh.ts";
 import { getGuest, readyEndpoint, waitReady } from "../env.ts";
-import { plan as makePlan, setDefaultRunShell, type Leg, type Plan, type PlanFilter } from "./plan.ts";
+import { plan as makePlan, msvcHint, setDefaultRunShell, type Leg, type Plan, type PlanFilter } from "./plan.ts";
 
 export type LegState = "pending" | "running" | "success" | "failure" | "skipped" | "error";
 
@@ -317,6 +317,8 @@ async function runLeg(repo: string, dir: string, cfg: Config, leg: Leg, sf: Stat
         await sshExec(ep, withCwd(ep.shell, remote, init), { timeoutMs: 120_000 });
       }
       if (g.cfg.os === "windows" && leg.linuxNeeds?.length) await bashForLinuxNeeds(ep, repo, remote, leg, r, log);
+      // An opted-out guest was already warned about by the plan.
+      if (g.cfg.os === "windows" && leg.msvcUses?.length && guestMsvc(g.cfg)) await checkMsvc(ep, g.cfg, leg, r, log);
       const args = [event, ...commonActArgs(leg), "--artifact-server-path", ".osmatrix-artifacts"];
       for (const l of new Set([...leg.runsOn, ...(leg.needsLabels ?? [])])) args.push("-P", `${l}=-self-hosted`);
       if (sf.s.options.eventPayload) {
@@ -415,6 +417,27 @@ async function bashForLinuxNeeds(ep: Endpoint, repo: string, remote: string, leg
   if (!changed.length) return;
   await writeRemoteFile(ep, remote, leg.workflow, text);
   log.write(`[osmatrix] Linux needs ${changed.join(", ")}: run: steps without shell: use ${bash} in this leg\n`);
+}
+
+/**
+ * Prints the install path of Visual Studio (Build Tools only count with -products *) that has the MSVC
+ * C++ tools for x64 or ARM64; prints nothing without them.
+ */
+export const VC_TOOLS_PROBE =
+  "$v = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\\Installer\\vswhere.exe'; " +
+  "if (Test-Path -LiteralPath $v) { & $v -products * -requiresAny -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 Microsoft.VisualStudio.Component.VC.Tools.ARM64 -property installationPath }";
+
+/**
+ * Guests set up before osmatrix installed the MSVC Build Tools (or whose install failed) lack them. Warn,
+ * with the fix, when this leg needs them; don't install at leg time (it takes several GB and ~15 min).
+ */
+async function checkMsvc(ep: Endpoint, cfg: GuestConfig, leg: Leg, r: LegResult, log: fs.WriteStream) {
+  const p = await sshExec(ep, powershell(ep, VC_TOOLS_PROBE), { timeoutMs: 60_000 }).catch(() => undefined);
+  // Only a probe that ran and found nothing counts; a failed probe proves nothing.
+  if (!p || p.code !== 0 || p.stdout.trim()) return;
+  const w = msvcHint(cfg, leg.msvcUses!, `guest ${cfg.name} has none (vswhere finds no MSVC C++ tools)`);
+  r.warnings.push(w);
+  log.write(`[osmatrix] warning: ${w}\n`);
 }
 
 /**

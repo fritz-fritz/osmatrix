@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import YAML from "yaml";
-import { labelMatches, type Config, type GuestConfig } from "../core/config.ts";
+import { guestMsvc, labelMatches, type Config, type GuestConfig } from "../core/config.ts";
 
 export type Scalar = string | number | boolean | null;
 export type MatrixCombo = Record<string, unknown>;
@@ -27,6 +27,8 @@ export interface Leg {
   target?: string;
   targetOs?: string;
   skip?: string;
+  /** Windows legs: the steps that need the MSVC Build Tools (Rust toolchains, cargo, C/C++ toolchain actions). */
+  msvcUses?: string[];
   warnings: string[];
 }
 
@@ -152,6 +154,52 @@ export function pickTarget(labels: string[], cfg: Config): { target?: string; os
   return {};
 }
 
+// ---------- MSVC ----------
+
+/** Actions that set up a toolchain which links with MSVC on Windows (Rust's default *-pc-windows-msvc targets, C/C++). */
+const MSVC_ACTIONS = [
+  "dtolnay/rust-toolchain",
+  "actions-rust-lang/setup-rust-toolchain",
+  "actions-rs/toolchain",
+  "actions-rs/cargo",
+  "ilammy/msvc-dev-cmd",
+  "microsoft/setup-msbuild",
+];
+/** rustup / cargo as a command in a run: script (not as part of a path such as ~/.cargo/bin). */
+const MSVC_COMMANDS = /(?:^|[\s;&|(])(rustup|cargo)(?:\.exe)?(?=\s|$)/m;
+
+/** The steps of a job that need the MSVC Build Tools on Windows, e.g. ["dtolnay/rust-toolchain", "run: cargo"]. */
+export function msvcUses(job: Record<string, unknown>): string[] {
+  const found = new Set<string>();
+  const steps = Array.isArray(job.steps) ? (job.steps as Record<string, unknown>[]) : [];
+  for (const s of steps) {
+    if (!s || typeof s !== "object") continue;
+    if (typeof s.uses === "string") {
+      const action = s.uses.split("@")[0].toLowerCase();
+      const hit = MSVC_ACTIONS.find((a) => action === a || action.startsWith(`${a}/`));
+      if (hit) found.add(hit);
+    }
+    if (typeof s.run === "string") {
+      const m = MSVC_COMMANDS.exec(s.run);
+      if (m) found.add(`run: ${m[1]}`);
+    }
+  }
+  return [...found];
+}
+
+/** Why a Windows leg will fail without the MSVC Build Tools, and how to install them. */
+export function msvcHint(guest: Pick<GuestConfig, "name" | "msvc">, uses: string[], why: string): string {
+  const fix =
+    guest.msvc === false
+      ? `remove msvc = false from [guests.${guest.name}] in config.toml, then run \`osmatrix provision ${guest.name}\``
+      : `run \`osmatrix provision ${guest.name}\``;
+  return (
+    `this Windows leg uses ${uses.join(", ")}, which needs the MSVC C++ Build Tools and Windows SDK (as on windows-latest), but ${why}. ` +
+    `Rust and C/C++ builds fail without them, typically with "link: extra operand" from the coreutils link.exe of Git for Windows. ` +
+    `To install them (several GB, ~10-20 min), ${fix}, then \`osmatrix snapshot ${guest.name}\` (MCP: env_snapshot) to keep them in the golden snapshot`
+  );
+}
+
 // ---------- workflows ----------
 
 export function listWorkflows(repo: string): string[] {
@@ -215,6 +263,10 @@ export function plan(repo: string, cfg: Config, filter: PlanFilter = {}): Plan {
         if (!target && !skip) skip = `no configured guest serves runs-on ${JSON.stringify(labels)}`;
         if (job.services && os && os !== "linux") lw.push("job services: are only supported on Linux legs");
         if (job.permissions && JSON.stringify(job.permissions).includes("id-token")) lw.push("OIDC (id-token) is not available locally");
+        // Whether the guest really has the tools is checked when the leg runs (over ssh); an opt-out is known now.
+        const msvc = os === "windows" ? msvcUses(job) : [];
+        const guest = target ? cfg.guests[target] : undefined;
+        if (msvc.length && guest && !guestMsvc(guest)) lw.push(msvcHint(guest, msvc, `guest ${guest.name} is set up without them (msvc = false)`));
         let id = legId(jobId, combo);
         if (workflows.length > 1) id = `${path.posix.basename(wf).replace(/\.ya?ml$/, "")}.${id}`;
         while (seen.has(id)) id += "_";
@@ -230,6 +282,7 @@ export function plan(repo: string, cfg: Config, filter: PlanFilter = {}): Plan {
           target,
           targetOs: os,
           skip,
+          ...(msvc.length ? { msvcUses: msvc } : {}),
           warnings: lw,
           needsLabels: [],
           needs: [],

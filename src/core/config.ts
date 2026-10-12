@@ -37,6 +37,11 @@ export interface GuestConfig {
   boot_timeout?: number;
   /** qemu backend: accelerator override ("hvf", "kvm" or "tcg"); defaults to the best the host has. */
   accel?: string;
+  /**
+   * Windows guests: install the Visual Studio 2022 Build Tools C++ workload (MSVC + Windows SDK) while
+   * provisioning, as on GitHub's windows-latest. Default true; false saves several GB and ~10-20 min.
+   */
+  msvc?: boolean;
 }
 
 export interface Config {
@@ -160,6 +165,9 @@ export function mergeConfig(cfg: Config, raw: Record<string, unknown>): Config {
     if (!merged.os || !merged.backend) {
       throw new Error(`config: guest "${name}" needs "os" and "backend"`);
     }
+    if (merged.msvc !== undefined && typeof merged.msvc !== "boolean") {
+      throw new Error(`config: guest "${name}": msvc must be true or false (got ${JSON.stringify(merged.msvc)})`);
+    }
     cfg.guests[name] = merged;
   }
   return cfg;
@@ -184,6 +192,16 @@ export function guestLabels(g: GuestConfig): string[] {
 
 export function guestShell(g: GuestConfig): Shell {
   return g.shell ?? defaultShell(g.os);
+}
+
+/** Whether a guest gets the MSVC Build Tools: Windows guests, unless they opt out with msvc = false. */
+export function guestMsvc(g: Pick<GuestConfig, "os" | "msvc">): boolean {
+  return g.os === "windows" && g.msvc !== false;
+}
+
+/** Choices for the Windows unattended install, written as C:\OEM\options.json (read by provision.ps1). */
+export function windowsOemOptions(g: GuestConfig): { msvc: boolean } {
+  return { msvc: guestMsvc(g) };
 }
 
 export function guestWorkdir(g: GuestConfig): string {

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { ActJsonParser, actDifferenceHints, powershell } from "../src/ci/run.ts";
-import { defaultGuests, labelMatches, mergeConfig, defaultConfig } from "../src/core/config.ts";
+import { ActJsonParser, VC_TOOLS_PROBE, actDifferenceHints, powershell } from "../src/ci/run.ts";
+import { defaultGuests, guestMsvc, labelMatches, mergeConfig, defaultConfig, windowsOemOptions } from "../src/core/config.ts";
 import { commandLine, quotePosix, quotePwsh, withCwd } from "../src/core/ssh.ts";
 import { encodePng } from "../src/gui.ts";
 import { bootBudget, bootHang } from "../src/env.ts";
@@ -44,6 +44,28 @@ test("config merge: override, add ssh guest, disable guest", () => {
   assert.equal(c.guests.mac_mini.host, "mini.local");
   assert.equal(c.guests.windows, undefined);
   assert.throws(() => mergeConfig(defaultConfig(), { guests: { x: { host: "y" } } }));
+});
+
+test("config: Windows guests get the MSVC Build Tools unless msvc = false", () => {
+  const win = { os: "windows", backend: "dockur" };
+  const on = mergeConfig(defaultConfig(), { guests: { windows: win } }).guests.windows;
+  assert.equal(on.msvc, undefined);
+  assert.equal(guestMsvc(on), true);
+  assert.deepEqual(windowsOemOptions(on), { msvc: true });
+  const off = mergeConfig(defaultConfig(), { guests: { windows: { ...win, msvc: false } } }).guests.windows;
+  assert.equal(guestMsvc(off), false);
+  assert.deepEqual(windowsOemOptions(off), { msvc: false });
+  assert.equal(guestMsvc({ os: "windows", msvc: true }), true);
+  // Only Windows guests have it.
+  assert.equal(guestMsvc({ os: "macos" }), false);
+  assert.equal(guestMsvc({ os: "linux", msvc: true }), false);
+  assert.throws(() => mergeConfig(defaultConfig(), { guests: { windows: { ...win, msvc: "no" } } }), /msvc must be true or false/);
+});
+
+test("the MSVC probe asks vswhere for Build Tools with x64 or ARM64 C++ tools", () => {
+  assert.match(VC_TOOLS_PROBE, /vswhere\.exe/);
+  assert.match(VC_TOOLS_PROBE, /-products \*/);
+  assert.match(VC_TOOLS_PROBE, /-requiresAny -requires Microsoft\.VisualStudio\.Component\.VC\.Tools\.x86\.x64 Microsoft\.VisualStudio\.Component\.VC\.Tools\.ARM64/);
 });
 
 test("label globs", () => {
