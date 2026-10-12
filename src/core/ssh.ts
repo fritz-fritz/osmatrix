@@ -83,6 +83,26 @@ export function withCwd(shell: Shell, cwd: string | undefined, command: string):
   return `cd ${quotePosix(cwd)} && ${command}`;
 }
 
+export interface ChainStep {
+  argv: string[];
+  /** Keep going when this step fails. */
+  optional?: boolean;
+}
+
+/**
+ * Run native commands one after another in the guest shell, stopping at the first required step that
+ * fails. Windows PowerShell 5.1 has no `&&`, so pwsh checks $LASTEXITCODE after each step instead.
+ */
+export function commandChain(shell: Shell, steps: ChainStep[]): string {
+  if (shell === "pwsh") {
+    // Stop turns "command not found" into a failure; otherwise pwsh prints it and carries on.
+    const body = steps.map((s) => commandLine(shell, s.argv) + (s.optional ? "" : "; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }"));
+    return ["$ErrorActionPreference = 'Stop'", ...body].join("; ");
+  }
+  const ok = shell === "cmd" ? "ver >nul" : "true";
+  return steps.map((s) => (s.optional ? `(${commandLine(shell, s.argv)} || ${ok})` : commandLine(shell, s.argv))).join(" && ");
+}
+
 // ---------- exec ----------
 
 export interface ExecOptions {
@@ -113,7 +133,8 @@ export async function sshProbe(ep: Endpoint): Promise<ProbeResult> {
 
 // ---------- file transfer (tar over ssh) ----------
 
-function mkdirCmd(shell: Shell, dir: string, clean: boolean): string {
+/** Create dir in the guest (relative paths are relative to the guest home); clean deletes it first. */
+export function mkdirCmd(shell: Shell, dir: string, clean: boolean): string {
   if (shell === "pwsh") {
     const q = quotePwsh(dir);
     return (

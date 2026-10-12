@@ -10,7 +10,20 @@ import { acquireLocks } from "../core/locks.ts";
 import { dockerReach, selinuxEnforcing } from "../core/nesting.ts";
 import { cliEntry, ensureDir } from "../core/paths.ts";
 import { isAlive, spawnDetached } from "../core/proc.ts";
-import { commandLine, freePort, push as sshPush, quoteFor, sshArgs, sshBin, sshExec, withCwd, type Endpoint } from "../core/ssh.ts";
+import { createBundle, guestCheckoutSteps, NotMaterializable, parseRefs, SNAPSHOT_REF, snapshotWorktree, type Snapshot } from "../core/gitsync.ts";
+import {
+  commandChain,
+  commandLine,
+  freePort,
+  mkdirCmd,
+  push as sshPush,
+  quoteFor,
+  sshArgs,
+  sshBin,
+  sshExec,
+  withCwd,
+  type Endpoint,
+} from "../core/ssh.ts";
 import { getGuest, readyEndpoint, waitReady } from "../env.ts";
 import { plan as makePlan, setDefaultRunShell, type Leg, type Plan, type PlanFilter } from "./plan.ts";
 
@@ -310,12 +323,7 @@ async function runLeg(repo: string, dir: string, cfg: Config, leg: Leg, sf: Stat
       const ep = await readyEndpoint(g.cfg.name);
       const remote = `${guestWorkdir(g.cfg)}/${path.basename(repo)}`;
       log.write(`[osmatrix] syncing ${repo} -> ${g.cfg.name}:${remote}\n`);
-      await sshPush(ep, repo, remote, { clean: true, includeGit: true });
-      if (!fs.existsSync(path.join(repo, ".git"))) {
-        // act wants a git repository (sha/ref); subdirectories of a larger repo get a throwaway one.
-        const init = "git init -q; git add -A; git -c user.name=osmatrix -c user.email=osmatrix@localhost commit -qm osmatrix";
-        await sshExec(ep, withCwd(ep.shell, remote, init), { timeoutMs: 120_000 });
-      }
+      await syncRepo(ep, repo, remote, r, log);
       if (g.cfg.os === "windows" && leg.linuxNeeds?.length) await bashForLinuxNeeds(ep, repo, remote, leg, r, log);
       const args = [event, ...commonActArgs(leg), "--artifact-server-path", ".osmatrix-artifacts"];
       for (const l of new Set([...leg.runsOn, ...(leg.needsLabels ?? [])])) args.push("-P", `${l}=-self-hosted`);
@@ -395,6 +403,89 @@ function resolveSecretFile(repo: string, explicit?: string): string | undefined 
   }
   for (const c of [path.join(repo, ".osmatrix", "secrets"), path.join(repo, ".secrets")]) if (fs.existsSync(c)) return c;
   return undefined;
+}
+
+/**
+ * Bring the guest's copy of the repo up to date with the host's work tree. Every VM guest gets a git
+ * checkout (src/core/gitsync.ts), not only Windows: every GitHub runner checks out with git, so the
+ * guest's own Git config deciding line endings, modes and symlinks is right everywhere; on macOS and
+ * Linux that gives the same bytes as a copy, but the host's .git/config (hooks, worktree paths, helpers)
+ * stays home and later runs send only new objects instead of the whole .git. Directories outside a git
+ * repository and repositories the checkout can't reproduce (filters such as LFS, submodules) are copied
+ * file by file, as is everything when the checkout fails in the guest (no git there, say).
+ */
+async function syncRepo(ep: Endpoint, repo: string, remote: string, r: LegResult, log: fs.WriteStream) {
+  let snap: Snapshot;
+  try {
+    snap = await snapshotWorktree(repo);
+  } catch (e) {
+    const why = e instanceof NotMaterializable ? e.message : `snapshot failed: ${(e as Error).message}`;
+    log.write(`[osmatrix] copying files instead of a git checkout: ${why}\n`);
+    return copyRepo(ep, repo, remote);
+  }
+  try {
+    try {
+      await checkoutInGuest(ep, remote, snap, false);
+    } catch (e) {
+      // A guest repository in an unexpected state (missing prerequisites, interrupted run): start over.
+      log.write(`[osmatrix] git checkout in the guest failed (${(e as Error).message}); retrying in a fresh repository\n`);
+      await checkoutInGuest(ep, remote, snap, true);
+    }
+  } catch (e) {
+    const w = `git checkout in the guest failed (${(e as Error).message}); copied the files instead, so line endings, file modes and symlinks follow the host`;
+    r.warnings.push(w);
+    log.write(`[osmatrix] ${w}\n`);
+    await copyRepo(ep, repo, remote);
+  } finally {
+    snap.dispose();
+  }
+}
+
+async function checkoutInGuest(ep: Endpoint, remote: string, snap: Snapshot, fresh: boolean) {
+  const gitDir = `${remote}/.git`;
+  const git = (...argv: string[]) => commandLine(ep.shell, ["git", "--git-dir", gitDir, ...argv]);
+  let refs = new Map<string, string>();
+  if (!fresh) {
+    const res = await sshExec(ep, git("for-each-ref", "--format=%(objectname) %(refname)"), { timeoutMs: 120_000 });
+    if (res.code === 0) refs = parseRefs(res.stdout);
+  }
+  if (!refs.has(SNAPSHOT_REF)) {
+    // Not a repository osmatrix set up: absent, or a byte copy carrying the host's .git/config. Start over.
+    refs = new Map();
+    const sep = ep.shell === "pwsh" ? ";" : " &&";
+    const init = await sshExec(ep, `${mkdirCmd(ep.shell, remote, true)}${sep} ${commandLine(ep.shell, ["git", "init", "-q", remote])}`, {
+      timeoutMs: 10 * 60_000,
+    });
+    if (init.code !== 0) throw new Error(`git init: ${(init.stderr || init.stdout).trim()}`);
+    // git init writes core.symlinks=false when its probe can't create a symlink. Otherwise turn them on
+    // here: guests provisioned before osmatrix enabled symlinks have core.symlinks=false system-wide,
+    // while GitHub's Windows image installs Git with symlinks enabled.
+    const probe = await sshExec(ep, git("config", "--local", "--get", "core.symlinks"), { timeoutMs: 60_000 });
+    if (probe.stdout.trim() !== "false") {
+      const set = await sshExec(ep, git("config", "core.symlinks", "true"), { timeoutMs: 60_000 });
+      if (set.code !== 0) throw new Error(`git config core.symlinks: ${set.stderr.trim()}`);
+    }
+  }
+  const slash = remote.lastIndexOf("/");
+  const name = `${remote.slice(slash + 1)}.bundle`;
+  const bundleDir = `${slash >= 0 ? remote.slice(0, slash) : "."}/.osmatrix-bundles`;
+  // An unchanged tree gives the same snapshot commit, which the guest already has.
+  const send = refs.get(SNAPSHOT_REF) !== snap.commit;
+  if (send) await sshPush(ep, await createBundle(snap, [...refs.values()], name), bundleDir, { timeoutMs: 30 * 60_000 });
+  const steps = guestCheckoutSteps(snap, refs, send ? `../.osmatrix-bundles/${name}` : undefined);
+  const res = await sshExec(ep, withCwd(ep.shell, remote, commandChain(ep.shell, steps)), { timeoutMs: 30 * 60_000 });
+  if (send) await sshExec(ep, removeCmd(ep, `${bundleDir}/${name}`), { timeoutMs: 60_000 }).catch(() => undefined);
+  if (res.code !== 0) throw new Error((res.stderr || res.stdout).trim().split("\n").slice(-5).join(" ") || `exit ${res.code}`);
+}
+
+/** The byte copy: the host's files and .git as they are. */
+async function copyRepo(ep: Endpoint, repo: string, remote: string) {
+  await sshPush(ep, repo, remote, { clean: true, includeGit: true });
+  if (!fs.existsSync(path.join(repo, ".git"))) {
+    // act wants a git repository (sha/ref); directories outside one get a throwaway one.
+    const init = "git init -q; git add -A; git -c user.name=osmatrix -c user.email=osmatrix@localhost commit -qm osmatrix";
+    await sshExec(ep, withCwd(ep.shell, remote, init), { timeoutMs: 120_000 });
+  }
 }
 
 /**

@@ -15,7 +15,7 @@ Always pass the repository's **absolute host path** as `repo` to every `ci_*` to
 
 ## How legs run
 
-A workflow's matrix is expanded into legs. `ubuntu-*` legs run with act on the host's Docker; `windows-*` / `macos-*` legs run act *inside* the matching VM (host mode), after syncing the repo into it.
+A workflow's matrix is expanded into legs. `ubuntu-*` legs run with act on the host's Docker; `windows-*` / `macos-*` legs run act *inside* the matching VM (host mode), after checking the working tree out in it with Git, as `actions/checkout` does (details in [references/reference.md](references/reference.md)).
 
 A windows/macos leg needs that guest to be `ready` (`env_status`, CLI `osmatrix status`). If the guest is `absent` or its status `detail` says "not set up", follow `osmatrix-setup` first; VM setup takes 20–60 min. VMs are slow to boot (1–3 min), so **don't start VMs you don't need**, and leave a VM running while you iterate.
 
