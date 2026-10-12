@@ -9,7 +9,7 @@ The short version: **use AI if it helps, but a human is responsible for everythi
 - **Writing code.** Much of osmatrix is written by AI coding agents (mostly Claude Code) working under a maintainer's direction. A maintainer decides what to build, reviews the result, and runs the checks in [CONTRIBUTING.md](CONTRIBUTING.md#checks-before-you-push) before it's merged. Commits made with an agent carry a `Co-Authored-By:` trailer that names the model.
 - **Testing.** Agents also run osmatrix itself: they boot guests, run CI locally and try changes on Windows and macOS. Pull request descriptions say what was tested and on which hosts, and what wasn't.
 - **Reviewing.** Pull requests get an automated review from GitHub Copilot. Its comments are suggestions, not approvals. An agent may fix CI failures and address review comments on a maintainer's own pull request, and reply to the review threads saying so; those replies are marked as automated.
-- **Decisions stay human.** A maintainer approves every merge and cuts every release. AI doesn't merge, tag, publish to npm or change repository settings on its own initiative.
+- **Decisions stay human.** A maintainer approves every merge and cuts every release. AI doesn't merge, tag, publish to npm or change repository settings on its own initiative. The one standing exception is Dependabot: its dependency updates are approved by a workflow and merge on their own once CI passes, under the limits described in [CONTRIBUTING.md](CONTRIBUTING.md#dependabot).
 
 ## Contributing with AI
 

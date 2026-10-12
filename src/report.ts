@@ -9,6 +9,9 @@ import { getGuest } from "./env.ts";
 
 export type { Outcome } from "./core/compat.ts";
 
+/** Disclosure per AI_POLICY.md: the report is generated, possibly by an agent for the user. */
+export const DISCLOSURE = "_Drafted with `osmatrix report`._";
+
 export interface Report {
   /** Shown to the user before anything is filed; nothing is sent by building a report. */
   title: string;
@@ -118,8 +121,7 @@ export async function compatReport(guest: string, opts: { outcome: Outcome; note
     `### osmatrix version\n\n${version}`,
     `### What happened\n\n${details}`,
     "### osmatrix doctor and guest status\n\n```text\n" + doctorText.trim() + "\n```",
-    // Disclosure per AI_POLICY.md: the report is generated, possibly by an agent for the user.
-    "_Drafted with `osmatrix report`._",
+    DISCLOSURE,
   ].join("\n\n");
 
   const params = new URLSearchParams({
@@ -129,7 +131,8 @@ export async function compatReport(guest: string, opts: { outcome: Outcome; note
     host: kind?.label ?? "Other",
     guest: guestKind,
     version,
-    details,
+    // The form's fields become the issue, so the disclosure rides in the details field too.
+    details: `${details}\n\n${DISCLOSURE}`,
     doctor: doctorText,
   });
   // Browsers and GitHub cap URL length: drop the doctor output first, then shorten the details. The
@@ -138,7 +141,7 @@ export async function compatReport(guest: string, opts: { outcome: Outcome; note
   const fits = () => `${ISSUES_URL}/new?${params}`.length <= LIMIT;
   if (!fits()) params.delete("doctor");
   for (let keep = details.length; !fits() && keep > 0; keep -= 200) {
-    params.set("details", details.slice(0, Math.max(0, keep - 200)) + "\n\n… (shortened; paste the full report)");
+    params.set("details", details.slice(0, Math.max(0, keep - 200)) + `\n\n… (shortened; paste the full report)\n\n${DISCLOSURE}`);
   }
   return {
     title,
