@@ -91,7 +91,7 @@ Labels decide which guest serves a `runs-on` label (globs, first match wins). Li
 ```toml
 [guests.macos]
 homebrew = { brew = "6.0.22", core = "a5783fb0df65b1eeeaee4dbdf7e0c41b133c72ac" }  # Intel defaults; a missing field keeps its default
-# homebrew = false                                                                   # Intel: no Homebrew
+# homebrew = false                                                                   # Intel: provisioning skips Homebrew (an installed one stays)
 ```
 
 All macOS guests get the Homebrew settings of GitHub's macOS runner images (their `bashrc`) for ssh sessions and CI steps: `HOMEBREW_NO_AUTO_UPDATE=1`, `HOMEBREW_NO_INSTALL_CLEANUP=1` and `HOMEBREW_CASK_OPTS="--no-quarantine"`, plus `brew analytics off`.

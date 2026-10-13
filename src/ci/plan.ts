@@ -154,13 +154,14 @@ export function pickTarget(labels: string[], cfg: Config): { target?: string; os
 
 /**
  * dockur macOS guests are Intel, where Homebrew is pinned to the last homebrew-core with Intel bottles
- * (or absent with `homebrew = false`). Tell the agent before a `brew` step behaves differently than on GitHub.
+ * (or not installed by provisioning with `homebrew = false`). Tell the agent before a `brew` step behaves differently than on GitHub.
  */
 export function brewWarnings(job: Record<string, unknown>, g: GuestConfig): string[] {
   if (g.os !== "macos" || g.backend !== "dockur" || !Array.isArray(job.steps)) return [];
   const brew = (job.steps as Record<string, unknown>[])
-    // Steps guarded to another OS (the usual `if: runner.os == 'Linux'`) don't run here.
-    .filter((s) => s && typeof s.run === "string" && !/runner\.os\s*==\s*['"](Linux|Windows)['"]/.test(String(s.if ?? "")))
+    // Steps guarded to another OS don't run here. Only a condition that is nothing but `runner.os == 'Linux'`
+    // (or Windows) counts: `runner.os == 'Linux' || runner.os == 'macOS'` still runs on macOS.
+    .filter((s) => s && typeof s.run === "string" && !/^\s*(\$\{\{\s*)?runner\.os\s*==\s*['"](Linux|Windows)['"]\s*(\}\}\s*)?$/.test(String(s.if ?? "")))
     .map((s) => s.run)
     .join("\n");
   if (!/\bbrew\s/.test(brew)) return [];
@@ -170,7 +171,11 @@ export function brewWarnings(job: Record<string, unknown>, g: GuestConfig): stri
   } catch (e) {
     return [(e as Error).message];
   }
-  if (!pins) return [`steps run brew, but guest ${g.name} has no Homebrew (homebrew = false in its config)`];
+  if (!pins) {
+    return [
+      `steps run brew, but guest ${g.name} has homebrew = false: provisioning skips Homebrew there but doesn't remove one installed earlier, so brew may be missing`,
+    ];
+  }
   const w: string[] = [];
   if (/\bbrew\s+(install|reinstall|bundle)\b/.test(brew)) {
     w.push(

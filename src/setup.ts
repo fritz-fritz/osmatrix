@@ -246,7 +246,9 @@ async function setupDockurMac(g: Guest, b: DockurBackend, opts: SetupOptions, ph
 async function provisionMac(g: Guest) {
   const ep = await readyEndpoint(g.cfg.name);
   const script = fs.readFileSync(path.join(assetsDir, "provision", "macos.sh"), "utf8");
-  const { command } = await macProvisionPlan(ep, g.cfg, "-s");
+  const { command, note } = await macProvisionPlan(ep, g.cfg, "-s");
+  // Which Homebrew the guest gets, or why it keeps its own (failed lookup): stderr, which is setup.log when detached.
+  if (note) process.stderr.write(`[setup ${g.cfg.name}] ${note}\n`);
   const r = await sshExec(ep, command, { input: script, timeoutMs: 2 * 3600_000, maxBytes: 64 * 1024 });
   if (r.code !== 0) throw new Error(`provisioning failed (exit ${r.code}):\n${(r.stdout + r.stderr).slice(-3000)}`);
 }

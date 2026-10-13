@@ -249,6 +249,13 @@ jobs:
     steps:
       - run: brew update
         if: runner.os == 'Linux'
+      - run: brew update
+        if: \${{ runner.os == 'Windows' }}
+  either:
+    runs-on: macos-latest
+    steps:
+      - run: brew install capnp
+        if: runner.os == 'Linux' || runner.os == 'macOS'
   upgrade:
     runs-on: macos-latest
     steps: [{ run: brew update && brew upgrade }]
@@ -259,12 +266,14 @@ jobs:
   assert.ok(!legs.find((l) => l.job === "build" && l.targetOs === "linux")!.warnings.some((w) => w.includes("brew")));
   // A brew step guarded to Linux doesn't run on the macOS leg.
   assert.deepEqual(legs.find((l) => l.job === "linuxbrew")!.warnings, []);
+  // A condition that also admits macOS still runs there.
+  assert.ok(legs.find((l) => l.job === "either")!.warnings.some((w) => w.startsWith("steps run brew install:")));
   assert.ok(legs.find((l) => l.job === "upgrade")!.warnings.some((w) => w.includes("osmatrix reset macos")));
 
   const off = mergeConfig(defaultConfig(), { guests: { macos: { os: "macos", backend: "dockur", homebrew: false } } });
   const offLeg = plan(repo, off, { job: "build" }).legs.find((l) => l.targetOs === "macos")!;
-  assert.ok(offLeg.warnings.includes("steps run brew, but guest macos has no Homebrew (homebrew = false in its config)"));
-  // Apple Silicon (tart) guests have current Homebrew: nothing to warn about.
+  assert.ok(offLeg.warnings.some((w) => w.includes("has homebrew = false") && w.includes("doesn't remove one installed earlier")));
+  // Apple Silicon (tart) guests match GitHub's Homebrew: nothing to warn about.
   const tart = mergeConfig(defaultConfig(), { guests: { macos: { os: "macos", backend: "tart" } } });
   assert.ok(!plan(repo, tart, { job: "build" }).legs.find((l) => l.targetOs === "macos")!.warnings.some((w) => w.includes("brew")));
 });
