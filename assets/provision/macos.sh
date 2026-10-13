@@ -30,6 +30,7 @@ fi
 log "creating GitHub's tool cache at /Users/runner/hostedtoolcache"
 sudo mkdir -p /Users/runner/hostedtoolcache
 sudo chown -R "$(id -un)":staff /Users/runner
+sudo chmod u+rwx /Users/runner /Users/runner/hostedtoolcache
 
 log "disabling sleep"
 sudo pmset -a sleep 0 displaysleep 0 disksleep 0 >/dev/null 2>&1 || true
