@@ -12,6 +12,7 @@ import {
   patchedActKey,
   patchedActVersion,
   resolveAct,
+  staleBuilds,
   targetFromArch,
 } from "../src/core/act.ts";
 import { defaultGuests, type GuestConfig } from "../src/core/config.ts";
@@ -89,4 +90,16 @@ test("stock act's artifact-server failures are hinted at", () => {
   assert.equal(actDifferenceHints(log).length, 1);
   assert.match(actDifferenceHints(log)[0], /upload-artifact v7/);
   assert.match(actDifferenceHints('unknown field "mime_type"')[0], /artifact server/);
+});
+
+test("old builds are pruned only once unused for the retention period", () => {
+  const day = 24 * 3600_000;
+  const now = 100 * day;
+  const entries = [
+    { key: "v0.2.89-current", usedMs: now - 30 * day },
+    { key: "v0.2.89-recent", usedMs: now - 2 * day },
+    { key: "v0.2.89-stale", usedMs: now - 8 * day },
+  ];
+  assert.deepEqual(staleBuilds(entries, "v0.2.89-current", now), ["v0.2.89-stale"], "the current build and recently used ones stay");
+  assert.deepEqual(staleBuilds(entries, "v0.2.89-current", now, 1 * day), ["v0.2.89-recent", "v0.2.89-stale"]);
 });

@@ -158,6 +158,7 @@ export async function ensureAct(opts: { log?: Log; targets?: GoTarget[] } = {}):
     }
     await buildPatchedAct(r.key, wanted, defaultTargets(cfg), log);
   }
+  markUsed(r.key);
   return { path: patchedActBinary(r.key, host), source: "patched", version: patchedActVersion(r.key) };
 }
 
@@ -177,6 +178,7 @@ export async function patchedActFor(target: GoTarget, log: Log = stderrLog): Pro
     if (!docker.ok) return { reason: `osmatrix's patched act needs Docker to build (${docker.reason}); the guest runs its own act from PATH, where ${STOCK_ACT_DIFFERENCES}` };
     await buildPatchedAct(r.key, [target], defaultTargets(cfg), log);
   }
+  markUsed(r.key);
   return { path: bin, sha256: await sha256File(bin), version: patchedActVersion(r.key) };
 }
 
@@ -191,19 +193,20 @@ export function builtTargets(key: string): GoTarget[] {
     .sort();
 }
 
-let dockerCheck: Promise<{ ok: boolean; reason?: string }> | undefined;
-export function dockerAvailable(): Promise<{ ok: boolean; reason?: string }> {
-  dockerCheck ??= (async () => {
-    let bin: string;
-    try {
-      bin = dockerBin();
-    } catch (e) {
-      return { ok: false, reason: (e as Error).message };
-    }
-    const r = await run(bin, ["version", "--format", "{{.Server.Version}}"], { timeoutMs: 20_000 });
-    return r.code === 0 ? { ok: true } : { ok: false, reason: `the Docker daemon isn't reachable: ${(r.stderr || r.stdout).trim().split("\n")[0]}` };
-  })();
-  return dockerCheck;
+/**
+ * Whether the Docker daemon answers now. Checked on every call, not cached: the MCP server runs for a
+ * long time, and Docker may be started or stopped in between. It's only asked when something needs
+ * building (or by doctor), so the cost doesn't matter.
+ */
+export async function dockerAvailable(): Promise<{ ok: boolean; reason?: string }> {
+  let bin: string;
+  try {
+    bin = dockerBin();
+  } catch (e) {
+    return { ok: false, reason: (e as Error).message };
+  }
+  const r = await run(bin, ["version", "--format", "{{.Server.Version}}"], { timeoutMs: 20_000 });
+  return r.code === 0 ? { ok: true } : { ok: false, reason: `the Docker daemon isn't reachable: ${(r.stderr || r.stdout).trim().split("\n")[0]}` };
 }
 
 // The source tree and patch arrive in /in (docker cp, so this also works with a remote daemon); binaries
@@ -231,10 +234,11 @@ async function buildPatchedAct(key: string, wanted: GoTarget[], extra: GoTarget[
   const release = await acquireLocks([BUILD_LOCK], { pid: process.pid, run: "act-build", repo: "", leg: key }, (_k, h) =>
     log(`waiting for another osmatrix process (pid ${h.pid}) to finish building act`),
   );
-  const stage = fs.mkdtempSync(path.join(ensureDir(paths.binDir), ".act-build-"));
+  let stage: string | undefined;
   try {
     const missing = missingOf([...wanted, ...extra]);
     if (!missingOf(wanted).length) return;
+    stage = fs.mkdtempSync(path.join(ensureDir(paths.binDir), ".act-build-"));
     const version = patchedActVersion(key);
     log(`building osmatrix's patched act ${version} for ${missing.join(", ")} in Docker (${GO_IMAGE.split("@")[0]}); the first build takes a few minutes`);
     const src = await fetchBuf(ACT_SOURCE.url);
@@ -272,14 +276,53 @@ async function buildPatchedAct(key: string, wanted: GoTarget[], extra: GoTarget[
       fs.rmSync(path.join(dir, d), { recursive: true, force: true });
       fs.renameSync(path.join(stage, "out", d), path.join(dir, d));
     }
-    // Builds of an older patch are no longer used.
-    for (const old of fs.readdirSync(path.dirname(dir))) {
-      if (old !== key) fs.rmSync(path.join(path.dirname(dir), old), { recursive: true, force: true, maxRetries: 2 });
-    }
     log(`built act ${version} for ${missing.join(", ")} in ${dir}`);
+    pruneOldBuilds(key);
   } finally {
-    fs.rmSync(stage, { recursive: true, force: true });
-    release();
+    try {
+      if (stage) fs.rmSync(stage, { recursive: true, force: true });
+    } finally {
+      release();
+    }
+  }
+}
+
+/** Builds of another patch that nothing used for this long are removed after a successful build. */
+export const BUILD_RETENTION_MS = 7 * 24 * 3600_000;
+
+/**
+ * Which other builds to remove: those not used (see markUsed) within the retention period. Another
+ * osmatrix version sharing the data dir may still use its own build, so recent ones stay.
+ */
+export function staleBuilds(entries: { key: string; usedMs: number }[], current: string, now = Date.now(), retentionMs = BUILD_RETENTION_MS): string[] {
+  return entries.filter((e) => e.key !== current && now - e.usedMs > retentionMs).map((e) => e.key);
+}
+
+/** Record that a build is in use (its directory's mtime), so pruning by another process keeps it. */
+function markUsed(key: string): void {
+  const now = new Date();
+  try {
+    fs.utimesSync(path.join(paths.binDir, "act-patched", key), now, now);
+  } catch {
+    /* best effort */
+  }
+}
+
+/** Remove stale builds. Never fails: a build in use elsewhere (a running act.exe on Windows) stays until next time. */
+function pruneOldBuilds(current: string): void {
+  const root = path.join(paths.binDir, "act-patched");
+  let entries: { key: string; usedMs: number }[];
+  try {
+    entries = fs.readdirSync(root).map((key) => ({ key, usedMs: fs.statSync(path.join(root, key)).mtimeMs }));
+  } catch {
+    return;
+  }
+  for (const key of staleBuilds(entries, current)) {
+    try {
+      fs.rmSync(path.join(root, key), { recursive: true, force: true });
+    } catch {
+      /* in use; try again after the next build */
+    }
   }
 }
 
