@@ -17,8 +17,8 @@ export const paths = {
   stateFile: path.join(dataDir, "state.json"),
   keyFile: path.join(dataDir, "keys", "id_ed25519"),
   binDir: path.join(dataDir, "bin"),
-  /** Scratch space for large temporary files (repo snapshots); the OS temp dir may be a small tmpfs. */
-  tmpDir: path.join(dataDir, "tmp"),
+  /** Host caches of the work-tree snapshots sent to guests (src/core/gitsync.ts), one per checkout and guest. */
+  snapshotDir: path.join(dataDir, "snapshots"),
   /**
    * Locks for resources every osmatrix install on this host shares (act's job containers on the Docker
    * daemon), so it ignores OSMATRIX_HOME.
