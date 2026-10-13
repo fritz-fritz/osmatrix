@@ -1,7 +1,8 @@
 # Linux CI legs run in this layer over act's default image when act_linux_image is left at its default.
 # It adds what GitHub's ubuntu-24.04 runner image preinstalls and act's image lacks, where a missing tool
 # makes local runs fail in ways GitHub never shows. osmatrix tags the build with a hash of this file and
-# the pinned versions, so editing it or a new runner image release rebuilds the image on the next Linux leg.
+# the pinned versions, so editing it or a new Rust version in GitHub's runner image rebuilds the image on
+# the next Linux leg.
 FROM catthehacker/ubuntu:act-24.04
 
 # Rust: GitHub preinstalls rustup stable with rustfmt and clippy. Without them, the first rustc/cargo call

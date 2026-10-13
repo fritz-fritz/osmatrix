@@ -19,9 +19,10 @@ function dockerfileHash(dockerfile: string | Buffer = fs.readFileSync(PARITY_DOC
 }
 
 /**
- * Tagged by the Dockerfile's content and the Rust version it installs, so an edited Dockerfile or a new
- * runner image release is built on next use. The name ignores OSMATRIX_HOME: every install building the
- * same file and version can share the image.
+ * Tagged by the Dockerfile's content and the Rust version it installs, so an edited Dockerfile or a runner
+ * image with a new Rust version is built on next use. Runner releases that keep the Rust version reuse the
+ * image (the runner tag would only add rebuilds that change nothing). The name ignores OSMATRIX_HOME:
+ * every install building the same file and version can share the image.
  */
 export function parityImageTag(rust: string, dockerfile?: string | Buffer): string {
   return `${PARITY_REPO}:act-24.04-${dockerfileHash(dockerfile)}-rust${rust}`;
@@ -57,16 +58,16 @@ interface RunnerCache {
 }
 
 /**
- * The newest ubuntu24 runner image release ("ubuntu24/20261004.327"); ubuntu24-arm64 is a separate image.
- * A release stays a prerelease while it rolls out, so most runners have the newest full release; the
- * newest prerelease counts only when the listing has no full one.
+ * The newest fully rolled-out ubuntu24 runner image release ("ubuntu24/20261004.327"); ubuntu24-arm64 is a
+ * separate image. A release stays a prerelease while it rolls out, so most runners have the newest full
+ * release; with none in the listing the lookup fails rather than pinning a prerelease.
  */
 export function latestRunnerTag(releases: unknown): string | undefined {
   if (!Array.isArray(releases)) return undefined;
-  const ubuntu = (releases as { tag_name?: unknown; draft?: unknown; prerelease?: unknown }[]).filter(
-    (r) => !r?.draft && typeof r?.tag_name === "string" && r.tag_name.startsWith("ubuntu24/"),
+  const full = (releases as { tag_name?: unknown; draft?: unknown; prerelease?: unknown }[]).find(
+    (r) => !r?.draft && !r?.prerelease && typeof r?.tag_name === "string" && r.tag_name.startsWith("ubuntu24/"),
   );
-  return (ubuntu.find((r) => !r.prerelease) ?? ubuntu[0])?.tag_name as string | undefined;
+  return full?.tag_name as string | undefined;
 }
 
 /** "- Rust 1.99.0" in the readme's "### Rust Tools" section. */
@@ -109,7 +110,7 @@ export async function runnerRust(opts: RunnerRustOptions = {}): Promise<{ rust?:
   let next: RunnerCache;
   try {
     const tag = latestRunnerTag(await get(RELEASES_URL, true));
-    if (!tag) throw new Error("no ubuntu24/ release of actions/runner-images found");
+    if (!tag) throw new Error("no fully rolled-out ubuntu24/ release among actions/runner-images' recent releases");
     const rust = parseRustVersion((await get(readmeUrl(tag), false)) as string);
     if (!rust) throw new Error(`no Rust version in the ${tag} readme`);
     next = { checkedAt: new Date(now).toISOString(), tag, rust };
@@ -127,55 +128,97 @@ export async function runnerRust(opts: RunnerRustOptions = {}): Promise<{ rust?:
 
 // ---------- building ----------
 
-/** Local parity images, newest first (docker lists images by creation time). */
-async function localParityImages(): Promise<string[]> {
-  const r = await run(dockerBin(), ["images", PARITY_REPO, "--format", "{{.Repository}}:{{.Tag}}"]);
-  return r.code === 0 ? r.stdout.split("\n").map((s) => s.trim()).filter((s) => s.startsWith(`${PARITY_REPO}:`)) : [];
+/** What image resolution needs from the outside world; tests replace it. */
+export interface ImageDeps {
+  runnerRust: () => Promise<{ rust?: string; tag?: string; error?: string }>;
+  exists: (ref: string) => Promise<boolean>;
+  /** Local parity images, newest first. */
+  localImages: () => Promise<string[]>;
+  /** Build `tag` with RUST_VERSION=`rust`; throws on failure. */
+  build: (tag: string, rust: string) => Promise<void>;
+  lock: (key: string, owner: LockOwner, onWait: (holder: LockOwner) => void) => Promise<() => void>;
 }
 
-/**
- * Resolve the image for `configured`: unchanged unless it's act's default, else the parity layer with the
- * runner's Rust version, built once if missing. When that version can't be looked up, the newest local
- * parity image is used, or one with the current stable Rust is built. Concurrent runs, from any install
- * on this host, take turns on a host lock, and whoever waited finds the image built.
- */
-export async function ensureLinuxImage(configured: string, owner: LockOwner, log: (line: string) => void = () => undefined): Promise<string> {
-  if (configured !== DEFAULT_LINUX_IMAGE) return configured;
-  const { rust, tag: runner, error } = await runnerRust();
-  if (rust) {
-    const tag = parityImageTag(rust);
-    if (await imageExists(tag)) return tag;
-    try {
-      return await build(tag, rust, `Rust ${rust}, as in GitHub's ${runner} runner image`, owner, log);
-    } catch (e) {
-      const local = fallbackImage(await localParityImages());
-      if (!local) throw e;
-      log(`[osmatrix] ${(e as Error).message}\n[osmatrix] using the older local image ${local} instead`);
-      return local;
-    }
-  }
-  log(`[osmatrix] note: couldn't look up the Rust version of GitHub's ubuntu24 runner image (${error})`);
-  const local = fallbackImage(await localParityImages());
-  if (local) {
-    log(`[osmatrix] using the newest local image ${local}`);
-    return local;
-  }
-  const tag = parityImageTag("stable");
-  if (await imageExists(tag)) return tag;
-  return build(tag, "stable", "the current stable Rust, which may be newer than GitHub's runner image has", owner, log);
-}
-
-async function build(tag: string, rust: string, what: string, owner: LockOwner, log: (line: string) => void): Promise<string> {
-  const release = await acquireLocks([`host:image:${tag}`], owner, (_key, h) => log(`[osmatrix] waiting: ${tag} is being built by run ${h.run} (${h.leg})`));
-  try {
-    if (await imageExists(tag)) return tag;
-    log(`[osmatrix] building ${tag}: act's default image plus ${what} (once, takes a few minutes)`);
+const dockerDeps: ImageDeps = {
+  runnerRust: () => runnerRust(),
+  exists: imageExists,
+  // docker lists images newest first.
+  localImages: async () => {
+    const r = await run(dockerBin(), ["images", PARITY_REPO, "--format", "{{.Repository}}:{{.Tag}}"]);
+    return r.code === 0 ? r.stdout.split("\n").map((s) => s.trim()).filter((s) => s.startsWith(`${PARITY_REPO}:`)) : [];
+  },
+  build: async (tag, rust) => {
     const args = ["build", "-t", tag, "--build-arg", `RUST_VERSION=${rust}`, "-f", PARITY_DOCKERFILE, path.dirname(PARITY_DOCKERFILE)];
     const r = await run(dockerBin(), args, { timeoutMs: 60 * 60_000 });
     if (r.code !== 0) {
       const tail = (r.stderr || r.stdout).trim().split("\n").slice(-30).join("\n");
       throw new Error(`building ${tag} failed (setting act_linux_image to another image skips this layer):\n${tail}`);
     }
+  },
+  lock: (key, owner, onWait) => acquireLocks([key], owner, (_k, h) => onWait(h)),
+};
+
+/**
+ * The image Linux legs should use now, without building anything: `configured` unless it's act's
+ * default, else the parity image for the runner's Rust version; undefined when that version is unknown.
+ */
+export async function expectedLinuxImage(configured: string, deps: ImageDeps = dockerDeps): Promise<string | undefined> {
+  if (configured !== DEFAULT_LINUX_IMAGE) return configured;
+  const { rust } = await deps.runnerRust();
+  return rust ? parityImageTag(rust) : undefined;
+}
+
+/**
+ * Resolve the image for `configured`: unchanged unless it's act's default, else the parity layer with the
+ * runner's Rust version, built once if missing. When that version can't be looked up, the newest local
+ * parity image is used, or one with the current stable Rust is built. If building fails and there's no
+ * local parity image, legs run on act's plain image (without Rust) rather than failing. Concurrent runs,
+ * from any install on this host, take turns on a host lock, and whoever waited finds the image built.
+ */
+export async function ensureLinuxImage(
+  configured: string,
+  owner: LockOwner,
+  log: (line: string) => void = () => undefined,
+  deps: ImageDeps = dockerDeps,
+): Promise<string> {
+  if (configured !== DEFAULT_LINUX_IMAGE) return configured;
+  const { rust, tag: runner, error } = await deps.runnerRust();
+  let tag: string;
+  let what: string;
+  if (rust) {
+    tag = parityImageTag(rust);
+    what = `Rust ${rust}, as in GitHub's ${runner} runner image`;
+  } else {
+    log(`[osmatrix] note: couldn't look up the Rust version of GitHub's ubuntu24 runner image (${error})`);
+    const local = fallbackImage(await deps.localImages());
+    if (local) {
+      log(`[osmatrix] using the newest local image ${local}`);
+      return local;
+    }
+    tag = parityImageTag("stable");
+    what = "the current stable Rust, which may be newer than GitHub's runner image has";
+  }
+  if (await deps.exists(tag)) return tag;
+  try {
+    return await build(tag, rust ?? "stable", what, owner, log, deps);
+  } catch (e) {
+    const local = fallbackImage(await deps.localImages());
+    log(`[osmatrix] ${(e as Error).message}`);
+    if (local) {
+      log(`[osmatrix] using the older local image ${local} instead`);
+      return local;
+    }
+    log(`[osmatrix] warning: running on ${configured} instead, which lacks the Rust toolchain GitHub's ubuntu runners preinstall`);
+    return configured;
+  }
+}
+
+async function build(tag: string, rust: string, what: string, owner: LockOwner, log: (line: string) => void, deps: ImageDeps): Promise<string> {
+  const release = await deps.lock(`host:image:${tag}`, owner, (h) => log(`[osmatrix] waiting: ${tag} is being built by run ${h.run} (${h.leg})`));
+  try {
+    if (await deps.exists(tag)) return tag;
+    log(`[osmatrix] building ${tag}: act's default image plus ${what} (once, takes a few minutes)`);
+    await deps.build(tag, rust);
     log(`[osmatrix] built ${tag}`);
     return tag;
   } finally {

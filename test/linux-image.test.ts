@@ -3,7 +3,17 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
-import { PARITY_DOCKERFILE, fallbackImage, latestRunnerTag, parityImageTag, parseRustVersion, runnerRust } from "../src/backends/linux-image.ts";
+import {
+  PARITY_DOCKERFILE,
+  ensureLinuxImage,
+  expectedLinuxImage,
+  fallbackImage,
+  latestRunnerTag,
+  parityImageTag,
+  parseRustVersion,
+  runnerRust,
+  type ImageDeps,
+} from "../src/backends/linux-image.ts";
 import { DEFAULT_LINUX_IMAGE } from "../src/core/config.ts";
 
 // Trimmed from images/ubuntu/Ubuntu2404-Readme.md at actions/runner-images ubuntu24/20261004.327.
@@ -42,16 +52,14 @@ test("latestRunnerTag takes the first ubuntu24/ release, not ubuntu24-arm64", ()
   ];
   assert.equal(latestRunnerTag(releases), "ubuntu24/20261004.327");
   assert.equal(latestRunnerTag([{ tag_name: "ubuntu22/1" }]), undefined);
-  // Releases still rolling out (prereleases) and drafts lose to the newest full release...
+  // Releases still rolling out (prereleases) and drafts never count, even with no full release listed.
   const rolling = [
     { tag_name: "ubuntu24/20261011.330", prerelease: true },
     { tag_name: "ubuntu24/20261010.329", draft: true },
     { tag_name: "ubuntu24/20261004.327", prerelease: false },
   ];
   assert.equal(latestRunnerTag(rolling), "ubuntu24/20261004.327");
-  // ...and count only when the listing has no full release.
-  assert.equal(latestRunnerTag(rolling.slice(0, 2)), "ubuntu24/20261011.330");
-  assert.equal(latestRunnerTag([{ tag_name: "ubuntu24/20261010.329", draft: true }]), undefined);
+  assert.equal(latestRunnerTag(rolling.slice(0, 2)), undefined);
   assert.equal(latestRunnerTag({ message: "API rate limit exceeded" }), undefined);
 });
 
@@ -82,8 +90,11 @@ function fakeFetch(calls: string[], fail = false): typeof fetch {
     const u = String(url);
     calls.push(u);
     if (fail) throw new Error("getaddrinfo ENOTFOUND api.github.com");
-    if (u.includes("api.github.com")) return new Response(JSON.stringify([{ tag_name: "ubuntu24-arm64/2" }, { tag_name: "ubuntu24/20261004.327" }]));
-    if (u.endsWith("/ubuntu24/20261004.327/images/ubuntu/Ubuntu2404-Readme.md")) return new Response(README);
+    if (new URL(u).hostname === "api.github.com") return new Response(JSON.stringify([{ tag_name: "ubuntu24-arm64/2" }, { tag_name: "ubuntu24/20261004.327" }]));
+    const p = new URL(u);
+    if (p.hostname === "raw.githubusercontent.com" && p.pathname === "/actions/runner-images/ubuntu24/20261004.327/images/ubuntu/Ubuntu2404-Readme.md") {
+      return new Response(README);
+    }
     return new Response("not found", { status: 404 });
   }) as typeof fetch;
 }
@@ -112,4 +123,88 @@ test("runnerRust reports an HTTP error as an error", async () => {
   const cacheFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "osmatrix-runner-")), "runner-image.json");
   const limited = (async () => new Response("{}", { status: 403 })) as typeof fetch;
   assert.match((await runnerRust({ cacheFile, fetch: limited })).error!, /HTTP 403/);
+});
+
+// ---------- ensureLinuxImage with fake docker and locks ----------
+
+const owner = { pid: process.pid, run: "r1", repo: "/r", leg: "test" };
+
+function fakeDeps(o: { rust?: string; existing?: string[]; local?: string[]; failBuild?: boolean; builtWhileWaiting?: boolean }) {
+  const events: string[] = [];
+  const logs: string[] = [];
+  const existing = new Set(o.existing ?? []);
+  const deps: ImageDeps = {
+    runnerRust: async () => {
+      events.push("lookup");
+      return o.rust ? { rust: o.rust, tag: "ubuntu24/20261004.327" } : { error: "offline" };
+    },
+    exists: async (ref) => existing.has(ref),
+    localImages: async () => o.local ?? [],
+    build: async (tag, rust) => {
+      events.push(`build ${tag} ${rust}`);
+      if (o.failBuild) throw new Error("build failed: could not resolve sh.rustup.rs");
+      existing.add(tag);
+    },
+    lock: async (key) => {
+      events.push(`lock ${key}`);
+      // Another run held the lock and built the image meanwhile.
+      if (o.builtWhileWaiting) existing.add(key.replace(/^host:image:/, ""));
+      return () => void events.push(`unlock ${key}`);
+    },
+  };
+  const ensure = (configured = DEFAULT_LINUX_IMAGE) => ensureLinuxImage(configured, owner, (l) => logs.push(l), deps);
+  return { deps, events, logs, ensure };
+}
+
+test("ensureLinuxImage: a user-configured image is used unchanged, without a lookup", async () => {
+  const f = fakeDeps({ rust: "1.99.0" });
+  assert.equal(await f.ensure("catthehacker/ubuntu:full-24.04"), "catthehacker/ubuntu:full-24.04");
+  assert.deepEqual(f.events, []);
+  assert.equal(await expectedLinuxImage("my/image:1", f.deps), "my/image:1");
+});
+
+test("ensureLinuxImage: an existing parity image is used without building", async () => {
+  const tag = parityImageTag("1.99.0");
+  const f = fakeDeps({ rust: "1.99.0", existing: [tag] });
+  assert.equal(await f.ensure(), tag);
+  assert.deepEqual(f.events, ["lookup"]);
+  assert.equal(await expectedLinuxImage(DEFAULT_LINUX_IMAGE, f.deps), tag);
+});
+
+test("ensureLinuxImage: a missing parity image is built once, under the host lock", async () => {
+  const tag = parityImageTag("1.99.0");
+  const f = fakeDeps({ rust: "1.99.0" });
+  assert.equal(await f.ensure(), tag);
+  assert.deepEqual(f.events, ["lookup", `lock host:image:${tag}`, `build ${tag} 1.99.0`, `unlock host:image:${tag}`]);
+  // A run that waited on the lock finds the image built and doesn't build it again.
+  const w = fakeDeps({ rust: "1.99.0", builtWhileWaiting: true });
+  assert.equal(await w.ensure(), tag);
+  assert.ok(!w.events.some((e) => e.startsWith("build")));
+});
+
+test("ensureLinuxImage: a failed build falls back to a local parity image, else to act's image", async () => {
+  const older = parityImageTag("1.98.0");
+  const f = fakeDeps({ rust: "1.99.0", failBuild: true, local: [older] });
+  assert.equal(await f.ensure(), older);
+  assert.ok(f.logs.some((l) => l.includes("build failed")));
+  assert.ok(f.events.at(-1)!.startsWith("unlock")); // the lock is released after a failure too
+  const none = fakeDeps({ rust: "1.99.0", failBuild: true });
+  assert.equal(await none.ensure(), DEFAULT_LINUX_IMAGE);
+  assert.ok(none.logs.some((l) => /warning: running on catthehacker\/ubuntu:act-24\.04 instead, which lacks the Rust/.test(l)));
+});
+
+test("ensureLinuxImage offline: the newest local image, else a stable build, else act's image", async () => {
+  const newest = parityImageTag("1.99.0");
+  const local = fakeDeps({ local: [newest, parityImageTag("1.98.0")] });
+  assert.equal(await local.ensure(), newest);
+  assert.ok(!local.events.some((e) => e.startsWith("build")));
+  assert.ok(local.logs[0].includes("couldn't look up the Rust version"));
+  assert.equal(await expectedLinuxImage(DEFAULT_LINUX_IMAGE, local.deps), undefined);
+
+  const stable = fakeDeps({});
+  assert.equal(await stable.ensure(), parityImageTag("stable"));
+  assert.ok(stable.events.includes(`build ${parityImageTag("stable")} stable`));
+
+  const nothing = fakeDeps({ failBuild: true });
+  assert.equal(await nothing.ensure(), DEFAULT_LINUX_IMAGE);
 });

@@ -22,7 +22,7 @@ You can delete all of it at any time: `osmatrix destroy <guest> --yes` for each 
 osmatrix connects to the network only to fetch software that you ask it to set up:
 
 - `act` releases from GitHub
-- the release list and readme of GitHub's runner images (actions/runner-images, at most once a day), to match the Linux CI image's Rust version, and Rust from rustup.rs
+- the release list and readme of GitHub's runner images (actions/runner-images; a successful lookup is reused for 24 hours, a failed one is retried after 15 minutes), to match the Linux CI image's Rust version, and Rust from rustup.rs
 - container images from Docker Hub
 - Windows Server evaluation media from Microsoft
 - macOS recovery and installer images from Apple
