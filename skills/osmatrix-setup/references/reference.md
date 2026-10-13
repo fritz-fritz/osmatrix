@@ -83,7 +83,7 @@ identity = "~/.ssh/id_ed25519"
 labels = ["macos-*"]
 ```
 
-`msvc` is read when Windows installs, so set it before `env_setup`. Rust's default `*-pc-windows-msvc` targets and C/C++ builds need the Build Tools; without them rustc picks up Git's `link.exe` (`link: extra operand`). Guests set up before osmatrix installed them, and their golden snapshots, lack them: run `osmatrix provision <guest>` (several GB, 10-20 min, idempotent), then `env_snapshot` to keep them. Windows CI legs that use Rust or C/C++ toolchain steps warn when the guest has no C++ tools.
+`msvc` is read when Windows installs, so set it before `env_setup`. Rust's default `*-pc-windows-msvc` targets and C/C++ builds need the Build Tools; without them rustc picks up Git's `link.exe` (`link: extra operand`). Guests set up before osmatrix installed them, and their golden snapshots, lack them: run `osmatrix provision <guest>` (several GB, 10-20 min, idempotent), then `env_snapshot` to keep them. Windows CI legs that use Rust or C/C++ toolchain steps (their own or in jobs they `needs:`, which act runs in the same guest) warn when the guest lacks the C++ tools or a Windows SDK.
 
 `ssh_port`, `web_port` and `vnc_port` are preferences: a busy port is replaced by a free one when the guest starts, and `osmatrix status` shows the ports in use.
 

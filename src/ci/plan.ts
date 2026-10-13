@@ -156,17 +156,39 @@ export function pickTarget(labels: string[], cfg: Config): { target?: string; os
 
 // ---------- MSVC ----------
 
-/** Actions that set up a toolchain which links with MSVC on Windows (Rust's default *-pc-windows-msvc targets, C/C++). */
+/**
+ * Actions that set up a toolchain which links with MSVC on Windows (Rust's default *-pc-windows-msvc targets,
+ * C/C++). An entry ending in "/" covers every action of that owner (actions-rs/toolchain, /cargo, /clippy-check, …).
+ */
 const MSVC_ACTIONS = [
   "dtolnay/rust-toolchain",
   "actions-rust-lang/setup-rust-toolchain",
-  "actions-rs/toolchain",
-  "actions-rs/cargo",
+  "actions-rs/",
   "ilammy/msvc-dev-cmd",
   "microsoft/setup-msbuild",
 ];
-/** rustup / cargo as a command in a run: script (not as part of a path such as ~/.cargo/bin). */
-const MSVC_COMMANDS = /(?:^|[\s;&|(])(rustup|cargo)(?:\.exe)?(?=\s|$)/m;
+const MSVC_COMMANDS = new Set(["rustup", "cargo"]);
+/** Words that run the command after them: sudo cargo, time cargo, env RUSTFLAGS=… cargo, PowerShell's & cargo. */
+const COMMAND_WRAPPERS = new Set(["sudo", "time", "env", "command", "exec", "nohup", "&", "call"]);
+
+/**
+ * The commands a run: script executes: the first word of each line and of each part after &&, ||, ;, | or (,
+ * past wrappers, their flags and VAR=value assignments. Lower-cased, without directory and .exe (Windows
+ * looks commands up case-insensitively). Arguments such as `echo cargo` or `npm run cargo` are not commands.
+ */
+export function runCommands(script: string): string[] {
+  const out: string[] = [];
+  for (const part of script.split(/\r?\n|&&|\|\||[;|(]/)) {
+    const words = part.trim().split(/\s+/).filter(Boolean);
+    let i = 0;
+    while (i < words.length && (COMMAND_WRAPPERS.has(words[i].toLowerCase()) || /^[A-Za-z_][A-Za-z0-9_]*=/.test(words[i]) || (i > 0 && words[i].startsWith("-")))) i++;
+    const w = words[i];
+    if (!w || w.startsWith("#")) continue;
+    const name = w.replace(/^["']|["']$/g, "").split(/[\\/]/).pop()!.toLowerCase().replace(/\.exe$/, "");
+    if (name) out.push(name);
+  }
+  return out;
+}
 
 /** The steps of a job that need the MSVC Build Tools on Windows, e.g. ["dtolnay/rust-toolchain", "run: cargo"]. */
 export function msvcUses(job: Record<string, unknown>): string[] {
@@ -176,12 +198,11 @@ export function msvcUses(job: Record<string, unknown>): string[] {
     if (!s || typeof s !== "object") continue;
     if (typeof s.uses === "string") {
       const action = s.uses.split("@")[0].toLowerCase();
-      const hit = MSVC_ACTIONS.find((a) => action === a || action.startsWith(`${a}/`));
-      if (hit) found.add(hit);
+      const hit = MSVC_ACTIONS.find((a) => (a.endsWith("/") ? action.startsWith(a) : action === a || action.startsWith(`${a}/`)));
+      if (hit) found.add(hit.endsWith("/") ? action : hit);
     }
     if (typeof s.run === "string") {
-      const m = MSVC_COMMANDS.exec(s.run);
-      if (m) found.add(`run: ${m[1]}`);
+      for (const c of runCommands(s.run)) if (MSVC_COMMANDS.has(c)) found.add(`run: ${c}`);
     }
   }
   return [...found];
@@ -263,10 +284,8 @@ export function plan(repo: string, cfg: Config, filter: PlanFilter = {}): Plan {
         if (!target && !skip) skip = `no configured guest serves runs-on ${JSON.stringify(labels)}`;
         if (job.services && os && os !== "linux") lw.push("job services: are only supported on Linux legs");
         if (job.permissions && JSON.stringify(job.permissions).includes("id-token")) lw.push("OIDC (id-token) is not available locally");
-        // Whether the guest really has the tools is checked when the leg runs (over ssh); an opt-out is known now.
+        // Needed jobs are added below, once the needs are known.
         const msvc = os === "windows" ? msvcUses(job) : [];
-        const guest = target ? cfg.guests[target] : undefined;
-        if (msvc.length && guest && !guestMsvc(guest)) lw.push(msvcHint(guest, msvc, `guest ${guest.name} is set up without them (msvc = false)`));
         let id = legId(jobId, combo);
         if (workflows.length > 1) id = `${path.posix.basename(wf).replace(/\.ya?ml$/, "")}.${id}`;
         while (seen.has(id)) id += "_";
@@ -316,6 +335,17 @@ export function plan(repo: string, cfg: Config, filter: PlanFilter = {}): Plan {
       leg.needsLabels = [...new Set([...seenJobs].flatMap(labelsOf))].filter((l) => !l.includes("${{"));
       leg.needs = needsOf(leg.job);
       leg.needsAll = [...seenJobs].sort();
+      if (leg.targetOs === "windows") {
+        // act -j runs the needed jobs inside this Windows guest too, so their Rust/C++ steps need MSVC there as well.
+        const uses = new Set(leg.msvcUses ?? []);
+        for (const n of leg.needsAll) for (const u of msvcUses(jobs[n] ?? {})) uses.add(`${u} (needs: ${n})`);
+        if (uses.size) leg.msvcUses = [...uses];
+        // Whether the guest really has the tools is checked when the leg runs (over ssh); an opt-out is known now.
+        const guest = leg.target ? cfg.guests[leg.target] : undefined;
+        if (leg.msvcUses?.length && guest && !guestMsvc(guest)) {
+          leg.warnings.push(msvcHint(guest, leg.msvcUses, `guest ${guest.name} is set up without them (msvc = false)`));
+        }
+      }
       // needs: across OS boundaries can't be honored when legs run in separate environments.
       if (!leg.targetOs) continue;
       const crossOs = leg.needsAll.filter((n) => [...osOf(n)].some((o) => o !== leg.targetOs));

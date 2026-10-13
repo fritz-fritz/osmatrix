@@ -420,12 +420,31 @@ async function bashForLinuxNeeds(ep: Endpoint, repo: string, remote: string, leg
 }
 
 /**
- * Prints the install path of Visual Studio (Build Tools only count with -products *) that has the MSVC
- * C++ tools for x64 or ARM64; prints nothing without them.
+ * Prints `vc:<path>` for a Visual Studio (Build Tools only count with -products *) with the MSVC C++ tools
+ * for x64 or ARM64, and `sdk:<version>` for a Windows 10/11 SDK with the guest architecture's import
+ * libraries (kernel32.lib; vswhere's SDK component ids change with every SDK version).
  */
-export const VC_TOOLS_PROBE =
-  "$v = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\\Installer\\vswhere.exe'; " +
-  "if (Test-Path -LiteralPath $v) { & $v -products * -requiresAny -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 Microsoft.VisualStudio.Component.VC.Tools.ARM64 -property installationPath }";
+export const VC_TOOLS_PROBE = [
+  "$v = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\\Installer\\vswhere.exe'",
+  "if (Test-Path -LiteralPath $v) { & $v -products * -requiresAny -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 Microsoft.VisualStudio.Component.VC.Tools.ARM64 -property installationPath | Select-Object -First 1 | ForEach-Object { 'vc:' + $_ } }",
+  "$k = @('HKLM:\\SOFTWARE\\Microsoft\\Windows Kits\\Installed Roots', 'HKLM:\\SOFTWARE\\WOW6432Node\\Microsoft\\Windows Kits\\Installed Roots') | ForEach-Object { (Get-ItemProperty -LiteralPath $_ -Name KitsRoot10 -ErrorAction SilentlyContinue).KitsRoot10 } | Where-Object { $_ } | Select-Object -First 1",
+  "if (-not $k) { $k = Join-Path ${env:ProgramFiles(x86)} 'Windows Kits\\10' }",
+  "$a = if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64') { 'arm64' } else { 'x64' }",
+  "Get-ChildItem -LiteralPath (Join-Path $k 'Lib') -Directory -ErrorAction SilentlyContinue | Where-Object { Test-Path -LiteralPath (Join-Path $_.FullName \"um\\$a\\kernel32.lib\") } | Select-Object -First 1 | ForEach-Object { 'sdk:' + $_.Name }",
+  // A missing key or folder leaves $? false, which would make the probe itself look failed.
+  "exit 0",
+].join("; ");
+
+/** What VC_TOOLS_PROBE found, or why the guest can't build with MSVC (undefined when it can). */
+export function msvcMissing(probeOutput: string): string | undefined {
+  const lines = probeOutput.split(/\r?\n/).map((l) => l.trim());
+  const vc = lines.some((l) => /^vc:./.test(l));
+  const sdk = lines.some((l) => /^sdk:./.test(l));
+  if (vc && sdk) return undefined;
+  if (vc) return "it has the MSVC C++ tools but no Windows SDK";
+  if (sdk) return "it has a Windows SDK but no MSVC C++ tools";
+  return "vswhere finds no MSVC C++ tools and there is no Windows SDK";
+}
 
 /**
  * Guests set up before osmatrix installed the MSVC Build Tools (or whose install failed) lack them. Warn,
@@ -433,9 +452,11 @@ export const VC_TOOLS_PROBE =
  */
 async function checkMsvc(ep: Endpoint, cfg: GuestConfig, leg: Leg, r: LegResult, log: fs.WriteStream) {
   const p = await sshExec(ep, powershell(ep, VC_TOOLS_PROBE), { timeoutMs: 60_000 }).catch(() => undefined);
-  // Only a probe that ran and found nothing counts; a failed probe proves nothing.
-  if (!p || p.code !== 0 || p.stdout.trim()) return;
-  const w = msvcHint(cfg, leg.msvcUses!, `guest ${cfg.name} has none (vswhere finds no MSVC C++ tools)`);
+  // Only a probe that ran counts; a failed probe proves nothing.
+  if (!p || p.code !== 0) return;
+  const missing = msvcMissing(p.stdout);
+  if (!missing) return;
+  const w = msvcHint(cfg, leg.msvcUses!, `guest ${cfg.name} can't build with them: ${missing}`);
   r.warnings.push(w);
   log.write(`[osmatrix] warning: ${w}\n`);
 }

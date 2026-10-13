@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { ActJsonParser, VC_TOOLS_PROBE, actDifferenceHints, powershell } from "../src/ci/run.ts";
+import { ActJsonParser, VC_TOOLS_PROBE, actDifferenceHints, msvcMissing, powershell } from "../src/ci/run.ts";
 import { defaultGuests, guestMsvc, labelMatches, mergeConfig, defaultConfig, windowsOemOptions } from "../src/core/config.ts";
 import { commandLine, quotePosix, quotePwsh, withCwd } from "../src/core/ssh.ts";
 import { encodePng } from "../src/gui.ts";
@@ -66,6 +66,18 @@ test("the MSVC probe asks vswhere for Build Tools with x64 or ARM64 C++ tools", 
   assert.match(VC_TOOLS_PROBE, /vswhere\.exe/);
   assert.match(VC_TOOLS_PROBE, /-products \*/);
   assert.match(VC_TOOLS_PROBE, /-requiresAny -requires Microsoft\.VisualStudio\.Component\.VC\.Tools\.x86\.x64 Microsoft\.VisualStudio\.Component\.VC\.Tools\.ARM64/);
+  // The SDK counts only with import libraries for the guest's architecture.
+  assert.match(VC_TOOLS_PROBE, /KitsRoot10/);
+  assert.match(VC_TOOLS_PROBE, /um\\\$a\\kernel32\.lib/);
+  assert.match(VC_TOOLS_PROBE, /; exit 0$/);
+});
+
+test("msvcMissing needs both the C++ tools and a Windows SDK", () => {
+  const vc = "vc:C:\\Program Files (x86)\\Microsoft Visual Studio\\2022\\BuildTools";
+  assert.equal(msvcMissing(`${vc}\r\nsdk:10.0.26100.0\r\n`), undefined);
+  assert.match(msvcMissing(`${vc}\r\n`)!, /no Windows SDK/);
+  assert.match(msvcMissing("sdk:10.0.26100.0\n")!, /no MSVC C\+\+ tools/);
+  assert.match(msvcMissing("")!, /no MSVC C\+\+ tools and there is no Windows SDK/);
 });
 
 test("label globs", () => {

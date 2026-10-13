@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
 import YAML from "yaml";
-import { expandMatrix, msvcHint, msvcUses, plan, setDefaultRunShell, substitute } from "../src/ci/plan.ts";
+import { expandMatrix, msvcHint, msvcUses, plan, runCommands, setDefaultRunShell, substitute } from "../src/ci/plan.ts";
 import { defaultConfig, mergeConfig } from "../src/core/config.ts";
 
 test("expandMatrix: cartesian product", () => {
@@ -253,6 +253,51 @@ test("msvcUses finds Rust and C/C++ toolchain steps", () => {
   // Not commands: paths, other words, other actions.
   assert.deepEqual(msvcUses({ steps: [{ run: 'echo "$HOME/.cargo/bin" >> $GITHUB_PATH' }, { run: "npm run cargo-cult" }, { uses: "actions/setup-node@v4" }] }), []);
   assert.deepEqual(msvcUses({}), []);
+  // Every actions-rs action, reported by name.
+  assert.deepEqual(msvcUses({ steps: [{ uses: "actions-rs/clippy-check@v1" }, { uses: "actions-rs/toolchain@v1" }] }), [
+    "actions-rs/clippy-check",
+    "actions-rs/toolchain",
+  ]);
+});
+
+test("runCommands finds commands only in command position", () => {
+  assert.deepEqual(runCommands("cargo build"), ["cargo"]);
+  // Arguments are not commands.
+  assert.ok(!runCommands("echo cargo build").includes("cargo"));
+  assert.ok(!runCommands("npm run cargo").includes("cargo"));
+  // Windows looks commands up case-insensitively; paths and .exe are stripped.
+  assert.deepEqual(runCommands("Cargo build"), ["cargo"]);
+  assert.deepEqual(runCommands('"$HOME/.cargo/bin/cargo" test'), ["cargo"]);
+  assert.deepEqual(runCommands("C:\\Users\\me\\.cargo\\bin\\rustup.exe show"), ["rustup"]);
+  // Separators and wrappers.
+  assert.deepEqual(runCommands("npm ci && cargo test || rustup show; echo done | tee x"), ["npm", "cargo", "rustup", "echo", "tee"]);
+  assert.deepEqual(runCommands("(cd crate; cargo fmt --check)"), ["cd", "cargo"]);
+  assert.deepEqual(runCommands("sudo -E cargo install x"), ["cargo"]);
+  assert.deepEqual(runCommands("time cargo build"), ["cargo"]);
+  assert.deepEqual(runCommands("env RUSTFLAGS=-Dwarnings CARGO_INCREMENTAL=0 cargo build"), ["cargo"]);
+  assert.deepEqual(runCommands("RUSTFLAGS=-Dwarnings cargo build"), ["cargo"]);
+  assert.deepEqual(runCommands("& cargo build"), ["cargo"]);
+  assert.deepEqual(runCommands("# cargo build\n  \nnpm test"), ["npm"]);
+});
+
+test("plan adds MSVC uses of needed jobs, which act runs in the Windows guest", () => {
+  const repo = tmpRepo(`
+on: push
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps: [{ run: cargo clippy }]
+  win:
+    needs: lint
+    runs-on: windows-latest
+    steps: [{ run: npm test }]
+`);
+  const optedOut = mergeConfig(defaultConfig(), { guests: { windows: { os: "windows", backend: "dockur", msvc: false } } });
+  const leg = plan(repo, optedOut, { job: "win" }).legs[0];
+  assert.deepEqual(leg.msvcUses, ["run: cargo (needs: lint)"]);
+  assert.ok(leg.warnings.some((w) => /run: cargo \(needs: lint\).*msvc = false/.test(w)));
+  // A Linux leg never needs MSVC, even with Rust steps.
+  assert.equal(plan(repo, optedOut, { job: "lint" }).legs[0].msvcUses, undefined);
 });
 
 const rustWorkflow = `
