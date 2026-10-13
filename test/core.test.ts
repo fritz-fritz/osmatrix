@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { ActJsonParser, actDifferenceHints, commonActArgs, guestLegDir, powershell, pwshHomePath } from "../src/ci/run.ts";
+import { ActJsonParser, actDifferenceHints, commonActArgs, guestLegDir, powershell, pwshHomePath, removeCmd } from "../src/ci/run.ts";
 import { defaultGuests, labelMatches, mergeConfig, defaultConfig } from "../src/core/config.ts";
 import { commandLine, quotePosix, quotePwsh, withCwd } from "../src/core/ssh.ts";
 import { encodePng } from "../src/gui.ts";
@@ -100,6 +100,11 @@ test("VM legs keep their own files next to the work tree and pass a derived work
   // Guest paths in PowerShell expressions are quoted strings, even when quoting wouldn't be needed as an argument.
   assert.equal(pwshHomePath(own.path), "[IO.Path]::Combine($HOME, 'work/.osmatrix/20261012T101010-ab12/gw-windows-latest')");
   assert.equal(pwshHomePath("it's"), "[IO.Path]::Combine($HOME, 'it''s')");
+  // Removal fails loudly (non-zero exit) so a leftover secrets file can be reported; a missing path is fine.
+  assert.equal(removeCmd({ shell: "posix" }, own.run), "rm -rf work/.osmatrix/20261012T101010-ab12");
+  const ps = removeCmd({ shell: "pwsh" }, own.run);
+  assert.match(ps, /if \(Test-Path -LiteralPath \$p\) \{ Remove-Item -Recurse -Force -ErrorAction Stop -LiteralPath \$p \}/);
+  assert.ok(!ps.includes("SilentlyContinue"));
 });
 
 test("bootBudget scales with the slowest recent boot", () => {

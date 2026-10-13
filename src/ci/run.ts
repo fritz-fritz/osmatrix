@@ -317,7 +317,7 @@ async function runLeg(repo: string, dir: string, cfg: Config, leg: Leg, sf: Stat
         const init = "git init -q; git add -A; git -c user.name=osmatrix -c user.email=osmatrix@localhost commit -qm osmatrix";
         await sshExec(ep, withCwd(ep.shell, remote, init), { timeoutMs: 120_000 });
       }
-      // The work tree must match the commit, as on GitHub, so this leg's own files go next to it.
+      // The synced tree is what the job checks out (as on GitHub), so this leg's own files go next to it.
       const own = guestLegDir(workdir, sf.s.id, leg.id);
       try {
         let workflow = leg.workflow;
@@ -339,8 +339,14 @@ async function runLeg(repo: string, dir: string, cfg: Config, leg: Leg, sf: Stat
         const command = withCwd(ep.shell, remote, commandLine(ep.shell, ["act", ...args]));
         code = await streamProcess(sshBin(), sshArgs(ep, ["-T"]).concat([command]), undefined, parser, timeoutMs);
       } finally {
-        // Per-run files only (secrets among them); the next leg on this guest starts its own.
-        await sshExec(ep, removeCmd(ep, own.run), { timeoutMs: 120_000 }).catch(() => undefined);
+        // Per-run files only (secrets among them); the next leg on this guest starts its own. sshExec
+        // resolves on a failed command, so check its exit code: a leftover secrets file must be reported.
+        const rm = await sshExec(ep, removeCmd(ep, own.run), { timeoutMs: 120_000 }).catch((e: Error) => ({ code: -1, stderr: e.message }));
+        if (rm.code !== 0) {
+          const w = `could not remove ${own.run} in guest ${g.cfg.name} (it may still hold this run's secrets file): ${rm.stderr.trim() || `exit code ${rm.code}`}`;
+          r.warnings.push(w);
+          log.write(`[osmatrix] warning: ${w}\n`);
+        }
       }
     }
     parser.flush();
@@ -381,7 +387,7 @@ export function actDifferenceHints(log: string): string[] {
 /**
  * Where a VM leg keeps the files osmatrix gives act (a derived workflow, the event payload, secrets,
  * act's artifact store): `<workdir>/.osmatrix/<run>/<leg>`, a sibling of the synced work trees, so the
- * checkout stays identical to the commit. `fromWorkTree` is the same directory relative to
+ * synced tree stays untouched. `fromWorkTree` is the same directory relative to
  * `<workdir>/<repo>`, where act runs; `run` is the run's directory, removed when the leg ends.
  */
 export function guestLegDir(workdir: string, runId: string, legId: string): { path: string; fromWorkTree: string; run: string } {
@@ -495,11 +501,14 @@ async function writeRemoteFile(ep: Endpoint, target: string, content: string) {
   if (r.code !== 0) throw new Error(`failed to write ${target}: ${r.stderr}`);
 }
 
-/** Remove a file or directory tree in the guest (relative to its home, or absolute); missing is fine. */
-function removeCmd(ep: Endpoint, target: string): string {
+/**
+ * Remove a file or directory tree in the guest (relative to its home, or absolute). A missing target is
+ * fine; a failed removal exits non-zero.
+ */
+export function removeCmd(ep: Pick<Endpoint, "shell">, target: string): string {
   return ep.shell === "posix"
     ? `rm -rf ${quoteFor("posix", target)}`
-    : powershell(ep, `Remove-Item -Recurse -Force -ErrorAction SilentlyContinue -LiteralPath (${pwshHomePath(target)})`);
+    : powershell(ep, `$p = ${pwshHomePath(target)}; if (Test-Path -LiteralPath $p) { Remove-Item -Recurse -Force -ErrorAction Stop -LiteralPath $p }`);
 }
 
 function streamProcess(cmd: string, args: string[], cwd: string | undefined, parser: ActJsonParser, timeoutMs: number): Promise<number> {
