@@ -80,7 +80,11 @@ export function collectorWorkflow(text: string, jobs: string[]): { text: string;
   return { text: doc.toString({ lineWidth: 0 }), job: id };
 }
 
-/** The collector's record in a log line, if the line has one. Outputs of jobs that didn't succeed are dropped (act leaves them unevaluated). */
+/**
+ * The collector's record in a log line, if the line has one. Outputs of skipped jobs are dropped (act
+ * leaves them unevaluated; GitHub gives empty values). Failed and cancelled jobs keep theirs: GitHub
+ * evaluates job outputs when a job ends, whatever its result.
+ */
 export function parseNeedsRecord(line: string): Record<string, NeededJob> | undefined {
   const i = line.indexOf(NEEDS_MARKER);
   if (i < 0) return undefined;
@@ -97,7 +101,7 @@ export function parseNeedsRecord(line: string): Record<string, NeededJob> | unde
   for (const [job, v] of Object.entries(raw as Record<string, { result?: unknown; outputs?: unknown }>)) {
     const result = typeof v?.result === "string" && v.result ? v.result : "success";
     const outputs: Record<string, string> = {};
-    if (result === "success" && v?.outputs && typeof v.outputs === "object") {
+    if (result !== "skipped" && v?.outputs && typeof v.outputs === "object") {
       for (const [k, o] of Object.entries(v.outputs as Record<string, unknown>)) outputs[k] = o == null ? "" : String(o);
     }
     out[job] = { result, outputs };
@@ -123,10 +127,27 @@ export function githubOutputFile(outputs: Record<string, string>, delimiter = ()
   return s;
 }
 
-/** The upload-artifact the workflow itself uses (so a re-upload matches its artifact version), else ours. */
-export function uploadArtifactAction(text: string): { ref: string; version?: string } {
-  const m = /^\s*(?:-\s+)?uses:\s*["']?(actions\/upload-artifact@[A-Za-z0-9._/-]+)["']?(?:\s+#\s*(\S+))?/m.exec(text);
-  return m ? { ref: m[1], version: m[2] } : UPLOAD_ARTIFACT;
+/**
+ * The upload-artifact that the replayed jobs use (so a re-upload matches the artifact version they
+ * produced). With none, or several different ones, ours.
+ */
+export function uploadArtifactAction(text: string, jobs: string[]): { ref: string; version?: string } {
+  const doc = YAML.parseDocument(text);
+  const found = new Map<string, string | undefined>();
+  for (const j of jobs) {
+    const steps = doc.getIn(["jobs", j, "steps"], true);
+    if (!YAML.isSeq(steps)) continue;
+    for (const step of steps.items) {
+      const uses = YAML.isMap(step) ? step.get("uses", true) : undefined;
+      if (!YAML.isScalar(uses) || typeof uses.value !== "string" || !uses.value.startsWith("actions/upload-artifact@")) continue;
+      // A trailing "# v4.6.2" is the version of a SHA pin.
+      const version = uses.comment?.trim().split(/\s+/)[0];
+      if (!found.has(uses.value) || version) found.set(uses.value, version || found.get(uses.value));
+    }
+  }
+  if (found.size !== 1) return UPLOAD_ARTIFACT;
+  const [[ref, version]] = found;
+  return { ref, version };
 }
 
 export interface StubOptions {
@@ -142,7 +163,8 @@ export interface StubOptions {
 /**
  * The guest-side workflow: each replayed job replaced by a stub that has the same id and `outputs:`
  * keys, runs on the leg's runner and replays the recorded values. A job skipped on the host gets a
- * stub with `if: false`, so its dependents are skipped as on GitHub. The recorded artifacts are
+ * stub with `if: false`, so its dependents are skipped as on GitHub; one that failed gets a stub that
+ * replays its outputs and then fails, so act runs only the dependents whose if: allows it. The recorded artifacts are
  * re-uploaded by one job that every stub needs, so they exist before any dependent job starts.
  *
  * The replay step is a Node.js script: act needs Node in the guest for JavaScript actions anyway, and
@@ -178,8 +200,16 @@ export function replayStubWorkflow(text: string, o: StubOptions): string {
     const name = YAML.isMap(orig) ? orig.get("name") : undefined;
     const declared = YAML.isMap(orig) ? orig.get("outputs") : undefined;
     const keys = new Set([...(YAML.isMap(declared) ? declared.items.map((p) => String(YAML.isScalar(p.key) ? p.key.value : p.key)) : []), ...Object.keys(needed.outputs)]);
+    const failed = needed.result !== "success" && needed.result !== "skipped";
     const values = Object.fromEntries([...keys].map((k) => [k, needed.outputs[k] ?? ""]));
     const b64 = Buffer.from(githubOutputFile(values), "utf8").toString("base64");
+    // A job that failed (or was cancelled) on the host fails here too, after replaying the outputs it set:
+    // GitHub evaluates job outputs when a job ends, whatever its result. act then runs only the
+    // dependents whose if: allows it (always(), failure(), …).
+    let script = `require("fs").appendFileSync(process.env.GITHUB_OUTPUT, Buffer.from("${b64}", "base64"));\n`;
+    if (failed) {
+      script += `console.error(${JSON.stringify(`${id} ${needed.result === "failure" ? "failed" : `ended as ${needed.result}`} in osmatrix's host run; its log is in this leg's log`)});\nprocess.exitCode = 1;\n`;
+    }
     const stub: Record<string, unknown> = {
       name: `${typeof name === "string" && !name.includes("${{") ? name : id} (replayed from host run)`,
     };
@@ -190,9 +220,9 @@ export function replayStubWorkflow(text: string, o: StubOptions): string {
     stub.steps = [
       {
         id: "replay",
-        name: "Replay outputs from the host run",
+        name: failed ? `Replay the host run: ${id} ${needed.result === "failure" ? "failed" : `ended as ${needed.result}`}` : "Replay outputs from the host run",
         shell: 'node "{0}"',
-        run: `require("fs").appendFileSync(process.env.GITHUB_OUTPUT, Buffer.from("${b64}", "base64"));\n`,
+        run: script,
       },
     ];
     jobs.set(id, doc.createNode(stub));

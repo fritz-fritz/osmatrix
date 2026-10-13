@@ -80,12 +80,15 @@ test("the collector's record is read back from act's log", () => {
   const needs = {
     plan: { outputs: { mode: "full", notes: "it's\nmulti ${{ x }}" }, result: "success" },
     gate: { outputs: { go: "${{ steps.x.outputs.go }}" }, result: "skipped" },
+    build: { outputs: { half: "set before failing" }, result: "failure" },
   };
   const line = `  | osmatrix-needs:${Buffer.from(JSON.stringify(needs, null, 2)).toString("base64")}`;
   assert.deepEqual(parseNeedsRecord(line), {
     plan: { result: "success", outputs: { mode: "full", notes: "it's\nmulti ${{ x }}" } },
     // act leaves a job's outputs unevaluated when it didn't run; GitHub gives empty values.
     gate: { result: "skipped", outputs: {} },
+    // GitHub evaluates outputs when a job ends, whatever its result.
+    build: { result: "failure", outputs: { half: "set before failing" } },
   });
   assert.equal(parseNeedsRecord("  | nothing here"), undefined);
   assert.equal(parseNeedsRecord("  | osmatrix-needs:$(printf"), undefined);
@@ -100,10 +103,29 @@ test("outputs use GITHUB_OUTPUT's heredoc form for multi-line values", () => {
   assert.deepEqual(parseFileCommands(githubOutputFile(values).replace(/\r/g, "")), { ...values, m: "line 1\nline 2" });
 });
 
-test("the upload action comes from the workflow, else the pinned default", () => {
-  assert.deepEqual(uploadArtifactAction(WF), { ref: "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02", version: "v4.6.2" });
-  assert.deepEqual(uploadArtifactAction("steps:\n  - uses: 'actions/upload-artifact@v4'\n"), { ref: "actions/upload-artifact@v4", version: undefined });
-  assert.deepEqual(uploadArtifactAction("jobs: {}\n"), UPLOAD_ARTIFACT);
+test("the upload action comes from the replayed jobs' steps, else the pinned default", () => {
+  assert.deepEqual(uploadArtifactAction(WF, ["plan"]), { ref: "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02", version: "v4.6.2" });
+  const wf = `jobs:
+  early:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "uses: actions/upload-artifact@v1"
+      - uses: actions/upload-artifact@v7
+  plan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: "actions/upload-artifact@v4"
+  other:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/upload-artifact@v5
+`;
+  // Another job's upload (or text in a run: script) doesn't count.
+  assert.deepEqual(uploadArtifactAction(wf, ["plan"]), { ref: "actions/upload-artifact@v4", version: undefined });
+  // No upload, or replayed jobs that disagree: the pinned default.
+  assert.deepEqual(uploadArtifactAction(wf, ["missing"]), UPLOAD_ARTIFACT);
+  assert.deepEqual(uploadArtifactAction(wf, ["plan", "other"]), UPLOAD_ARTIFACT);
+  assert.deepEqual(uploadArtifactAction("jobs: {}\n", ["plan"]), UPLOAD_ARTIFACT);
   assert.match(UPLOAD_ARTIFACT.ref, /^actions\/upload-artifact@[0-9a-f]{40}$/);
 });
 
@@ -161,6 +183,28 @@ test("a job skipped on the host gets a stub that is skipped too; no artifacts, n
   assert.equal(jobs.plan.needs, undefined);
   assert.equal(jobs["osmatrix-replay-artifacts"], undefined);
   assert.deepEqual(Object.keys(jobs.plan.outputs), ["mode", "my-key"]);
+});
+
+test("a job that failed on the host gets a stub that replays its outputs, then fails", () => {
+  const jobs = YAML.parse(
+    replayStubWorkflow(WF, { needs: { plan: { result: "failure", outputs: { mode: "partial" } } }, runsOn: ["windows-latest"], artifacts: [] }),
+  ).jobs;
+  const step = jobs.plan.steps[0];
+  assert.equal(jobs.plan.if, undefined);
+  assert.equal(step.name, "Replay the host run: plan failed");
+  assert.deepEqual(Object.keys(jobs.plan.outputs), ["mode", "my-key"]);
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "osmatrix-replay-"));
+  const script = path.join(dir, "replay");
+  const outFile = path.join(dir, "output");
+  fs.writeFileSync(script, step.run);
+  fs.writeFileSync(outFile, "");
+  assert.throws(() => execFileSync(process.execPath, [script], { env: { ...process.env, GITHUB_OUTPUT: outFile }, stdio: "pipe" }), (e: { status?: number; stderr?: Buffer }) => {
+    assert.equal(e.status, 1);
+    assert.match(String(e.stderr), /plan failed in osmatrix's host run/);
+    return true;
+  });
+  assert.deepEqual(parseFileCommands(fs.readFileSync(outFile, "utf8")), { mode: "partial", "my-key": "" });
+  assert.equal(YAML.parse(replayStubWorkflow(WF, { needs: { plan: { result: "cancelled", outputs: {} } }, runsOn: ["x"], artifacts: [] })).jobs.plan.steps[0].name, "Replay the host run: plan ended as cancelled");
 });
 
 /** A zip archive like upload-artifact's (deflated entries; optionally with data descriptors). */

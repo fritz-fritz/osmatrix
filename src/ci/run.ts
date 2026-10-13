@@ -248,9 +248,14 @@ export async function worker(repo: string, id: string): Promise<void> {
   await Promise.all(
     [...groups.entries()].map(async ([target, legs]) => {
       const isVm = target !== "host";
-      if (isVm) await vmSlots.acquire();
+      // Host runs of replayed needs only use Docker: finish them before taking one of the max_vms slots.
+      const replayed = new Map<string, HostReplay>();
+      if (isVm) {
+        for (const leg of legs) if (leg.replayNeeds?.length) replayed.set(leg.id, await replayFor(repo, dir, cfg, leg, sf, replays));
+        await vmSlots.acquire();
+      }
       try {
-        for (const leg of legs) await runLeg(repo, dir, cfg, leg, sf, replays);
+        for (const leg of legs) await runLeg(repo, dir, cfg, leg, sf, replayed.get(leg.id));
       } finally {
         if (isVm) vmSlots.release();
       }
@@ -279,7 +284,8 @@ function hostLockKey(leg: Pick<Leg, "workflow" | "workflowName">): string {
   return `host:act-workflow:${`act-${name}`.replace(/[^a-zA-Z0-9]/g, "-").replaceAll("--", "-")}`;
 }
 
-async function runLeg(repo: string, dir: string, cfg: Config, leg: Leg, sf: StatusFile, replays: Replays): Promise<void> {
+/** Run one leg. `replay` is the finished host run of its replayed needs (VM legs with replayNeeds). */
+async function runLeg(repo: string, dir: string, cfg: Config, leg: Leg, sf: StatusFile, replay?: HostReplay): Promise<void> {
   const r = sf.s.legs.find((l) => l.id === leg.id)!;
   const logFile = path.join(dir, `${leg.id}.log`);
   const log = fs.createWriteStream(logFile, { flags: "a" });
@@ -287,21 +293,13 @@ async function runLeg(repo: string, dir: string, cfg: Config, leg: Leg, sf: Stat
   const timeoutMs = (sf.s.options.timeoutMin ?? 60) * 60_000;
   let release: (() => void) | undefined;
   try {
-    // Needed Linux jobs run on the host first, without holding the guest meanwhile.
-    let replay: HostReplay | undefined;
-    if (leg.target !== "host" && leg.replayNeeds?.length) {
-      r.state = "running";
-      r.startedAt = new Date().toISOString();
-      replay = await replayFor(repo, dir, cfg, leg, sf, replays, r, log);
-      if (replay.state !== "success") {
-        r.state = replay.state === "error" ? "error" : "failure";
-        r.failedStep = replay.failedStep && `host run: ${replay.failedStep}`;
-        r.error =
-          (replay.state === "failure" ? `${replay.error}. GitHub would not run this job after a failed need either (unless its if: says otherwise); ` : `${replay.error}; `) +
-          `the host run's log is in this leg's log and in ${replay.logRel}`;
-        log.write(`[osmatrix] ${r.error}\n`);
-        return;
-      }
+    // Without the replayed jobs' results there is nothing to hand the guest. A replayed job that failed
+    // is no reason to stop: its stub fails too, and act decides which dependents still run, as GitHub would.
+    if (replay?.state === "error") {
+      r.state = "error";
+      r.error = `${replay.error}; the host run's log is in this leg's log and in ${replay.logRel}`;
+      log.write(`[osmatrix] ${r.error}\n`);
+      return;
     }
     let waited: string | undefined;
     release = await acquireLocks(legLockKeys(leg), { pid: process.pid, run: sf.s.id, repo, leg: leg.id }, (key, h) => {
@@ -390,6 +388,10 @@ async function runLeg(repo: string, dir: string, cfg: Config, leg: Leg, sf: Stat
     parser.flush();
     r.steps = parser.steps;
     r.failedStep = parser.failedStep;
+    // A failing replay stub stands for the step that failed in the host run; name that one.
+    if (replay?.failedStep && replay.state === "failure" && replay.jobs.some((j) => parser.failedStep?.startsWith(`${j}: `))) {
+      r.failedStep = `host run: ${replay.failedStep}`;
+    }
     r.state = code === 0 && parser.jobResult !== "failure" ? "success" : "failure";
     if (code === 124) r.error = `timed out after ${sf.s.options.timeoutMin ?? 60} min`;
   } catch (e) {
@@ -445,6 +447,10 @@ async function hostActArgs(cfg: Config, dir: string, sf: StatusFile, labels: str
 
 interface HostReplay {
   jobs: string[];
+  /**
+   * success: every replayed job succeeded or was skipped; failure: some failed or were cancelled (their
+   * stubs fail the same way); error: no usable results (act failed, timed out, or recorded nothing).
+   */
   state: "success" | "failure" | "error";
   log: string;
   logRel: string;
@@ -464,7 +470,11 @@ type Replays = Map<string, { logRel: string; done: Promise<HostReplay> }>;
  * The host run of a VM leg's replayed needs: started by the first leg that needs these jobs, awaited by
  * the others. Its log is copied into the leg's log and summarized in the leg's status.
  */
-async function replayFor(repo: string, dir: string, cfg: Config, leg: Leg, sf: StatusFile, replays: Replays, r: LegResult, log: fs.WriteStream): Promise<HostReplay> {
+async function replayFor(repo: string, dir: string, cfg: Config, leg: Leg, sf: StatusFile, replays: Replays): Promise<HostReplay> {
+  const r = sf.s.legs.find((l) => l.id === leg.id)!;
+  const log = fs.createWriteStream(path.join(dir, `${leg.id}.log`), { flags: "a" });
+  r.state = "running";
+  r.startedAt = new Date().toISOString();
   const jobs = [...leg.replayNeeds!].sort();
   const key = `${leg.workflow}\n${jobs.join("\n")}`;
   let entry = replays.get(key);
@@ -498,7 +508,13 @@ async function replayFor(repo: string, dir: string, cfg: Config, leg: Leg, sf: S
     ...(res.error ? { error: res.error } : {}),
     ...(res.artifacts.length ? { artifacts: res.artifacts.map((a) => a.name) } : {}),
   };
+  if (res.state === "failure") {
+    log.write(`[osmatrix] ${res.error}: their stubs fail in this leg too, and act decides which dependent jobs still run\n`);
+  }
+  // Back to pending while the leg waits for a VM slot and its guest.
+  r.state = "pending";
   sf.save();
+  await new Promise((done) => log.end(done));
   return res;
 }
 
@@ -515,7 +531,7 @@ async function hostReplay(repo: string, dir: string, cfg: Config, leg: Leg, jobs
   let release: (() => void) | undefined;
   try {
     const text = fs.readFileSync(path.join(repo, leg.workflow), "utf8");
-    out.upload = uploadArtifactAction(text);
+    out.upload = uploadArtifactAction(text, jobs);
     const collector = collectorWorkflow(text, jobs);
     // Outside the work tree, under the workflow's file name (act's fallback for the workflow's name).
     const wf = path.join(rdir, path.posix.basename(leg.workflow));
@@ -541,21 +557,22 @@ async function hostReplay(repo: string, dir: string, cfg: Config, leg: Leg, jobs
     const code = await streamProcess(act, args, repo, parser, (sf.s.options.timeoutMin ?? 60) * 60_000);
     parser.flush();
     out.failedStep = parser.failedStep;
-    const describe = (j: string) => {
-      const res = record?.[j]?.result;
-      return `${j} ${!res ? "did not run" : res === "failure" ? "failed" : `ended as ${res}`}`;
-    };
-    const bad = jobs.filter((j) => !["success", "skipped"].includes(record?.[j]?.result ?? ""));
+    const failed = jobs.filter((j) => record?.[j] && !["success", "skipped"].includes(record[j].result));
+    const missing = jobs.filter((j) => !record?.[j]);
     if (code === 124) out.error = `the host run of ${names} timed out after ${sf.s.options.timeoutMin ?? 60} min`;
     else if (!record) out.error = `the host run of ${names} ended without recording their results (act exit code ${code})`;
-    else if (bad.length) out.error = `needed job${bad.length > 1 ? "s" : ""} ${bad.map(describe).join(", ")} in the host run`;
-    if (out.error || !record) {
-      out.state = "failure";
-      return out;
-    }
+    else if (missing.length) out.error = `the host run recorded no result for ${missing.join(", ")}`;
+    // act exits non-zero when a job fails; with no failed job recorded, the failure is act's own.
+    else if (code !== 0 && !failed.length) out.error = `act exited with code ${code} in the host run of ${names}, though all of them succeeded or were skipped`;
+    if (out.error || !record) return out; // state stays "error"
     out.needs = Object.fromEntries(jobs.map((j) => [j, record![j]]));
+    // Artifacts uploaded before a failure exist on GitHub too.
     out.artifacts = extractArtifacts(path.join(rdir, "artifacts"), sf.s.githubRunId ?? "1", path.join(rdir, "files"));
-    out.state = "success";
+    if (failed.length) {
+      out.state = "failure";
+      const how = (j: string) => `${j} ${record![j].result === "failure" ? "failed" : `ended as ${record![j].result}`}`;
+      out.error = `needed job${failed.length > 1 ? "s" : ""} ${failed.map(how).join(", ")} in the host run`;
+    } else out.state = "success";
     log.write(
       `[osmatrix] recorded ${jobs.map((j) => `${j} (${out.needs[j].result}, ${Object.keys(out.needs[j].outputs).length} outputs)`).join(", ")}; ` +
         `artifacts: ${out.artifacts.map((a) => a.name).join(", ") || "none"}\n`,
