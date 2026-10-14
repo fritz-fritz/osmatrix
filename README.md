@@ -102,7 +102,7 @@ Options:
 
 On Apple Silicon, the Windows guest runs on the Mac's own QEMU (`brew install qemu`) with Hypervisor.framework. Docker is still needed once: setup runs dockur's `windows-arm` image to download Windows 11 on ARM and build the unattended install media, then boots them with the host's QEMU. The guest is Windows on ARM, so x64-only tools run under Windows' own emulation; osmatrix installs native ARM64 builds of PowerShell, Git, Node.js, Python and act.
 
-Run `osmatrix doctor` to see what this host can do. It also needs an OpenSSH client and `tar`, both built into current Windows, macOS and Linux. `act` is downloaded (checksum-verified) on first use if it isn't on PATH.
+Run `osmatrix doctor` to see what this host can do. It also needs an OpenSSH client and `tar`, both built into current Windows, macOS and Linux. You don't need to install act: osmatrix builds its own (see [act](#act)).
 
 > **macOS licensing\*:** installing a macOS guest accepts Apple's [macOS Software License Agreement](https://www.apple.com/legal/sla/), which only permits macOS on Apple hardware. osmatrix asks for this consent once, through `osmatrix setup macos --accept-license` or an agent's `env_setup` call with `accept_license` after you agree, and records it as `macos_eula_acknowledged = true`.
 
@@ -169,7 +169,7 @@ Agents use `env_setup` and poll `env_status`. Afterwards, `osmatrix reset <guest
 How each guest gets there:
 
 - **ubuntu**: a container built from `catthehacker/ubuntu:act-24.04` with sshd added.
-- **windows**: dockur downloads Windows Server 2025 (evaluation) from Microsoft and installs it unattended. [`provision.ps1`](assets/oem/windows/provision.ps1) installs PowerShell 7, Git, Node LTS, Python, act and the MSVC Build Tools with the Windows SDK ([`msvc.ps1`](assets/oem/windows/msvc.ps1), which checks the installer's Microsoft signature before running it), then enables sshd. Like GitHub's image, it enables Git symlinks and Developer Mode (so symlinks can be created) and leaves `core.autocrlf` at Git for Windows' default (`true`). Its log is at `C:\OEM\provision.log`.
+- **windows**: dockur downloads Windows Server 2025 (evaluation) from Microsoft and installs it unattended. [`provision.ps1`](assets/oem/windows/provision.ps1) installs PowerShell 7, Git, Node LTS, Python, stock act (used only when osmatrix's [patched act](#act) isn't) and the MSVC Build Tools with the Windows SDK ([`msvc.ps1`](assets/oem/windows/msvc.ps1), which checks the installer's Microsoft signature before running it), then enables sshd. Like GitHub's image, it enables Git symlinks and Developer Mode (so symlinks can be created) and leaves `core.autocrlf` at Git for Windows' default (`true`). Its log is at `C:\OEM\provision.log`.
 - **macos (dockur)**:
   1. osmatrix boots macOS Recovery. It drives Recovery's Terminal through the VNC display and a small [command bridge](assets/macos/bridge.py) inside the container, erases the disk, and runs `startosinstall --agreetolicense`.
   2. After the install it boots Recovery again and runs [`configure.sh`](assets/macos/configure.sh) on the new system. That creates the `osmatrix` admin user with the SSH key, Remote Login, passwordless sudo and auto-login, and skips Setup Assistant.
@@ -201,6 +201,17 @@ Secrets for CI go in `<repo>/.osmatrix/secrets` (or `.secrets`) as `KEY=value` l
 
 For Windows and macOS legs, osmatrix checks your working tree out in the guest with Git, as `actions/checkout` does on GitHub's runners. Uncommitted changes and untracked files that aren't ignored are included. The guest's Git settings decide line endings, file modes and symlinks, so Windows legs get CRLF files and a clean `git status`, as on GitHub. Each run gets a fresh clone, so config or hooks that a previous run's steps changed don't carry over. The guest and the host (in the osmatrix data dir) keep the objects, so later runs send only what changed. `HEAD` in the guest is your commit and branch, so `GITHUB_SHA` and `GITHUB_REF` are yours, and the index is your index: uncommitted changes show up in `git status` and `git diff` exactly as on the host, as they do on Linux legs. Directories outside a Git repository and repositories that use Git LFS (or another filter), submodules or nested repositories are copied file by file instead; then line endings, modes and symlinks follow the host, and the leg's log says so. `osmatrix push` always copies files as they are, without `.git`.
 
+### act
+
+osmatrix runs a patched build of act 0.2.89, on the host and in every guest. [The patch](assets/act/act-v0.2.89-osmatrix.patch) fixes two ways stock act differs from GitHub's runners:
+
+- File commands (`GITHUB_OUTPUT`, `GITHUB_ENV`, `GITHUB_PATH`, `GITHUB_STATE`, `GITHUB_STEP_SUMMARY`) live under `$RUNNER_TEMP/_runner_file_commands/` as on GitHub, so scripts that check those paths stay inside `RUNNER_TEMP` pass. Docker container actions share the directory through a per-job volume ([#23](https://github.com/fritz-fritz/osmatrix/issues/23)).
+- The artifact server works with `actions/upload-artifact` v7 and `download-artifact` v7/v8, including single files uploaded with `archive: false`, which keep their name ([#24](https://github.com/fritz-fritz/osmatrix/issues/24); the artifact-server part is the open upstream fix nektos/act#6174).
+
+The first CI run builds it: osmatrix downloads act's source archive (checksum-pinned), applies the patch and cross-compiles it in a pinned `golang` Docker image, for the host and every configured guest's OS and architecture. That takes a few minutes once; Go's caches live in the `osmatrix-act-go-cache` Docker volume, so rebuilds after a patch change are quick. The binaries are cached in the data dir under `bin/act-patched/`. Before a Windows or macOS leg, osmatrix copies the guest's build to `~/.osmatrix/bin/act` (`act.exe` on Windows), unless the guest already has that exact build. `osmatrix install-act` builds it ahead of time, and `osmatrix doctor` shows which act is used and whether it's built.
+
+An `act` on your PATH isn't used unless you ask for it. In `config.toml`, `act_path = "act"` (or a full path) runs your own act on the host; guests then use the act their provisioning installed. `act_version = "v0.2.x"` runs that stock release instead. Without Docker, osmatrix can't build the patched act and falls back to the stock v0.2.89 release, with a warning on each leg. Legs that run stock act get a hint when they fail in one of the ways above.
+
 ## Configuration
 
 `osmatrix config` prints the effective config and its file path. See [skills/osmatrix-setup/references/reference.md](skills/osmatrix-setup/references/reference.md) for every option, including adding `ssh` guests such as a real Mac on your network.
@@ -229,7 +240,7 @@ osmatrix snapshot windows     # keep them in the golden snapshot
 - Matrices built from expressions.
 - Remote reusable workflows.
 
-act also keeps the file-command files (`GITHUB_OUTPUT`, `GITHUB_ENV`, …) outside `RUNNER_TEMP`, so scripts that check those paths stay inside `RUNNER_TEMP` fail only locally. A failed leg says so in its warnings; skip such checks when `env.ACT` is set.
+osmatrix's [patched act](#act) puts the file-command files (`GITHUB_OUTPUT`, `GITHUB_ENV`, …) under `RUNNER_TEMP` and works with `upload-artifact` v7, which stock act doesn't. A leg that runs stock act anyway (see [act](#act)) says so in its warnings.
 
 Guests are also leaner than GitHub's hosted images, so prefer `setup-*` actions.
 
@@ -243,7 +254,7 @@ osmatrix is developed with AI coding agents under human review. [AI_POLICY.md](A
 
 ```
 osmatrix/                              # the repository root is the plugin, for every client
-├── src/, assets/                      # the CLI + MCP server (npm package "osmatrix"); assets/logo.* is the plugin artwork
+├── src/, assets/                      # the CLI + MCP server (npm package "osmatrix"); assets/logo.* is the plugin artwork, assets/act/ the act patch
 ├── skills/osmatrix-{ci,guests,setup}/ # the skills, each self-contained (SKILL.md + references/)
 ├── .claude-plugin/                    # Claude Code: marketplace.json → ./, plugin.json
 ├── .cursor-plugin/                    # Cursor:      marketplace.json → ./, plugin.json

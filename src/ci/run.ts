@@ -4,8 +4,8 @@ import fs from "node:fs";
 import path from "node:path";
 import YAML from "yaml";
 import { DockurBackend } from "../backends/dockur.ts";
-import { ensureAct } from "../core/act.ts";
-import { guestMsvc, guestWorkdir, loadConfig, type Config, type GuestConfig } from "../core/config.ts";
+import { ensureAct, patchedActFor, targetFromArch, type GoTarget } from "../core/act.ts";
+import { guestMsvc, guestWorkdir, loadConfig, type Config, type GuestConfig, type OsFamily } from "../core/config.ts";
 import { acquireLocks } from "../core/locks.ts";
 import { dockerReach, selinuxEnforcing } from "../core/nesting.ts";
 import { cliEntry, ensureDir } from "../core/paths.ts";
@@ -404,6 +404,9 @@ async function runLeg(repo: string, dir: string, cfg: Config, leg: Leg, sf: Stat
     record = parseNeedsRecord(line)?.[leg.job] ?? record;
   }, leg.job);
   const timeoutMs = (sf.s.options.timeoutMin ?? 60) * 60_000;
+  const note = (m: string) => log.write(`[osmatrix] ${m}\n`);
+  // Whether the leg runs osmatrix's patched act; stock act's known differences are only hinted at otherwise.
+  let patched = false;
   const outcome = (): LegOutcome => ({ state: r.state, record, error: r.error, finished: Date.now() });
   let release: (() => void) | undefined;
   try {
@@ -449,7 +452,10 @@ async function runLeg(repo: string, dir: string, cfg: Config, leg: Leg, sf: Stat
     const runId = sf.s.githubRunId ?? "1";
     let code: number;
     if (leg.target === "host") {
-      const act = await ensureAct();
+      const act = await ensureAct({ log: note });
+      patched = act.source === "patched";
+      if (act.warning) r.warnings.push(act.warning);
+      note(`act: ${act.source === "user" ? `${act.path} (act_path)` : `${act.version} (${act.source === "patched" ? "osmatrix's patched build" : "stock release"})`}`);
       const labels = [...leg.runsOn, ...(leg.needsLabels ?? [])];
       const workflow = derived === undefined ? leg.workflow : writeDerivedCopy(dir, leg, derived, log);
       const args = [event, ...commonActArgs(actLeg, workflow, sf.s.githubRunId), ...(await hostActArgs(cfg, dir, sf, labels, store, secretFile))];
@@ -464,7 +470,7 @@ async function runLeg(repo: string, dir: string, cfg: Config, leg: Leg, sf: Stat
         );
       }
       log.write(`$ act ${args.join(" ")}\n`);
-      code = await streamProcess(act, args, repo, parser, timeoutMs);
+      code = await streamProcess(act.path, args, repo, parser, timeoutMs);
     } else {
       const g = getGuest(leg.target!);
       if (g.backend instanceof DockurBackend && g.cfg.os === "macos" && !g.backend.everReady()) {
@@ -484,6 +490,9 @@ async function runLeg(repo: string, dir: string, cfg: Config, leg: Leg, sf: Stat
       if (g.cfg.os === "macos" && ep.shell === "posix") await ensureMacToolCache(ep, r, log);
       // An opted-out guest was already warned about by the plan.
       if (g.cfg.os === "windows" && leg.msvcUses?.length && guestMsvc(g.cfg)) await checkMsvc(ep, g.cfg, leg, r, log);
+      const act = await guestAct(ep, g.cfg.os, note);
+      patched = act.patched;
+      if (act.warning) r.warnings.push(act.warning);
       // The synced tree is what the job checks out (as on GitHub), so this leg's own files go next to it.
       const own = guestLegDir(workdir, sf.s.id, leg.id);
       try {
@@ -506,7 +515,7 @@ async function runLeg(repo: string, dir: string, cfg: Config, leg: Leg, sf: Stat
           args.push("--secret-file", `${own.fromWorkTree}/secrets`);
         }
         log.write(`$ act ${args.join(" ")}\n`);
-        const command = withCwd(ep.shell, remote, commandLine(ep.shell, ["act", ...args]));
+        const command = withCwd(ep.shell, remote, commandLine(ep.shell, [act.command, ...args]));
         code = await streamProcess(sshBin(), sshArgs(ep, ["-T"]).concat([command]), undefined, parser, timeoutMs);
         // The legs that need this one find what it uploaded in the run's store on the host.
         if (leg.neededBy?.length) {
@@ -560,7 +569,7 @@ async function runLeg(repo: string, dir: string, cfg: Config, leg: Leg, sf: Stat
     r.durationSec = Math.round((Date.parse(r.finishedAt) - Date.parse(r.startedAt!)) / 1000);
     if (r.state !== "success" && r.state !== "skipped") {
       r.tail = fs.readFileSync(logFile, "utf8").split("\n").slice(-60).join("\n");
-      r.warnings.push(...actDifferenceHints(r.tail));
+      if (!patched) r.warnings.push(...actDifferenceHints(r.tail));
     }
     sf.save();
   }
@@ -588,16 +597,80 @@ export function legResult(
 }
 
 /**
- * Hints for failures that come from act's environment rather than the code. act keeps the file-command
- * files (GITHUB_OUTPUT, GITHUB_ENV, …) under its own act/workflow/ directory; GitHub's runners keep them
- * under RUNNER_TEMP, so scripts that check those paths for containment fail only locally.
+ * Hints for failures that come from stock act's environment rather than the code, for legs that don't run
+ * osmatrix's patched act (act_path, another act_version, or no Docker to build it). Stock act keeps the
+ * file-command files (GITHUB_OUTPUT, GITHUB_ENV, …) under its own act/workflow/ directory; GitHub's
+ * runners keep them under RUNNER_TEMP, so scripts that check those paths for containment fail only
+ * locally. Its artifact server also rejects actions/upload-artifact v7.
  */
 export function actDifferenceHints(log: string): string[] {
+  const hints: string[] = [];
   const m = /\S*act[\\/]workflow[\\/](?:outputcmd\.txt|envs\.txt|pathcmd\.txt|statecmd\.txt|SUMMARY\.md)\b/.exec(log);
-  if (!m) return [];
-  return [
-    `the failure mentions ${m[0]}: act keeps GITHUB_OUTPUT/GITHUB_ENV/GITHUB_PATH/GITHUB_STATE/GITHUB_STEP_SUMMARY there, outside RUNNER_TEMP, while GitHub keeps them under RUNNER_TEMP. A check that these paths lie inside RUNNER_TEMP or GITHUB_WORKSPACE fails only locally; skip it when env.ACT is set`,
-  ];
+  if (m) {
+    hints.push(
+      `the failure mentions ${m[0]}: stock act keeps GITHUB_OUTPUT/GITHUB_ENV/GITHUB_PATH/GITHUB_STATE/GITHUB_STEP_SUMMARY there, outside RUNNER_TEMP, while GitHub keeps them under RUNNER_TEMP. A check that these paths lie inside RUNNER_TEMP or GITHUB_WORKSPACE fails only locally; osmatrix's patched act (the default, unless act_path or act_version is set) fixes this, or skip the check when env.ACT is set`,
+    );
+  }
+  if (/unknown field \\?"mime_type\\?"|Failed to CreateArtifact/.test(log)) {
+    hints.push(
+      "the failure comes from stock act's artifact server, which rejects actions/upload-artifact v7 and later; it passes on GitHub. osmatrix's patched act (the default, unless act_path or act_version is set) fixes this",
+    );
+  }
+  return hints;
+}
+
+const GUEST_BIN_DIR = ".osmatrix/bin";
+const GUEST_ACT_STAMP = "act.sha256";
+
+/** Prints the guest's architecture, home directory and the sha256 stamp of its osmatrix act (when present), one per line. */
+export function guestActProbe(ep: Pick<Endpoint, "shell">): string {
+  if (ep.shell === "posix") {
+    return `uname -m; printf '%s\\n' "$HOME"; if [ -x "$HOME/${GUEST_BIN_DIR}/act" ]; then cat "$HOME/${GUEST_BIN_DIR}/${GUEST_ACT_STAMP}" 2>/dev/null; fi; true`;
+  }
+  // OSArchitecture is the OS's own, also from an emulated x64 shell on Windows on ARM.
+  return powershell(
+    ep,
+    `[Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString(); $HOME; $b = Join-Path $HOME '${GUEST_BIN_DIR.replace("/", "\\")}'; if (Test-Path -LiteralPath (Join-Path $b 'act.exe')) { Get-Content -Raw -LiteralPath (Join-Path $b '${GUEST_ACT_STAMP}') -ErrorAction SilentlyContinue }`,
+  );
+}
+
+export function parseGuestActProbe(os: OsFamily, stdout: string): { arch: string; target?: GoTarget; home: string; stamp?: string } {
+  const [arch = "", home = "", stamp] = stdout.split(/\r?\n/).map((l) => l.trim());
+  return { arch, target: targetFromArch(os, arch), home, stamp: stamp || undefined };
+}
+
+/** Where osmatrix keeps its act in a guest, as an absolute path for the guest's shell. */
+export function guestActPath(os: OsFamily, home: string): string {
+  return os === "windows" ? `${home.replace(/[\\/]+$/, "")}\\.osmatrix\\bin\\act.exe` : `${home.replace(/\/+$/, "")}/${GUEST_BIN_DIR}/act`;
+}
+
+/** The guest's copy is current when its stamp holds the local binary's sha256. */
+export function guestActCurrent(localSha256: string, stamp: string | undefined): boolean {
+  return !!stamp && stamp.trim().toLowerCase() === localSha256.toLowerCase();
+}
+
+/**
+ * The act command for a guest leg: osmatrix's patched build for the guest's OS and architecture, pushed
+ * into ~/.osmatrix/bin when the guest's copy differs. Guests can't build it themselves, so the host builds
+ * it. When the patched build isn't in use, the guest runs the act its provisioning put on PATH.
+ */
+async function guestAct(ep: Endpoint, os: OsFamily, note: (m: string) => void): Promise<{ command: string; patched: boolean; warning?: string }> {
+  const probe = parseGuestActProbe(os, (await sshExec(ep, guestActProbe(ep), { timeoutMs: 60_000 })).stdout);
+  if (!probe.target || !probe.home) {
+    return { command: "act", patched: false, warning: `couldn't tell this guest's architecture ("${probe.arch}"), so it runs its own act from PATH, which may be stock act` };
+  }
+  const p = await patchedActFor(probe.target, note);
+  if ("reason" in p) return { command: "act", patched: false, warning: p.reason };
+  const bin = guestActPath(os, probe.home);
+  if (guestActCurrent(p.sha256, probe.stamp)) {
+    note(`act ${p.version} is current in the guest (${bin})`);
+  } else {
+    note(`installing act ${p.version} (${probe.target}) in the guest at ${bin}`);
+    await sshPush(ep, p.path, GUEST_BIN_DIR, { timeoutMs: 10 * 60_000 });
+    // The stamp goes last, so an interrupted copy is pushed again next time.
+    await writeRemoteFile(ep, `${GUEST_BIN_DIR}/${GUEST_ACT_STAMP}`, p.sha256 + "\n");
+  }
+  return { command: bin, patched: true };
 }
 
 /** act's arguments for a Linux leg on the host's Docker. `artifactPath` is the run's store for its workflow. */

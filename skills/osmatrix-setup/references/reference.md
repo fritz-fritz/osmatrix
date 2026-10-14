@@ -17,7 +17,7 @@ Every command accepts `--json`. Exit code is non-zero on errors.
 | `env_screenshot` | `osmatrix screenshot <guest> -o shot.png` |
 | `env_input` | `osmatrix input <guest> [--click x,y] [--text "..."] [--keys enter ctrl+a]` |
 
-CLI-only: `osmatrix init` (config + ssh key + host check), `config`, `install-act`, `install-agents`, `setup-ssh <guest> --user u` (ssh guests only accepting passwords), `provision <guest> [--passwordless-sudo]` (re-run the macOS toolchain install; on Windows guests, install the MSVC Build Tools if they're missing), `destroy <guest> --yes`.
+CLI-only: `osmatrix init` (config + ssh key + host check), `config`, `install-act [--all-targets]` (build the patched act now instead of on the first `ci run`), `install-agents`, `setup-ssh <guest> --user u` (ssh guests only accepting passwords), `provision <guest> [--passwordless-sudo]` (re-run the macOS toolchain install; on Windows guests, install the MSVC Build Tools if they're missing), `destroy <guest> --yes`.
 
 ## Compatibility matrix
 
@@ -64,6 +64,8 @@ Linux: `~/.config/osmatrix/config.toml` · macOS: `~/Library/Preferences/osmatri
 ```toml
 max_vms = 2                      # VM guests running CI legs at the same time
 macos_eula_acknowledged = true   # required for dockur macOS on non-Apple hardware
+# act_path = "act"               # use your own act (a path, or a name on PATH) instead of osmatrix's patched build
+# act_version = "v0.2.88"        # a stock act release instead of the patched v0.2.89
 
 [guests.windows]
 memory = "12G"                   # min 4G; prefer env_configure, which checks the values
@@ -91,6 +93,7 @@ Labels decide which guest serves a `runs-on` label (globs, first match wins). Li
 
 ## Guest-side layout
 
-- Windows: user `osmatrix` (admin), sshd default shell `pwsh`, tools: Git (+bash), Node LTS, Python, PowerShell 7, act, VS 2022 Build Tools C++ workload with the Windows SDK (unless `msvc = false`). Provisioning log: `C:\OEM\provision.log`.
-- macOS: user `osmatrix` (admin, passwordless sudo, auto-login to the desktop), Xcode Command Line Tools, git, Node LTS, Python, act, jq; Homebrew on Apple Silicon only. `/Users/runner/hostedtoolcache` exists and belongs to that user, because the macOS packages `actions/setup-python` and the other `actions/*-versions` installers download install there, as on GitHub's runners (`ci_run` creates it before each macOS leg on guests set up without it). Password in the host's osmatrix data dir (`guests/<name>/credentials.json`).
-- Data dir (guest state, ssh key, credentials, logs, downloaded act): Linux `~/.local/share/osmatrix`.
+- Windows: user `osmatrix` (admin), sshd default shell `pwsh`, tools: Git (+bash), Node LTS, Python, PowerShell 7, act (stock; CI legs run osmatrix's patched act from `~/.osmatrix/bin`), VS 2022 Build Tools C++ workload with the Windows SDK (unless `msvc = false`). Provisioning log: `C:\OEM\provision.log`.
+- macOS: user `osmatrix` (admin, passwordless sudo, auto-login to the desktop), Xcode Command Line Tools, git, Node LTS, Python, act (stock; CI legs run osmatrix's patched act from `~/.osmatrix/bin`), jq; Homebrew on Apple Silicon only. `/Users/runner/hostedtoolcache` exists and belongs to that user, because the macOS packages `actions/setup-python` and the other `actions/*-versions` installers download install there, as on GitHub's runners (`ci_run` creates it before each macOS leg on guests set up without it). Password in the host's osmatrix data dir (`guests/<name>/credentials.json`).
+- Data dir (guest state, ssh key, credentials, logs, the act builds in `bin/`): Linux `~/.local/share/osmatrix`.
+- act: osmatrix builds act 0.2.89 with its patch (file commands under `RUNNER_TEMP`, artifact server that works with `upload-artifact` v7, Docker actions still get the file commands) from source in a pinned `golang` Docker image, for the host and the guests' platforms, the first time CI needs it. An `act` on PATH is not used unless `act_path` names it. Without Docker, osmatrix falls back to the stock release and warns. Guests' provisioned act (`C:\Program Files\act`, `/usr/local/bin/act`) is stock, and is only used when the patched build isn't.

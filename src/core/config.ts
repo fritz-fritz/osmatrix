@@ -49,7 +49,13 @@ export interface Config {
   max_vms: number;
   /** Required to run macOS guests on non-Apple hardware (dockur backend). */
   macos_eula_acknowledged: boolean;
+  /**
+   * act release. The default (PATCHED_ACT_VERSION in act.ts) runs osmatrix's patched build of it; another
+   * version downloads that stock release.
+   */
   act_version: string;
+  /** The user's own act: a path, or a command name looked up on PATH ("act"). Unset: osmatrix's act. */
+  act_path?: string;
   /** Image used for ubuntu-* legs run by act on the host. */
   act_linux_image: string;
   guests: Record<string, GuestConfig>;
@@ -150,7 +156,7 @@ export function loadConfig(file = paths.configFile): Config {
 }
 
 export function mergeConfig(cfg: Config, raw: Record<string, unknown>): Config {
-  for (const k of ["max_vms", "macos_eula_acknowledged", "act_version", "act_linux_image"] as const) {
+  for (const k of ["max_vms", "macos_eula_acknowledged", "act_version", "act_path", "act_linux_image"] as const) {
     if (raw[k] !== undefined) (cfg as unknown as Record<string, unknown>)[k] = raw[k];
   }
   const guests = (raw.guests ?? {}) as Record<string, Partial<GuestConfig> & { enabled?: boolean }>;
