@@ -10,7 +10,9 @@ import { acquireLocks } from "../core/locks.ts";
 import { dockerReach, selinuxEnforcing } from "../core/nesting.ts";
 import { cliEntry, ensureDir } from "../core/paths.ts";
 import { isAlive, spawnDetached } from "../core/proc.ts";
-import { commandLine, freePort, push as sshPush, quoteFor, sshArgs, sshBin, sshExec, withCwd, type Endpoint } from "../core/ssh.ts";
+import { commandLine, freePort, powershell, push as sshPush, quoteFor, sshArgs, sshBin, sshExec, withCwd, type Endpoint } from "../core/ssh.ts";
+
+export { powershell };
 import { getGuest, readyEndpoint, waitReady } from "../env.ts";
 import { plan as makePlan, msvcHint, setDefaultRunShell, type Leg, type Plan, type PlanFilter } from "./plan.ts";
 
@@ -459,15 +461,6 @@ async function checkMsvc(ep: Endpoint, cfg: GuestConfig, leg: Leg, r: LegResult,
   const w = msvcHint(cfg, leg.msvcUses!, `guest ${cfg.name} can't build with them: ${missing}`);
   r.warnings.push(w);
   log.write(`[osmatrix] warning: ${w}\n`);
-}
-
-/**
- * A PowerShell script as a command for a Windows endpoint. Guests whose ssh shell is cmd get Windows
- * PowerShell with the script encoded, which sidesteps cmd's quoting.
- */
-export function powershell(ep: Pick<Endpoint, "shell">, script: string): string {
-  if (ep.shell === "pwsh") return script;
-  return `powershell -NoProfile -NonInteractive -EncodedCommand ${Buffer.from(script, "utf16le").toString("base64")}`;
 }
 
 async function writeRemoteFile(ep: Endpoint, dir: string, name: string, content: string) {

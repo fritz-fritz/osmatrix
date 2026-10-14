@@ -8,6 +8,7 @@ import { kill, sleep } from "./core/proc.ts";
 import {
   ensureKey,
   freePort,
+  powershell,
   quotePosix,
   quotePwsh,
   pull as sshPull,
@@ -479,17 +480,15 @@ async function provisionWindows(g: Guest): Promise<{ guest: string; exitCode: nu
   if (!guestMsvc(g.cfg)) throw new Error(`${name} has msvc = false; remove it from [guests.${name}] in config.toml to install the MSVC Build Tools`);
   const script = fs.readFileSync(path.join(assetsDir, "oem", "windows", "msvc.ps1"), "utf8");
   const ep = await readyEndpoint(name);
-  // Guests whose ssh shell is cmd get Windows PowerShell with the script encoded (no cmd quoting).
-  const ps = (s: string) => (ep.shell === "pwsh" ? s : `powershell -NoProfile -NonInteractive -EncodedCommand ${Buffer.from(s, "utf16le").toString("base64")}`);
   const file = "$f = Join-Path $env:TEMP 'osmatrix-msvc.ps1'";
   // base64: PowerShell reads stdin in the console's code page.
-  const up = await sshExec(ep, ps(`${file}; [IO.File]::WriteAllBytes($f, [Convert]::FromBase64String([Console]::In.ReadToEnd()))`), {
+  const up = await sshExec(ep, powershell(ep, `${file}; [IO.File]::WriteAllBytes($f, [Convert]::FromBase64String([Console]::In.ReadToEnd()))`), {
     input: Buffer.from(script, "utf8").toString("base64"),
     timeoutMs: 60_000,
   });
   if (up.code !== 0) throw new Error(`failed to copy provisioning script: ${up.stderr}`);
   const { spawnSync } = await import("node:child_process");
-  const cmd = ps(`${file}; powershell.exe -NoProfile -ExecutionPolicy Bypass -File $f; $c = $LASTEXITCODE; Remove-Item -Force $f; exit $c`);
+  const cmd = powershell(ep, `${file}; powershell.exe -NoProfile -ExecutionPolicy Bypass -File $f; $c = $LASTEXITCODE; Remove-Item -Force $f; exit $c`);
   const r = spawnSync(sshBin(), [...sshArgs(ep, ["-T"]), cmd], { stdio: "inherit" });
   const exitCode = r.status ?? 1;
   return exitCode === 0
