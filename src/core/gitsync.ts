@@ -41,7 +41,7 @@ export interface Snapshot {
   head?: string;
   /** The branch HEAD is on (refs/heads/...), unset when detached. */
   branch?: string;
-  /** Lightweight tags pointing at head; act prefers a tag over the branch for GITHUB_REF. */
+  /** Tags pointing at head (lightweight or annotated); act prefers a tag over the branch for GITHUB_REF. */
   tags: string[];
   /** remote.origin.url; act derives GITHUB_REPOSITORY from it. */
   origin?: string;
@@ -213,11 +213,10 @@ async function snapshotInto(dir: string, cache: string, tmp: string, prefix: str
   }
   const parents = [head, indexCommit].filter((p): p is string => !!p).flatMap((p) => ["-p", p]);
   const commit = (await git(dir, ["commit-tree", "--no-gpg-sign", tree, ...parents, "-m", "osmatrix snapshot of the work tree"], { env })).trim();
+  // Annotated tags too (--points-at peels them): act counts both when it picks GITHUB_REF. The guest gets
+  // them as lightweight tags on the same commit, since the bundle carries no tag objects.
   const tags = head
-    ? (await git(dir, ["for-each-ref", "--points-at", head, "--format=%(objecttype) %(refname)", "refs/tags"]))
-        .split("\n")
-        .filter((l) => l.startsWith("commit "))
-        .map((l) => l.slice("commit ".length))
+    ? (await git(dir, ["for-each-ref", "--points-at", head, "--format=%(refname)", "refs/tags"])).split("\n").filter(Boolean)
     : [];
   const origin = (await gitRun(dir, ["config", "--get", "remote.origin.url"])).stdout.trim() || undefined;
   await git(cache, ["--git-dir", cache, "update-ref", SNAPSHOT_REF, commit]);

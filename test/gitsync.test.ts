@@ -90,6 +90,7 @@ test("the guest checkout follows the guest's Git config and matches the host's s
   commit(repo, "first");
   git(repo, ["switch", "-q", "-c", "feature"]);
   git(repo, ["tag", "v1"]);
+  git(repo, ["-c", "user.name=t", "-c", "user.email=t@example.com", "tag", "-a", "release", "-m", "annotated"]);
   git(repo, ["remote", "add", "origin", "https://github.com/acme/widget.git"]);
   fs.writeFileSync(path.join(repo, "mod.txt"), "after\n");
   fs.writeFileSync(path.join(repo, "new.bin"), Buffer.alloc(3 * 1024 * 1024, 7));
@@ -104,7 +105,8 @@ test("the guest checkout follows the guest's Git config and matches the host's s
     assert.equal(snap.dir, snapshotCache(repo, "g"));
     assert.equal(snap.head, head);
     assert.equal(snap.branch, "refs/heads/feature");
-    assert.deepEqual(snap.tags, ["refs/tags/v1"]);
+    // Annotated tags count too: act picks GITHUB_REF from either kind.
+    assert.deepEqual(snap.tags, ["refs/tags/release", "refs/tags/v1"]);
     assert.equal(snap.origin, "https://github.com/acme/widget.git");
     // The user's index, refs and object store are untouched: the untracked file's blob isn't in it.
     assert.deepEqual(fs.readFileSync(path.join(repo, ".git", "index")), indexBefore);
@@ -134,6 +136,7 @@ test("the guest checkout follows the guest's Git config and matches the host's s
     assert.equal(g(guest, "rev-parse", "HEAD").trim(), head);
     assert.equal(g(guest, "symbolic-ref", "HEAD").trim(), "refs/heads/feature");
     assert.equal(g(guest, "rev-parse", "refs/tags/v1").trim(), head);
+    assert.equal(g(guest, "rev-parse", "refs/tags/release^{commit}").trim(), head);
     assert.equal(g(home, "--git-dir", path.join(home, ".osmatrix-cache", "basic.git"), "rev-parse", HEAD_REF).trim(), head);
     assert.equal(g(guest, "config", "remote.origin.url").trim(), "https://github.com/acme/widget.git");
     // Same changes as on the host: CRLF files of unchanged content aren't modified, ignored ones stay out.
