@@ -2,7 +2,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import net from "node:net";
 import path from "node:path";
-import { guestShell, type GuestConfig } from "../core/config.ts";
+import { guestShell, windowsOemOptions, type GuestConfig } from "../core/config.ts";
 import { assetsDir, ensureDir, paths } from "../core/paths.ts";
 import { isAlive, kill, run, sleep, spawnDetached, which } from "../core/proc.ts";
 import { canBind, ensureKey, freePort, sshProbe, type Endpoint } from "../core/ssh.ts";
@@ -206,6 +206,7 @@ export class QemuBackend implements Backend {
     for (const f of fs.readdirSync(path.join(assetsDir, "oem", "windows"))) fs.copyFileSync(path.join(assetsDir, "oem", "windows", f), path.join(oem, f));
     const { publicKey } = await ensureKey();
     fs.writeFileSync(path.join(oem, "authorized_keys"), publicKey + "\r\n");
+    fs.writeFileSync(path.join(oem, "options.json"), JSON.stringify(windowsOemOptions(this.cfg)));
     const prep = path.join(this.dir, "prep.sh");
     fs.copyFileSync(path.join(assetsDir, "qemu", "prep.sh"), prep);
     const c = this.credentials();

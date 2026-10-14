@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
 import YAML from "yaml";
-import { expandMatrix, plan, setDefaultRunShell, substitute } from "../src/ci/plan.ts";
+import { expandMatrix, msvcHint, msvcUses, plan, runCommands, setDefaultRunShell, substitute } from "../src/ci/plan.ts";
 import { defaultConfig, mergeConfig } from "../src/core/config.ts";
 
 test("expandMatrix: cartesian product", () => {
@@ -395,4 +395,112 @@ jobs:
   assert.deepEqual(ship.linuxNeeds, []);
   assert.deepEqual(ship.waitsFor, ["build-ubuntu-latest", "build-windows-latest"]);
   assert.ok(ship.warnings.some((w) => w.includes(`needs "build" runs on linux/windows; it runs once, as its own legs`)));
+});
+
+test("msvcUses finds Rust and C/C++ toolchain steps", () => {
+  assert.deepEqual(
+    msvcUses({
+      steps: [
+        { uses: "actions/checkout@v4" },
+        { uses: "dtolnay/rust-toolchain@stable" },
+        { uses: "Swatinem/rust-cache@v2" },
+        { run: "cargo build --release" },
+      ],
+    }),
+    ["dtolnay/rust-toolchain", "run: cargo"],
+  );
+  assert.deepEqual(msvcUses({ steps: [{ uses: "actions-rust-lang/setup-rust-toolchain@9d7e65c3" }] }), ["actions-rust-lang/setup-rust-toolchain"]);
+  assert.deepEqual(msvcUses({ steps: [{ uses: "ilammy/msvc-dev-cmd@v1" }, { uses: "microsoft/setup-msbuild@v2" }] }), [
+    "ilammy/msvc-dev-cmd",
+    "microsoft/setup-msbuild",
+  ]);
+  assert.deepEqual(msvcUses({ steps: [{ run: "npm ci\nrustup target add wasm32-unknown-unknown" }] }), ["run: rustup"]);
+  // Not commands: paths, other words, other actions.
+  assert.deepEqual(msvcUses({ steps: [{ run: 'echo "$HOME/.cargo/bin" >> $GITHUB_PATH' }, { run: "npm run cargo-cult" }, { uses: "actions/setup-node@v4" }] }), []);
+  assert.deepEqual(msvcUses({}), []);
+  // Every actions-rs action, reported by name.
+  assert.deepEqual(msvcUses({ steps: [{ uses: "actions-rs/clippy-check@v1" }, { uses: "actions-rs/toolchain@v1" }] }), [
+    "actions-rs/clippy-check",
+    "actions-rs/toolchain",
+  ]);
+});
+
+test("runCommands finds commands only in command position", () => {
+  assert.deepEqual(runCommands("cargo build"), ["cargo"]);
+  // Arguments are not commands.
+  assert.ok(!runCommands("echo cargo build").includes("cargo"));
+  assert.ok(!runCommands("npm run cargo").includes("cargo"));
+  // Windows looks commands up case-insensitively; paths and .exe are stripped.
+  assert.deepEqual(runCommands("Cargo build"), ["cargo"]);
+  assert.deepEqual(runCommands('"$HOME/.cargo/bin/cargo" test'), ["cargo"]);
+  assert.deepEqual(runCommands("C:\\Users\\me\\.cargo\\bin\\rustup.exe show"), ["rustup"]);
+  // Separators and wrappers.
+  assert.deepEqual(runCommands("npm ci && cargo test || rustup show; echo done | tee x"), ["npm", "cargo", "rustup", "echo", "tee"]);
+  assert.deepEqual(runCommands("(cd crate; cargo fmt --check)"), ["cd", "cargo"]);
+  assert.deepEqual(runCommands("sudo -E cargo install x"), ["cargo"]);
+  assert.deepEqual(runCommands("time cargo build"), ["cargo"]);
+  assert.deepEqual(runCommands("env RUSTFLAGS=-Dwarnings CARGO_INCREMENTAL=0 cargo build"), ["cargo"]);
+  assert.deepEqual(runCommands("RUSTFLAGS=-Dwarnings cargo build"), ["cargo"]);
+  assert.deepEqual(runCommands("& cargo build"), ["cargo"]);
+  assert.deepEqual(runCommands("# cargo build\n  \nnpm test"), ["npm"]);
+});
+
+test("plan adds MSVC uses of the needed jobs act runs in the Windows guest, not of replayed ones", () => {
+  const repo = tmpRepo(`
+on: push
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps: [{ run: cargo clippy }]
+  gpu:
+    runs-on: [self-hosted, gpu]
+    steps: [{ run: cargo build }]
+  win:
+    needs: [lint, gpu]
+    runs-on: windows-latest
+    steps: [{ run: npm test }]
+`);
+  const optedOut = mergeConfig(defaultConfig(), { guests: { windows: { os: "windows", backend: "dockur", msvc: false } } });
+  const win = plan(repo, optedOut, { job: "win" }).legs.find((l) => l.job === "win")!;
+  // lint runs once on its own Linux leg and is replayed; gpu has no local target, so act runs it in the guest.
+  assert.deepEqual(win.replayNeeds, ["lint"]);
+  assert.deepEqual(win.inlineNeeds, ["gpu"]);
+  assert.deepEqual(win.msvcUses, ["run: cargo (needs: gpu)"]);
+  assert.ok(win.warnings.some((w) => /run: cargo \(needs: gpu\).*msvc = false/.test(w)));
+  // A Linux leg never needs MSVC, even with Rust steps.
+  assert.equal(plan(repo, optedOut, { job: "lint" }).legs.find((l) => l.job === "lint")!.msvcUses, undefined);
+});
+
+const rustWorkflow = `
+on: push
+jobs:
+  build:
+    runs-on: \${{ matrix.os }}
+    strategy: { matrix: { os: [ubuntu-latest, windows-latest] } }
+    steps:
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test
+`;
+
+test("plan marks Windows legs that need MSVC and warns when the guest opted out", () => {
+  const repo = tmpRepo(rustWorkflow);
+  const legs = Object.fromEntries(plan(repo, linuxCfg()).legs.map((l) => [l.id, l]));
+  // Only Windows legs need MSVC; with the default (msvc on) the check waits until the leg runs.
+  assert.equal(legs["build-ubuntu-latest"].msvcUses, undefined);
+  assert.deepEqual(legs["build-windows-latest"].msvcUses, ["dtolnay/rust-toolchain", "run: cargo"]);
+  assert.ok(!legs["build-windows-latest"].warnings.some((w) => /MSVC/.test(w)));
+
+  const optedOut = mergeConfig(defaultConfig(), { guests: { windows: { os: "windows", backend: "dockur", msvc: false } } });
+  const w = plan(repo, optedOut, { only: ["windows"] }).legs[0].warnings.join("\n");
+  assert.match(w, /dtolnay\/rust-toolchain, run: cargo/);
+  assert.match(w, /msvc = false/);
+  assert.match(w, /osmatrix provision windows/);
+  assert.match(w, /osmatrix snapshot windows/);
+});
+
+test("msvcHint tells how to install the tools", () => {
+  const h = msvcHint({ name: "win" }, ["run: cargo"], "guest win has none");
+  assert.match(h, /run `osmatrix provision win`/);
+  assert.doesNotMatch(h, /remove msvc = false/);
+  assert.match(msvcHint({ name: "win", msvc: false }, ["run: cargo"], "x"), /remove msvc = false from \[guests\.win\]/);
 });
