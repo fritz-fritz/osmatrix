@@ -11,7 +11,7 @@ osmatrix has no telemetry or analytics and does not independently transmit your 
 ## What osmatrix stores, on your machine
 
 - **Configuration:** `config.toml` in your user config directory (on Linux, `~/.config/osmatrix`).
-- **Data:** guest state, an SSH key generated for your guests, generated guest passwords (`credentials.json`), logs, a downloaded `act` binary and the cached Rust version of GitHub's runner image (`runner-image.json`), in your user data directory (on Linux, `~/.local/share/osmatrix`).
+- **Data:** guest state, an SSH key generated for your guests, generated guest passwords (`credentials.json`), compatibility report drafts (`reports/`), logs, a downloaded `act` binary and the cached Rust version of GitHub's runner image (`runner-image.json`), in your user data directory (on Linux, `~/.local/share/osmatrix`).
 - **Guest disks and snapshots:** in local Docker volumes or tart VMs.
 - **CI run logs:** in `.osmatrix/runs/` inside each repository you test. That directory is git-ignored automatically.
 
@@ -19,7 +19,7 @@ You can delete all of it at any time: `osmatrix destroy <guest> --yes` for each 
 
 ## Network access
 
-osmatrix connects to the network only to fetch software that you ask it to set up:
+osmatrix connects to the network to fetch software that you ask it to set up, and to file a compatibility report when you agree to one:
 
 - `act` releases from GitHub
 - the release list and readme of GitHub's runner images (actions/runner-images; a successful lookup is reused for 24 hours, a failed one is retried after 15 minutes), to match the Linux CI image's Rust version, and Rust from rustup.rs
@@ -28,6 +28,7 @@ osmatrix connects to the network only to fetch software that you ask it to set u
 - macOS recovery and installer images from Apple
 - guest toolchains from their publishers: Node.js (nodejs.org), Python (python.org), Git for Windows and PowerShell (GitHub), Homebrew and its packages for macOS guests (GitHub and ghcr.io), and the Homebrew version of GitHub's runner images (actions/runner-images on GitHub) for Apple Silicon macOS guests
 - the osmatrix package itself from npm, when started through `npx`
+- GitHub, through your own `gh` login, only when you agree to file a compatibility report (`osmatrix report-file`): it looks for an open report with the same title, then adds a comment or opens an issue with the report you were shown
 
 Each of those services handles requests under its own privacy policy. The commands and CI workflow steps that you, or an AI agent acting for you, run inside guests may contact other services; osmatrix does not inspect or restrict them.
 

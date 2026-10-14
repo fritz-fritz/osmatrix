@@ -180,12 +180,14 @@ program
   .description("Copy a file/dir into the guest (default dest: work/<basename>; respects .gitignore)")
   .option("--clean", "delete the remote directory first")
   .option("--all", "ignore .gitignore")
-  .action(action((g: string, l: string, r: string | undefined, o: { clean?: boolean; all?: boolean }) => env.push(g, l, r, o)));
+  .option("--allow-sensitive", "allow the home directory, credential stores (~/.ssh, ~/.aws, …) or osmatrix's data dir")
+  .action(action((g: string, l: string, r: string | undefined, o: { clean?: boolean; all?: boolean; allowSensitive?: boolean }) => env.push(g, l, r, o)));
 
 program
   .command("pull <guest> <remotePath> [localDir]")
   .description("Copy a file/dir from the guest to the host")
-  .action(action((g: string, r: string, l?: string) => env.pull(g, r, l)));
+  .option("--allow-sensitive", "allow the home directory itself, a credential store or osmatrix's data dir as the destination")
+  .action(action((g: string, r: string, l: string | undefined, o: { allowSensitive?: boolean }) => env.pull(g, r, l, o)));
 
 program
   .command("forward <guest> <spec>")
@@ -241,7 +243,7 @@ program
 
 program
   .command("report <guest>")
-  .description("Build a compatibility report for a GitHub issue (prints it and a prefilled issue link; sends nothing)")
+  .description("Build a compatibility report for a GitHub issue (prints it, a prefilled issue link and a draft for report-file; sends nothing)")
   .addOption(new Option("--outcome <outcome>", "how it went").choices(["works", "partly", "fails"]).makeOptionMandatory())
   .option("--notes <text>", "what worked or failed, and at which step")
   .action(
@@ -249,6 +251,16 @@ program
       const { compatReport } = await import("./report.ts");
       const outcome = ({ works: "Works", partly: "Partly works", fails: "Doesn't work" } as const)[o.outcome as "works" | "partly" | "fails"];
       return compatReport(g, { outcome, notes: o.notes });
+    }),
+  );
+
+program
+  .command("report-file <draft>")
+  .description("File a report draft from `osmatrix report` on GitHub with gh, after the user agreed (comments on an open report with the same title instead of duplicating it)")
+  .action(
+    action(async (draft: string) => {
+      const { fileReport } = await import("./report.ts");
+      return fileReport(draft);
     }),
   );
 

@@ -4,7 +4,8 @@ import path from "node:path";
 import YAML from "yaml";
 import { ISSUES_URL, compatibility, differsFromMatrix, hostKind, type Outcome } from "./core/compat.ts";
 import { doctor } from "./core/host.ts";
-import { pkgRoot } from "./core/paths.ts";
+import { ensureDir, paths, pkgRoot } from "./core/paths.ts";
+import { run, which, type RunResult } from "./core/proc.ts";
 import { getGuest } from "./env.ts";
 
 export type { Outcome } from "./core/compat.ts";
@@ -19,8 +20,11 @@ export interface Report {
   labels: string[];
   /** New-issue link with the compatibility form prefilled (no account token involved). */
   url: string;
-  /** Equivalent `gh` command; write `body` to the file first. */
-  gh: string;
+  /**
+   * The saved draft: `osmatrix report-file <draft>` (MCP: host_report_file) files exactly this title and
+   * body once the user agrees.
+   */
+  draft: string;
   compatibility: string;
   /**
    * True when this outcome is news relative to the compatibility matrix. Only then offer the report
@@ -143,13 +147,78 @@ export async function compatReport(guest: string, opts: { outcome: Outcome; note
   for (let keep = details.length; !fits() && keep > 0; keep -= 200) {
     params.set("details", details.slice(0, Math.max(0, keep - 200)) + `\n\n… (shortened; paste the full report)\n\n${DISCLOSURE}`);
   }
+  const url = `${ISSUES_URL}/new?${params}`;
+  const draft = saveDraft(guest, { title, body, url });
   return {
     title,
     body,
     labels: ["compatibility"],
-    url: `${ISSUES_URL}/new?${params}`,
-    gh: `gh issue create --repo fritz-fritz/osmatrix --label compatibility --title ${JSON.stringify(title)} --body-file <file with body>`,
+    url,
+    draft,
     compatibility: compat,
     differsFromMatrix: differsFromMatrix(compat, opts.outcome),
   };
+}
+
+// ---------- filing ----------
+
+const REPO = "fritz-fritz/osmatrix";
+const LABEL = "compatibility";
+
+/** What a draft holds: exactly what the user was shown. */
+interface Draft {
+  title: string;
+  body: string;
+  url: string;
+}
+
+const draftsDir = () => path.join(paths.dataDir, "reports");
+
+function saveDraft(guest: string, d: Draft): string {
+  const file = path.join(ensureDir(draftsDir()), `${guest.replace(/[^\w.-]/g, "_")}-${Date.now()}.json`);
+  fs.writeFileSync(file, JSON.stringify(d, null, 2));
+  return file;
+}
+
+/** A draft written by compatReport, and only that: the path must lie in osmatrix's reports directory. */
+export function readDraft(file: string, dir = draftsDir()): Draft {
+  const abs = path.resolve(file);
+  if (path.dirname(abs) !== path.resolve(dir) || !abs.endsWith(".json")) {
+    throw new Error(`${file} is not a report draft (drafts are saved in ${dir} by \`osmatrix report\`)`);
+  }
+  const d = JSON.parse(fs.readFileSync(abs, "utf8")) as Partial<Draft>;
+  if (typeof d.title !== "string" || typeof d.body !== "string" || !d.title.startsWith("Compatibility: ")) {
+    throw new Error(`${file} is not a compatibility report draft`);
+  }
+  return { title: d.title, body: d.body, url: typeof d.url === "string" ? d.url : `${ISSUES_URL}/new` };
+}
+
+export type Gh = (args: string[], input?: string) => Promise<RunResult>;
+const ghCli: Gh = (args, input) => run("gh", args, { input, timeoutMs: 60_000 });
+
+/**
+ * File a saved draft on GitHub with `gh`, as the user agreed: a comment on the open report with the same
+ * title (same host row, guest and outcome) when there is one, else a new issue. Only issue numbers and
+ * titles are read for the match, and only the number and URL come back: other people's issue text
+ * never reaches the agent.
+ */
+export async function fileReport(file: string, opts: { gh?: Gh; dir?: string } = {}): Promise<{ action: "created" | "commented"; number?: number; url: string }> {
+  const d = readDraft(file, opts.dir);
+  const gh = opts.gh ?? (which("gh") ? ghCli : undefined);
+  if (!gh) throw new Error(`gh isn't installed; the user can file the report from this prefilled link instead: ${d.url}`);
+  const fail = (what: string, r: RunResult) =>
+    new Error(`${what} failed (${(r.stderr || r.stdout).trim().split("\n")[0] || `exit ${r.code}`}); the user can file the report from this prefilled link instead: ${d.url}`);
+  const list = await gh(["issue", "list", "--repo", REPO, "--label", LABEL, "--state", "open", "--search", `"${d.title}" in:title`, "--json", "number,title,url", "--limit", "50"]);
+  if (list.code !== 0) throw fail("gh issue list", list);
+  const same = (JSON.parse(list.stdout || "[]") as { number: number; title: string; url: string }[]).find((i) => i.title === d.title);
+  if (same) {
+    const r = await gh(["issue", "comment", String(same.number), "--repo", REPO, "--body-file", "-"], d.body);
+    if (r.code !== 0) throw fail("gh issue comment", r);
+    return { action: "commented", number: same.number, url: r.stdout.trim() || same.url };
+  }
+  const r = await gh(["issue", "create", "--repo", REPO, "--label", LABEL, "--title", d.title, "--body-file", "-"], d.body);
+  if (r.code !== 0) throw fail("gh issue create", r);
+  const url = r.stdout.trim().split("\n").pop() ?? "";
+  const n = /\/issues\/(\d+)$/.exec(url)?.[1];
+  return { action: "created", ...(n ? { number: Number(n) } : {}), url };
 }

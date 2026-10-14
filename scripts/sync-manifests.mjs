@@ -1,8 +1,8 @@
 #!/usr/bin/env node
-// Stamp package.json's version into every plugin manifest, pin the MCP command to the current major
-// version, and check that every logo a manifest references exists in assets/.
+// Stamp package.json's version into every plugin manifest and the skills' npx fallback, pin the MCP
+// command to the current major version, and check that every logo a manifest references exists in assets/.
 // `--check` verifies instead of writing (CI fails on drift).
-import { access, readFile, writeFile } from "node:fs/promises";
+import { access, readdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -40,6 +40,19 @@ for (const m of mcpFiles) {
   const next = text.replace(/osmatrix@[^"]*/g, pin);
   if (next === text) continue;
   if (check) problems.push(`mcp pin: ${m} should run ${pin}`);
+  else await writeFile(file, next);
+}
+
+// Skills offer `npx osmatrix@<version>` when the CLI isn't installed: an exact version, so what the
+// user agrees to run is the release the skill was written for.
+const skillPin = `osmatrix@${version}`;
+for (const name of await readdir(join(root, "skills"))) {
+  const file = join(root, "skills", name, "SKILL.md");
+  const text = await readFile(file, "utf8").catch(() => undefined);
+  if (text === undefined) continue;
+  const next = text.replace(/(npx|npm i -g) osmatrix@[0-9A-Za-z.+-]+/g, (_m, cmd) => `${cmd} ${skillPin}`);
+  if (next === text) continue;
+  if (check) problems.push(`skill pin: skills/${name}/SKILL.md should offer ${skillPin}`);
   else await writeFile(file, next);
 }
 

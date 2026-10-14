@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { backendFor, type Backend, type GuestStatus } from "./backends/index.ts";
 import { guestArm64Brew, guestHomebrew, guestMsvc, guestWorkdir, homebrewProvisionEnv, loadConfig, readRawConfig, writeConfig, type GuestConfig } from "./core/config.ts";
@@ -307,10 +308,50 @@ export async function spawnBackground(name: string, command: string, opts: { cwd
   return { guest: name, pid, log: m[2].trim(), stop };
 }
 
-export async function push(name: string, localPath: string, remoteDir?: string, opts: { clean?: boolean; all?: boolean } = {}) {
+// ---------- host paths that stay on the host ----------
+
+/** Under the home directory: keys, tokens and credential stores that a guest has no business seeing. */
+const SECRET_DIRS = [
+  ".ssh", ".gnupg", ".aws", ".azure", ".kube", ".docker", ".config/gcloud", ".config/gh", ".password-store",
+  "Library/Keychains", ".netrc", ".npmrc", ".pypirc", ".git-credentials",
+];
+
+/**
+ * Why `p` shouldn't be copied to or from a guest (undefined when it's fine): the home directory or a
+ * directory containing it (they hold everything below), a credential store, or osmatrix's own data and
+ * config (its ssh key and guest passwords). Guests are other machines; a pulled tree could also
+ * overwrite dotfiles. Symlinks are resolved first.
+ */
+export function sensitiveHostPath(p: string, home = os.homedir(), own = [paths.dataDir, paths.configDir]): string | undefined {
+  const real = (q: string) => {
+    try {
+      return fs.realpathSync(q);
+    } catch {
+      return path.resolve(q);
+    }
+  };
+  const abs = real(p);
+  const inside = (dir: string) => abs === dir || abs.startsWith(dir.endsWith(path.sep) ? dir : dir + path.sep);
+  const contains = (dir: string) => dir === abs || dir.startsWith(abs.endsWith(path.sep) ? abs : abs + path.sep);
+  const h = real(home);
+  if (contains(h)) return `${abs} is your home directory or contains it`;
+  for (const d of SECRET_DIRS.map((x) => path.join(h, x))) {
+    if (inside(d)) return `${abs === d ? abs : `${abs} is in ${d}, which`} holds credentials`;
+  }
+  for (const d of own.map(real)) if (inside(d) || contains(d)) return `${abs} holds osmatrix's own data (its ssh key and guest passwords)`;
+  return undefined;
+}
+
+function assertNotSensitive(p: string, allow: boolean | undefined, what: string) {
+  const why = allow ? undefined : sensitiveHostPath(p);
+  if (why) throw new Error(`refusing to ${what}: ${why}. If the user explicitly asked for this path, pass allow_sensitive (CLI: --allow-sensitive)`);
+}
+
+export async function push(name: string, localPath: string, remoteDir?: string, opts: { clean?: boolean; all?: boolean; allowSensitive?: boolean } = {}) {
   const g = getGuest(name);
-  const ep = await readyEndpoint(name);
   const abs = path.resolve(localPath);
+  assertNotSensitive(abs, opts.allowSensitive, "copy it into a guest");
+  const ep = await readyEndpoint(name);
   const dest = remoteDir ?? `${guestWorkdir(g.cfg)}/${path.basename(abs)}`;
   const r = await sshPush(ep, abs, fs.statSync(abs).isDirectory() ? dest : remoteDir ?? guestWorkdir(g.cfg), {
     clean: opts.clean,
@@ -319,9 +360,10 @@ export async function push(name: string, localPath: string, remoteDir?: string, 
   return { guest: name, local: abs, remote: dest, files: r.files };
 }
 
-export async function pull(name: string, remotePath: string, localDir = ".") {
-  const ep = await readyEndpoint(name);
+export async function pull(name: string, remotePath: string, localDir = ".", opts: { allowSensitive?: boolean } = {}) {
   const abs = path.resolve(localDir);
+  assertNotSensitive(abs, opts.allowSensitive, "write guest files there");
+  const ep = await readyEndpoint(name);
   await sshPull(ep, remotePath, abs);
   return { guest: name, remote: remotePath, local: abs };
 }
