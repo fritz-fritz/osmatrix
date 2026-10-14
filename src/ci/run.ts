@@ -4,6 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 import YAML from "yaml";
 import { DockurBackend } from "../backends/dockur.ts";
+import { ensureLinuxImage } from "../backends/linux-image.ts";
 import { ensureAct, patchedActFor, targetFromArch, type GoTarget } from "../core/act.ts";
 import { guestMsvc, guestWorkdir, loadConfig, type Config, type GuestConfig, type OsFamily } from "../core/config.ts";
 import { acquireLocks } from "../core/locks.ts";
@@ -456,9 +457,11 @@ async function runLeg(repo: string, dir: string, cfg: Config, leg: Leg, sf: Stat
       patched = act.source === "patched";
       if (act.warning) r.warnings.push(act.warning);
       note(`act: ${act.source === "user" ? `${act.path} (act_path)` : `${act.version} (${act.source === "patched" ? "osmatrix's patched build" : "stock release"})`}`);
+      // The parity image is in no registry, so it's built here before act looks for it.
+      const image = await ensureLinuxImage(cfg.act_linux_image, { pid: process.pid, run: sf.s.id, repo, leg: leg.id }, (l) => log.write(l + "\n"));
       const labels = [...leg.runsOn, ...(leg.needsLabels ?? [])];
       const workflow = derived === undefined ? leg.workflow : writeDerivedCopy(dir, leg, derived, log);
-      const args = [event, ...commonActArgs(actLeg, workflow, sf.s.githubRunId), ...(await hostActArgs(cfg, dir, sf, labels, store, secretFile))];
+      const args = [event, ...commonActArgs(actLeg, workflow, sf.s.githubRunId), ...(await hostActArgs(image, dir, sf, labels, store, secretFile))];
       const reach = await dockerReach();
       if (reach && !reach.error && (!reach.files || !reach.loopback)) {
         // act copies the checkout into job containers, so legs still run; what can break is anything that
@@ -673,10 +676,13 @@ async function guestAct(ep: Endpoint, os: OsFamily, note: (m: string) => void): 
   return { command: bin, patched: true };
 }
 
-/** act's arguments for a Linux leg on the host's Docker. `artifactPath` is the run's store for its workflow. */
-async function hostActArgs(cfg: Config, dir: string, sf: StatusFile, labels: string[], artifactPath: string, secretFile?: string): Promise<string[]> {
+/**
+ * act's arguments for a Linux leg on the host's Docker, its runs-on labels mapped to `image` (see
+ * ensureLinuxImage). `artifactPath` is the run's store for its workflow.
+ */
+async function hostActArgs(image: string, dir: string, sf: StatusFile, labels: string[], artifactPath: string, secretFile?: string): Promise<string[]> {
   const args = ["--pull=false", "--rm", "--artifact-server-path", artifactPath];
-  for (const l of new Set(labels)) args.push("-P", `${l}=${cfg.act_linux_image}`);
+  for (const l of new Set(labels)) args.push("-P", `${l}=${image}`);
   // act mounts the Docker socket into job containers; SELinux (Fedora, openSUSE, RHEL) denies
   // that unless the container runs unconfined, which matches GitHub's runners.
   if (selinuxEnforcing()) args.push("--container-options", "--security-opt label=disable");

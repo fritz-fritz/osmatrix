@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import YAML from "yaml";
-import { guestMsvc, labelMatches, type Config, type GuestConfig } from "../core/config.ts";
+import { DEFAULT_LINUX_IMAGE, guestMsvc, labelMatches, type Config, type GuestConfig } from "../core/config.ts";
 
 export type Scalar = string | number | boolean | null;
 export type MatrixCombo = Record<string, unknown>;
@@ -206,17 +206,24 @@ export function runCommands(script: string): string[] {
   return out;
 }
 
+/**
+ * The entry of `actions` that a step's `uses:` names, ignoring case and the ref; for an "owner/" entry,
+ * the action itself (actions-rs/clippy-check).
+ */
+function matchAction(uses: string, actions: string[]): string | undefined {
+  const action = uses.split("@")[0].toLowerCase();
+  const hit = actions.find((a) => (a.endsWith("/") ? action.startsWith(a) : action === a || action.startsWith(`${a}/`)));
+  return hit && (hit.endsWith("/") ? action : hit);
+}
+
 /** The steps of a job that need the MSVC Build Tools on Windows, e.g. ["dtolnay/rust-toolchain", "run: cargo"]. */
 export function msvcUses(job: Record<string, unknown>): string[] {
   const found = new Set<string>();
   const steps = Array.isArray(job.steps) ? (job.steps as Record<string, unknown>[]) : [];
   for (const s of steps) {
     if (!s || typeof s !== "object") continue;
-    if (typeof s.uses === "string") {
-      const action = s.uses.split("@")[0].toLowerCase();
-      const hit = MSVC_ACTIONS.find((a) => (a.endsWith("/") ? action.startsWith(a) : action === a || action.startsWith(`${a}/`)));
-      if (hit) found.add(hit.endsWith("/") ? action : hit);
-    }
+    const action = typeof s.uses === "string" ? matchAction(s.uses, MSVC_ACTIONS) : undefined;
+    if (action) found.add(action);
     if (typeof s.run === "string") {
       for (const c of runCommands(s.run)) if (MSVC_COMMANDS.has(c)) found.add(`run: ${c}`);
     }
@@ -235,6 +242,30 @@ export function msvcHint(guest: Pick<GuestConfig, "name" | "msvc">, uses: string
     `Rust and C/C++ builds fail without them, typically with "link: extra operand" from the coreutils link.exe of Git for Windows. ` +
     `To install them (several GB, ~10-20 min), ${fix}, then \`osmatrix snapshot ${guest.name}\` (MCP: env_snapshot) to keep them in the golden snapshot`
   );
+}
+
+// ---------- Rust on Linux legs ----------
+
+/** Rust setup actions (an entry ending in "/" covers every action of that owner, as in MSVC_ACTIONS). */
+const RUST_ACTIONS = ["dtolnay/rust-toolchain", "actions-rust-lang/setup-rust-toolchain", "actions-rs/"];
+const RUST_COMMANDS = new Set(["rustup", "cargo", "rustc"]);
+
+/**
+ * Why a job looks like it relies on the Rust toolchain GitHub's ubuntu images preinstall (undefined when
+ * it doesn't): a Rust setup action, rustup/cargo/rustc run by a run: step (see runCommands), or the
+ * repo's toolchain file.
+ */
+export function rustUse(job: Record<string, unknown>, toolchainFile?: string): string | undefined {
+  const steps = Array.isArray(job.steps) ? (job.steps as Record<string, unknown>[]) : [];
+  for (const s of steps) {
+    const action = typeof s?.uses === "string" ? matchAction(s.uses, RUST_ACTIONS) : undefined;
+    if (action) return `the job uses ${action}`;
+  }
+  for (const s of steps) {
+    const cmd = typeof s?.run === "string" ? runCommands(s.run).find((c) => RUST_COMMANDS.has(c)) : undefined;
+    if (cmd) return `the job runs ${cmd}`;
+  }
+  return toolchainFile ? `the repo has ${toolchainFile}` : undefined;
 }
 
 // ---------- workflows ----------
@@ -265,6 +296,7 @@ export function plan(repo: string, cfg: Config, filter: PlanFilter = {}): Plan {
     if (!workflows.length) throw new Error(`workflow "${filter.workflow}" not found under .github/workflows`);
   }
   if (!workflows.length) warnings.push(`no workflows found in ${repo}/.github/workflows`);
+  const toolchainFile = ["rust-toolchain.toml", "rust-toolchain"].find((f) => fs.existsSync(path.join(repo, f)));
 
   const only = filter.only?.map((s) => s.toLowerCase());
   const onlyMatches = (l: Leg) => {
@@ -309,6 +341,14 @@ export function plan(repo: string, cfg: Config, filter: PlanFilter = {}): Plan {
         if (!target && !skip) skip = `no configured guest serves runs-on ${JSON.stringify(labels)}`;
         if (job.services && os && os !== "linux") lw.push("job services: are only supported on Linux legs");
         if (job.permissions && JSON.stringify(job.permissions).includes("id-token")) lw.push("OIDC (id-token) is not available locally");
+        if (target === "host" && cfg.act_linux_image !== DEFAULT_LINUX_IMAGE) {
+          const why = rustUse(job, toolchainFile);
+          if (why) {
+            lw.push(
+              `${why}, and act_linux_image is set to ${cfg.act_linux_image}: GitHub's ubuntu runners preinstall rustup stable with rustfmt and clippy, which this image may lack. Rust setup failures here may be an image difference`,
+            );
+          }
+        }
         // Needed jobs are added below, once the needs are known.
         const msvc = os === "windows" ? msvcUses(job) : [];
         let id = legId(jobId, combo);

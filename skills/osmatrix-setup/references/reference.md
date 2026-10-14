@@ -36,7 +36,7 @@ CLI-only: `osmatrix init` (config + ssh key + host check), `config`, `install-ac
 
 | backend | used for | lifecycle | notes |
 |---|---|---|---|
-| `container` | ubuntu | docker | act runner image + sshd; ssh port preferably 2221 (actual port in `env_status`) |
+| `container` | ubuntu | docker | act runner image (with osmatrix's Rust layer when it's the default) + sshd; ssh port preferably 2221 (actual port in `env_status`) |
 | `dockur` | windows, macos on Linux/Windows hosts | docker compose, disks in docker volumes `osmatrix-<guest>-storage` / `-golden` | needs KVM in containers; web viewer preferably 127.0.0.1:8006 (windows) / 8007 (macos); actual ports in `env_status` |
 | `tart` | macos on Apple Silicon | tart clone/run | key installed automatically via tart guest agent |
 | `qemu` | windows (Windows 11 on ARM) on Apple Silicon | host `qemu-system-aarch64` (HVF; KVM on arm64 Linux, TCG emulation elsewhere); install media prepared once with dockur's `windows-arm` image in Docker; disk under the osmatrix data dir `guests/<guest>/disk`, golden snapshot cloned (APFS `cp -c`) | needs `brew install qemu`; ssh forwarded to 127.0.0.1 (port in `env_status`); VNC display for `env_screenshot`/`env_input` |
@@ -66,6 +66,7 @@ max_vms = 2                      # VM guests running CI legs at the same time
 macos_eula_acknowledged = true   # required for dockur macOS on non-Apple hardware
 # act_path = "act"               # use your own act (a path, or a name on PATH) instead of osmatrix's patched build
 # act_version = "v0.2.88"        # a stock act release instead of the patched v0.2.89
+# act_linux_image = "catthehacker/ubuntu:full-24.04"  # another image for Linux CI legs (see below)
 
 [guests.windows]
 memory = "12G"                   # min 4G; prefer env_configure, which checks the values
@@ -90,6 +91,8 @@ labels = ["macos-*"]
 `ssh_port`, `web_port` and `vnc_port` are preferences: a busy port is replaced by a free one when the guest starts, and `osmatrix status` shows the ports in use.
 
 Labels decide which guest serves a `runs-on` label (globs, first match wins). Linux labels are served by act on the host.
+
+`act_linux_image` defaults to `catthehacker/ubuntu:act-24.04`. With the default, Linux legs and the `ubuntu` guest use `osmatrix/ubuntu:act-24.04-<hash>-rust<version>`, a local layer over it that adds rustup with rustfmt and clippy at the Rust version GitHub's latest ubuntu24 runner image preinstalls (read from that release's readme, cached for a day). It's built on first use, in a few minutes, and again when the runner image's Rust version or osmatrix's Dockerfile changes. Offline, the newest local one is used (or act's plain image, without Rust, when there's none and building fails). When that image changes, a `ubuntu` guest without a golden snapshot is recreated from it on its next `up`; one with a snapshot keeps it (it may hold your changes), and `env_status` and `host_doctor` say so and give the command to recreate it: `osmatrix destroy ubuntu --yes && osmatrix setup ubuntu`. Set another image to use it unchanged; it must exist locally or be pullable, and `ci_plan` warns on Linux legs that use Rust, since such an image may lack it.
 
 ## Guest-side layout
 

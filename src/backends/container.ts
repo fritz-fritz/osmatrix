@@ -7,10 +7,17 @@ import { assetsDir, resourcePrefix } from "../core/paths.ts";
 import { run } from "../core/proc.ts";
 import { ensureKey, sshProbe, type Endpoint } from "../core/ssh.ts";
 import { containerState, docker, dockerBin, imageExists, isPortConflict, portBinding, publishedPort } from "./docker.ts";
+import { ensureLinuxImage, expectedLinuxImage } from "./linux-image.ts";
 import type { Backend, GuestStatus, Support } from "./types.ts";
 import { sizeMiB } from "../core/sizing.ts";
 
-/** Linux guest as a long-lived container (same image act uses for ubuntu-* legs) with sshd added. */
+/** Label on the guest's ssh image (and so its containers and golden snapshots) naming the base image. */
+const BASE_LABEL = "osmatrix.base";
+
+/**
+ * Linux guest as a long-lived container with sshd added, on the image act uses for ubuntu-* legs
+ * (including the parity layer over act's default image).
+ */
 export class ContainerBackend implements Backend {
   readonly cfg: GuestConfig;
   constructor(cfg: GuestConfig) {
@@ -27,8 +34,7 @@ export class ContainerBackend implements Backend {
     return this.cfg.ssh_port ?? 2221;
   }
 
-  private sshImageTag(): string {
-    const base = this.cfg.image ?? DEFAULT_LINUX_IMAGE;
+  private sshImageTag(base: string): string {
     const dir = path.join(assetsDir, "container");
     const h = crypto.createHash("sha256").update(base);
     for (const f of ["Dockerfile", "entrypoint.sh"]) h.update(fs.readFileSync(path.join(dir, f)));
@@ -51,6 +57,10 @@ export class ContainerBackend implements Backend {
       state: "absent",
       hasSnapshot: await imageExists(this.goldenTag),
     };
+    if (st === "absent" && !base.hasSnapshot) return base;
+    // status() is polled (waitReady) and shouldn't wait on the network: the last runner lookup is enough here.
+    const stale = await this.staleBase({ cachedOnly: true });
+    if (stale) base.detail = stale;
     if (st === "absent") return base;
     if (st === "stopped") return { ...base, state: "stopped" };
     const p = await sshProbe(await this.endpoint());
@@ -62,11 +72,47 @@ export class ContainerBackend implements Backend {
     };
   }
 
+  private get configuredBase(): string {
+    return this.cfg.image ?? DEFAULT_LINUX_IMAGE;
+  }
+
+  /**
+   * The base image a container or image of this guest was built on, from the label ensureImage puts on the
+   * ssh image (containers and golden snapshots inherit it). Unlabeled ones predate the parity image and
+   * were built on the configured image itself. Undefined when `ref` doesn't exist.
+   */
+  private async baseOf(ref: string): Promise<string | undefined> {
+    const r = await run(dockerBin(), ["inspect", "-f", `{{index .Config.Labels "${BASE_LABEL}"}}`, ref]);
+    if (r.code !== 0) return undefined;
+    const v = r.stdout.trim();
+    return v && v !== "<no value>" ? v : this.configuredBase;
+  }
+
+  /**
+   * Why the guest runs on an older base image than Linux CI legs use now (a new runner Rust version, or a
+   * guest set up before osmatrix added Rust), or undefined. A golden snapshot may hold the user's changes,
+   * so it's only reported; a guest without one is recreated by `up`.
+   */
+  async staleBase(opts: { cachedOnly?: boolean } = {}): Promise<string | undefined> {
+    const expected = await expectedLinuxImage(this.configuredBase, undefined, opts);
+    if (!expected) return undefined;
+    const name = this.cfg.name;
+    const golden = await this.baseOf(this.goldenTag);
+    if (golden !== undefined) {
+      if (golden === expected) return undefined;
+      return `its golden snapshot is built on ${golden}, not on ${expected} like Linux CI legs; it's kept because it may hold your changes. To rebuild the guest on the new image: osmatrix destroy ${name} --yes && osmatrix setup ${name}`;
+    }
+    const c = await this.baseOf(this.container);
+    if (c === undefined || c === expected) return undefined;
+    return `its container is built on ${c}, not on ${expected} like Linux CI legs; the next env_up after env_down recreates it on the new image (changes made inside it are lost)`;
+  }
+
   private async ensureImage(): Promise<string> {
-    const tag = this.sshImageTag();
+    const base = await ensureLinuxImage(this.configuredBase, { pid: process.pid, run: "env", repo: "", leg: `guest ${this.cfg.name}` });
+    const tag = this.sshImageTag(base);
     if (!(await imageExists(tag))) {
       await docker(
-        ["build", "-t", tag, "--build-arg", `BASE=${this.cfg.image ?? DEFAULT_LINUX_IMAGE}`, path.join(assetsDir, "container")],
+        ["build", "-t", tag, "--build-arg", `BASE=${base}`, "--label", `${BASE_LABEL}=${base}`, path.join(assetsDir, "container")],
         60 * 60_000,
       );
     }
@@ -75,9 +121,22 @@ export class ContainerBackend implements Backend {
 
   async up(): Promise<void> {
     await assertLocalGuestsReachable(this.cfg.os);
-    const st = await containerState(this.container);
+    let st = await containerState(this.container);
     if (st === "running") return;
     let image: string | undefined;
+    if (st === "stopped" && !(await imageExists(this.goldenTag))) {
+      // No golden snapshot to protect: a container on an older base than Linux legs use is recreated.
+      const expected = await expectedLinuxImage(this.configuredBase);
+      if (expected && (await this.baseOf(this.container)) !== expected) {
+        const fresh = await this.ensureImage();
+        // Only when the new image was built: offline, ensureImage may fall back to something older.
+        if ((await this.baseOf(fresh)) === expected) {
+          await docker(["rm", "-f", this.container]);
+          image = fresh;
+          st = "absent";
+        }
+      }
+    }
     if (st === "stopped") {
       try {
         // cpus/memory may have changed since the container was created.

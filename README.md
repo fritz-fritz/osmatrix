@@ -168,7 +168,7 @@ Agents use `env_setup` and poll `env_status`. Afterwards, `osmatrix reset <guest
 
 How each guest gets there:
 
-- **ubuntu**: a container built from `catthehacker/ubuntu:act-24.04` with sshd added.
+- **ubuntu**: a container built from the same image as Linux CI legs (see [Configuration](#configuration)) with sshd added.
 - **windows**: dockur downloads Windows Server 2025 (evaluation) from Microsoft and installs it unattended. [`provision.ps1`](assets/oem/windows/provision.ps1) installs PowerShell 7, Git, Node LTS, Python, stock act (used only when osmatrix's [patched act](#act) isn't) and the MSVC Build Tools with the Windows SDK ([`msvc.ps1`](assets/oem/windows/msvc.ps1), which checks the installer's Microsoft signature before running it), then enables sshd. Like GitHub's image, it enables Git symlinks and Developer Mode (so symlinks can be created) and leaves `core.autocrlf` at Git for Windows' default (`true`). Its log is at `C:\OEM\provision.log`.
 - **macos (dockur)**:
   1. osmatrix boots macOS Recovery. It drives Recovery's Terminal through the VNC display and a small [command bridge](assets/macos/bridge.py) inside the container, erases the disk, and runs `startosinstall --agreetolicense`.
@@ -216,6 +216,8 @@ An `act` on your PATH isn't used unless you ask for it. In `config.toml`, `act_p
 
 `osmatrix config` prints the effective config and its file path. See [skills/osmatrix-setup/references/reference.md](skills/osmatrix-setup/references/reference.md) for every option, including adding `ssh` guests such as a real Mac on your network.
 
+Linux CI legs run in `act_linux_image`. Its default, `catthehacker/ubuntu:act-24.04`, lacks the Rust toolchain GitHub's ubuntu runners preinstall, so with the default osmatrix builds a thin layer over it, `osmatrix/ubuntu:act-24.04-<hash>-rust<version>` from [`ubuntu-parity.Dockerfile`](assets/container/ubuntu-parity.Dockerfile). It adds rustup with rustfmt and clippy at the Rust version of GitHub's latest ubuntu24 runner image, which osmatrix reads from that release's readme once a day, installed as `stable` as on GitHub. A new Rust version in the runner image, or an osmatrix update that changes the Dockerfile, rebuilds the image on the next Linux leg. Offline, Linux legs use the newest local image, or build one with the current stable Rust; if that fails too, they run on act's plain image, without Rust, and the leg's log warns. A `ubuntu` guest without a golden snapshot is recreated from a new image on its next `up`; one with a snapshot is kept, and `osmatrix status`/`doctor` show how to recreate it. Set `act_linux_image` to another image to use that image unchanged.
+
 Windows guests get the MSVC Build Tools and Windows SDK during setup, because Rust's default `x86_64-pc-windows-msvc` target and C/C++ builds link with them. Without them, rustc falls back to Git's coreutils `link.exe` and fails with `link: extra operand`. They cost about 8G of disk and 10–20 minutes of setup. To leave them out, set this before `osmatrix setup windows`:
 
 ```toml
@@ -239,6 +241,7 @@ osmatrix snapshot windows     # keep them in the golden snapshot
 - Some `needs:`. osmatrix runs every job of a run once, on its own `runs-on` target, and replays its result, outputs and artifacts into each leg that needs it, as GitHub hands them over between runners: a Windows/macOS leg gets a Linux job's results from its one run on the host, and a Linux leg gets a Windows job's artifacts from its VM. A needed job with no local target runs inside each leg that needs it instead (on Windows with Git Bash for `run:` steps without a `shell:`), and `ci plan` says so. Either way osmatrix leaves the guest's synced tree untouched: act gets a derived copy of the workflow from outside it.
 - Matrices built from expressions.
 - Remote reusable workflows.
+- Linux legs that use Rust when `act_linux_image` is set to an image other than the default, which may lack the Rust GitHub preinstalls.
 
 osmatrix's [patched act](#act) puts the file-command files (`GITHUB_OUTPUT`, `GITHUB_ENV`, …) under `RUNNER_TEMP` and works with `upload-artifact` v7, which stock act doesn't. A leg that runs stock act anyway (see [act](#act)) says so in its warnings.
 
