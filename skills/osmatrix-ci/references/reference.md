@@ -17,7 +17,7 @@ CLI-only: `osmatrix ci runs` (list runs of a repo).
 
 ## Where things are
 
-- Repos synced into a guest by `ci_run`: `~/work/<name>` (Windows: `C:\Users\<user>\work\<name>`). osmatrix leaves the synced tree untouched after syncing it (it is a copy of your working tree, uncommitted changes included): what it hands act for a leg (a derived workflow, the event payload, secrets, act's artifact store) goes in `~/work/.osmatrix/<run>/<leg>/` and is removed when the leg ends. A derived workflow is also saved on the host as `<repo>/.osmatrix/runs/<id>/workflows/<leg>/<file>`; Linux legs run it from there.
+- Repos synced into a guest by `ci_run`: `~/work/<name>` (Windows: `C:\Users\<user>\work\<name>`). osmatrix leaves the synced tree untouched after syncing it (a Git checkout of your working tree, uncommitted changes included; see below): what it hands act for a leg (a derived workflow, the event payload, secrets, act's artifact store) goes in `~/work/.osmatrix/<run>/<leg>/` and is removed when the leg ends. A derived workflow is also saved on the host as `<repo>/.osmatrix/runs/<id>/workflows/<leg>/<file>`; Linux legs run it from there.
 - Run artifacts and logs: `<repo>/.osmatrix/runs/<id>/` on the host: a log per leg (`<leg>.log`) and act's artifact store per workflow in `artifacts/<workflow file name>/<GITHUB_RUN_ID>/<artifact>/`.
 - Secrets: `<repo>/.osmatrix/secrets` or `<repo>/.secrets`, `KEY=value` lines.
 - `max_vms` in the osmatrix config limits how many VM guests run CI legs at the same time (default 2).
@@ -39,3 +39,10 @@ A needed job that was skipped gets a stub with `if: false`, so its dependents ar
 A needed job that can't run as its own leg (no configured guest serves its `runs-on`) runs inside each leg that needs it, as `act -j` does, and is listed in the leg's `inlineNeeds`; its own needs are replayed as above. On Windows legs, the `run:` steps without a `shell:` of such a Linux-only job run under Git Bash.
 
 The fields of a leg in `ci_status` include `neededOnly` and `replayed` (each needed job with the result the leg got and the legs that produced it).
+
+## How the repo gets into a guest
+
+- `ci_run` snapshots the host working tree (tracked files plus untracked files that aren't ignored, uncommitted changes included) and checks it out with Git in the guest, in a fresh clone each run (config, hooks and refs that a previous run's steps changed don't carry over). The guest's Git config decides line endings, file modes and symlinks, as on GitHub's runners: Windows legs get CRLF text files, a clean `git status` for committed files, and real symlinks. Objects are kept on both sides, so later runs send only what changed, untracked files included.
+- `HEAD` in the guest is the host's commit and branch (`GITHUB_SHA`, `GITHUB_REF`), and `origin` is the host's `origin` URL (`GITHUB_REPOSITORY`). The guest's index is the host's index, so staged and unstaged changes show in `git status` and `git diff` as on the host, as they do on Linux legs; a cleanliness check (`git diff --exit-code`) fails locally for them but passes on GitHub once they're committed.
+- Each run starts from a clean tree: ignored files, build output and earlier runs' files in `work/<name>` are removed.
+- Fallback: directories outside a Git repository, and repositories with Git LFS or other filters, submodules or nested repositories, are copied file by file with the host's `.git`. Then line endings, modes and symlinks follow the host (LF on Windows legs), and the leg's log says "copying files instead of a git checkout". If the checkout fails in the guest, the leg copies too and lists a warning. Report such a leg's line-ending results as a difference from GitHub.

@@ -10,7 +10,33 @@ import { acquireLocks } from "../core/locks.ts";
 import { dockerReach, selinuxEnforcing } from "../core/nesting.ts";
 import { cliEntry, ensureDir } from "../core/paths.ts";
 import { isAlive, spawnDetached } from "../core/proc.ts";
-import { commandLine, freePort, pull as sshPull, push as sshPush, quoteFor, sshArgs, sshBin, sshExec, withCwd, type Endpoint } from "../core/ssh.ts";
+import {
+  createBundle,
+  guestCachePath,
+  guestCacheSteps,
+  guestCheckoutSteps,
+  guestCloneStep,
+  NotMaterializable,
+  parseRefs,
+  SNAPSHOT_REF,
+  snapshotWorktree,
+  symlinksAllowed,
+  type Snapshot,
+} from "../core/gitsync.ts";
+import {
+  commandChain,
+  commandLine,
+  freePort,
+  mkdirCmd,
+  pull as sshPull,
+  push as sshPush,
+  quoteFor,
+  sshArgs,
+  sshBin,
+  sshExec,
+  withCwd,
+  type Endpoint,
+} from "../core/ssh.ts";
 import { getGuest, readyEndpoint, waitReady } from "../env.ts";
 import { plan as makePlan, setDefaultRunShell, type Leg, type Plan, type PlanFilter } from "./plan.ts";
 import { collectorWorkflow, combineLegs, mergeArtifacts, parseNeedsRecord, replayStubWorkflow, type NeededJob } from "./replay.ts";
@@ -451,12 +477,7 @@ async function runLeg(repo: string, dir: string, cfg: Config, leg: Leg, sf: Stat
       const workdir = guestWorkdir(g.cfg);
       const remote = `${workdir}/${path.basename(repo)}`;
       log.write(`[osmatrix] syncing ${repo} -> ${g.cfg.name}:${remote}\n`);
-      await sshPush(ep, repo, remote, { clean: true, includeGit: true });
-      if (!fs.existsSync(path.join(repo, ".git"))) {
-        // act wants a git repository (sha/ref); subdirectories of a larger repo get a throwaway one.
-        const init = "git init -q; git add -A; git -c user.name=osmatrix -c user.email=osmatrix@localhost commit -qm osmatrix";
-        await sshExec(ep, withCwd(ep.shell, remote, init), { timeoutMs: 120_000 });
-      }
+      await syncRepo(ep, g.cfg.name, repo, remote, r, log);
       if (g.cfg.os === "macos" && ep.shell === "posix") await ensureMacToolCache(ep, r, log);
       // The synced tree is what the job checks out (as on GitHub), so this leg's own files go next to it.
       const own = guestLegDir(workdir, sf.s.id, leg.id);
@@ -693,6 +714,89 @@ function resolveSecretFile(repo: string, explicit?: string): string | undefined 
   }
   for (const c of [path.join(repo, ".osmatrix", "secrets"), path.join(repo, ".secrets")]) if (fs.existsSync(c)) return c;
   return undefined;
+}
+
+/**
+ * Bring the guest's copy of the repo up to date with the host's work tree. Every VM guest gets a git
+ * checkout (src/core/gitsync.ts), not only Windows: every GitHub runner checks out with git, so the
+ * guest's own Git config deciding line endings, modes and symlinks is right everywhere; on macOS and
+ * Linux that gives the same bytes as a copy, but the host's .git/config (hooks, worktree paths, helpers)
+ * stays home and later runs send only new objects instead of the whole .git. Directories outside a git
+ * repository and repositories the checkout can't reproduce (filters such as LFS, submodules) are copied
+ * file by file, as is everything when the checkout fails in the guest (no git there, say).
+ */
+async function syncRepo(ep: Endpoint, guest: string, repo: string, remote: string, r: LegResult, log: fs.WriteStream) {
+  let snap: Snapshot;
+  try {
+    snap = await snapshotWorktree(repo, guest);
+  } catch (e) {
+    const why = e instanceof NotMaterializable ? e.message : `snapshot failed: ${(e as Error).message}`;
+    log.write(`[osmatrix] copying files instead of a git checkout: ${why}\n`);
+    return copyRepo(ep, repo, remote);
+  }
+  try {
+    try {
+      await checkoutInGuest(ep, remote, snap, false);
+    } catch (e) {
+      // A guest cache in an unexpected state (missing prerequisites, interrupted run): start over.
+      log.write(`[osmatrix] git checkout in the guest failed (${(e as Error).message}); retrying with a fresh cache\n`);
+      await checkoutInGuest(ep, remote, snap, true);
+    }
+    await snap.synced();
+  } catch (e) {
+    const w = `git checkout in the guest failed (${(e as Error).message}); copied the files instead, so line endings, file modes and symlinks follow the host`;
+    r.warnings.push(w);
+    log.write(`[osmatrix] ${w}\n`);
+    await copyRepo(ep, repo, remote);
+  } finally {
+    snap.dispose();
+  }
+}
+
+async function checkoutInGuest(ep: Endpoint, remote: string, snap: Snapshot, fresh: boolean) {
+  const cache = guestCachePath(remote);
+  const cacheDir = cache.slice(0, cache.lastIndexOf("/"));
+  const sep = ep.shell === "pwsh" ? ";" : " &&";
+  const exec = async (what: string, command: string) => {
+    const res = await sshExec(ep, command, { timeoutMs: 30 * 60_000 });
+    if (res.code !== 0) throw new Error(`${what}: ${(res.stderr || res.stdout).trim().split("\n").slice(-5).join(" ") || `exit ${res.code}`}`);
+    return res.stdout;
+  };
+  let refs = new Map<string, string>();
+  const list = fresh ? undefined : await sshExec(ep, commandLine(ep.shell, ["git", "--git-dir", cache, "for-each-ref", "--format=%(objectname) %(refname)"]));
+  if (list?.code === 0) refs = parseRefs(list.stdout);
+  else await exec("git init", `${mkdirCmd(ep.shell, cache, true)}${sep} ${commandChain(ep.shell, [{ argv: ["git", "init", "-q", "--bare", cache] }])}`);
+
+  // An unchanged tree gives the same snapshot commit, which the guest already has.
+  const name = `${cache.slice(cache.lastIndexOf("/") + 1, -".git".length)}.bundle`;
+  const bundle = refs.get(SNAPSHOT_REF) !== snap.commit ? `${cacheDir}/${name}` : undefined;
+  if (bundle) await sshPush(ep, await createBundle(snap, [...refs.values()], name), cacheDir, { timeoutMs: 30 * 60_000 });
+  try {
+    // The work tree is recreated every run (as the byte copy's delete-and-copy did), as a clone sharing the cache's objects.
+    const cacheSteps = guestCacheSteps(snap, cache, bundle);
+    await exec(
+      "updating the guest repository",
+      [
+        ...(cacheSteps.length ? [commandChain(ep.shell, cacheSteps)] : []),
+        mkdirCmd(ep.shell, remote, true),
+        commandChain(ep.shell, [guestCloneStep(cache, remote)]),
+      ].join(`${sep} `),
+    );
+  } finally {
+    if (bundle) await sshExec(ep, removeCmd(ep, bundle), { timeoutMs: 60_000 }).catch(() => undefined);
+  }
+  const probe = await sshExec(ep, commandLine(ep.shell, ["git", "--git-dir", `${remote}/.git`, "config", "--local", "--get", "core.symlinks"]));
+  await exec("git checkout", withCwd(ep.shell, remote, commandChain(ep.shell, guestCheckoutSteps(snap, symlinksAllowed(probe.stdout)))));
+}
+
+/** The byte copy: the host's files and .git as they are. */
+async function copyRepo(ep: Endpoint, repo: string, remote: string) {
+  await sshPush(ep, repo, remote, { clean: true, includeGit: true });
+  if (!fs.existsSync(path.join(repo, ".git"))) {
+    // act wants a git repository (sha/ref); directories outside one get a throwaway one.
+    const init = "git init -q; git add -A; git -c user.name=osmatrix -c user.email=osmatrix@localhost commit -qm osmatrix";
+    await sshExec(ep, withCwd(ep.shell, remote, init), { timeoutMs: 120_000 });
+  }
 }
 
 /**

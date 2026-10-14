@@ -25,7 +25,7 @@ CLI-only: `osmatrix ssh <guest>` (prints an ssh command line).
 
 ## Guest-side layout
 
-- Repos synced by `ci_run`/`env_push`: `~/work/<name>` (Windows: `C:\Users\<user>\work\<name>`).
+- Repos synced by `ci_run`/`env_push`: `~/work/<name>` (Windows: `C:\Users\<user>\work\<name>`). `ci_run` checks the tree out with Git in the guest (CRLF text files on Windows, as on GitHub); `env_push` copies files byte for byte (without `.git`), so a pushed tree keeps the host's line endings. The next `ci_run` resets `work/<name>` to its own checkout.
 - Windows: user `osmatrix` (admin), sshd default shell `pwsh`, tools: Git (+bash), Node LTS, Python, PowerShell 7, act. Provisioning log: `C:\OEM\provision.log`.
 - macOS: user `osmatrix` (admin, passwordless sudo, auto-login to the desktop), Xcode Command Line Tools, git, Node LTS, Python, act, jq; Homebrew on Apple Silicon only. `/Users/runner/hostedtoolcache` exists and belongs to that user, because the macOS packages `actions/setup-python` and the other `actions/*-versions` installers download install there, as on GitHub's runners (`ci_run` creates it before each macOS leg on guests set up without it). Password in the host's osmatrix data dir (`guests/<name>/credentials.json`).
 - ubuntu: the act runner image plus sshd; ssh port preferably 2221 (actual port in `env_status`).

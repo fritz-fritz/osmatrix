@@ -168,7 +168,7 @@ Agents use `env_setup` and poll `env_status`. Afterwards, `osmatrix reset <guest
 How each guest gets there:
 
 - **ubuntu**: a container built from `catthehacker/ubuntu:act-24.04` with sshd added.
-- **windows**: dockur downloads Windows Server 2025 (evaluation) from Microsoft and installs it unattended. [`provision.ps1`](assets/oem/windows/provision.ps1) installs PowerShell 7, Git, Node LTS, Python and act, then enables sshd. Its log is at `C:\OEM\provision.log`.
+- **windows**: dockur downloads Windows Server 2025 (evaluation) from Microsoft and installs it unattended. [`provision.ps1`](assets/oem/windows/provision.ps1) installs PowerShell 7, Git, Node LTS, Python and act, then enables sshd. Like GitHub's image, it enables Git symlinks and Developer Mode (so symlinks can be created) and leaves `core.autocrlf` at Git for Windows' default (`true`). Its log is at `C:\OEM\provision.log`.
 - **macos (dockur)**:
   1. osmatrix boots macOS Recovery. It drives Recovery's Terminal through the VNC display and a small [command bridge](assets/macos/bridge.py) inside the container, erases the disk, and runs `startosinstall --agreetolicense`.
   2. After the install it boots Recovery again and runs [`configure.sh`](assets/macos/configure.sh) on the new system. That creates the `osmatrix` admin user with the SSH key, Remote Login, passwordless sudo and auto-login, and skips Setup Assistant.
@@ -197,6 +197,8 @@ osmatrix ci run --wait                    # foreground, exit code reflects the r
 ```
 
 Secrets for CI go in `<repo>/.osmatrix/secrets` (or `.secrets`) as `KEY=value` lines. Run logs land in `<repo>/.osmatrix/runs/`, which is git-ignored automatically.
+
+For Windows and macOS legs, osmatrix checks your working tree out in the guest with Git, as `actions/checkout` does on GitHub's runners. Uncommitted changes and untracked files that aren't ignored are included. The guest's Git settings decide line endings, file modes and symlinks, so Windows legs get CRLF files and a clean `git status`, as on GitHub. Each run gets a fresh clone, so config or hooks that a previous run's steps changed don't carry over. The guest and the host (in the osmatrix data dir) keep the objects, so later runs send only what changed. `HEAD` in the guest is your commit and branch, so `GITHUB_SHA` and `GITHUB_REF` are yours, and the index is your index: uncommitted changes show up in `git status` and `git diff` exactly as on the host, as they do on Linux legs. Directories outside a Git repository and repositories that use Git LFS (or another filter), submodules or nested repositories are copied file by file instead; then line endings, modes and symlinks follow the host, and the leg's log says so. `osmatrix push` always copies files as they are, without `.git`.
 
 ## Configuration
 
