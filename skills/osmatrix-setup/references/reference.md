@@ -92,5 +92,5 @@ Labels decide which guest serves a `runs-on` label (globs, first match wins). Li
 ## Guest-side layout
 
 - Windows: user `osmatrix` (admin), sshd default shell `pwsh`, tools: Git (+bash), Node LTS, Python, PowerShell 7, act, VS 2022 Build Tools C++ workload with the Windows SDK (unless `msvc = false`). Provisioning log: `C:\OEM\provision.log`.
-- macOS: user `osmatrix` (admin, passwordless sudo, auto-login to the desktop), Xcode Command Line Tools, git, Node LTS, Python, act, jq; Homebrew on Apple Silicon only. Password in the host's osmatrix data dir (`guests/<name>/credentials.json`).
+- macOS: user `osmatrix` (admin, passwordless sudo, auto-login to the desktop), Xcode Command Line Tools, git, Node LTS, Python, act, jq; Homebrew on Apple Silicon only. `/Users/runner/hostedtoolcache` exists and belongs to that user, because the macOS packages `actions/setup-python` and the other `actions/*-versions` installers download install there, as on GitHub's runners (`ci_run` creates it before each macOS leg on guests set up without it). Password in the host's osmatrix data dir (`guests/<name>/credentials.json`).
 - Data dir (guest state, ssh key, credentials, logs, downloaded act): Linux `~/.local/share/osmatrix`.

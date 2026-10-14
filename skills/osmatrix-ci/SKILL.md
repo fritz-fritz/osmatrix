@@ -15,7 +15,7 @@ Always pass the repository's **absolute host path** as `repo` to every `ci_*` to
 
 ## How legs run
 
-A workflow's matrix is expanded into legs. `ubuntu-*` legs run with act on the host's Docker; `windows-*` / `macos-*` legs run act *inside* the matching VM (host mode), after syncing the repo into it.
+A workflow's matrix is expanded into legs. `ubuntu-*` legs run with act on the host's Docker; `windows-*` / `macos-*` legs run act *inside* the matching VM (host mode), after checking the working tree out in it with Git, as `actions/checkout` does (details in [references/reference.md](references/reference.md)).
 
 A windows/macos leg needs that guest to be `ready` (`env_status`, CLI `osmatrix status`). If the guest is `absent` or its status `detail` says "not set up", follow `osmatrix-setup` first; VM setup takes 20–60 min. VMs are slow to boot (1–3 min), so **don't start VMs you don't need**, and leave a VM running while you iterate.
 
@@ -39,13 +39,14 @@ Secrets: put `KEY=value` lines in `.osmatrix/secrets` (or act's default `.secret
 ## Reading results honestly
 
 Local green is strong evidence, not proof. Report anything that didn't run or differs from GitHub:
-- `ci_plan` warnings: `services:` on non-Linux legs, OIDC (`id-token`), `needs:` that cross OSes (act runs the needed job inside the same environment), matrices built from expressions, remote reusable workflows (skipped).
+- `ci_plan` warnings: `services:` on non-Linux legs, OIDC (`id-token`), `needs:` that cross OSes, matrices built from expressions, remote reusable workflows (skipped).
+- `needs:`: every job runs once, as its own legs on its own target, and each leg that needs it gets its result, outputs and artifacts replayed, as on GitHub (a Windows leg gets a Linux job's results from its one run on the host, and the reverse). Needed jobs the filter leaves out still run (`neededOnly` legs), and a leg stays `pending` with `waitingFor` naming the legs it needs until they finish. A leg whose needed job failed is `skipped` (as on GitHub) unless its `if:` lets it run; debug the needed job's own leg. A needed job with no local target runs inside each leg that needs it, and `ci_plan` says so.
 - File-command paths: act puts `GITHUB_OUTPUT`, `GITHUB_ENV`, `GITHUB_PATH`, `GITHUB_STATE` and `GITHUB_STEP_SUMMARY` under its own `act/workflow/` directory (`/var/run/act/workflow/` in containers), not under `RUNNER_TEMP` as GitHub does. A script that refuses those paths unless they're inside `RUNNER_TEMP`/`GITHUB_WORKSPACE` fails only locally; the failed leg's `warnings` point this out. Report it as an act difference; the workflow can skip such checks when `env.ACT` is set.
 - macOS guests on Linux/Windows hosts are Intel (x86_64) and have no Homebrew (it dropped Intel support): steps that `brew install` fail there. On Apple Silicon hosts (tart) Homebrew is available.
 - Guests are leaner than GitHub-hosted images: preinstalled SDKs (Xcode versions, Visual Studio, Android SDK, many language versions) may be missing. Prefer `setup-*` actions; if a tool is missing in a guest, say so instead of concluding the code is broken.
 - macOS legs: GitHub's runners allow passwordless sudo. dockur macOS guests (Linux/Windows hosts) get it during setup; on tart and `ssh` macOS guests `sudo` steps only work after `osmatrix provision <guest> --passwordless-sudo`. A sudo password prompt there is an environment gap, not a code bug.
 - Windows legs with Rust or C/C++ toolchains need the MSVC Build Tools, which Windows guests get at setup. A leg warning about missing MSVC tools (or a `link: extra operand` failure) means the guest predates them or set `msvc = false`: that's an environment gap, not a code bug. Follow the warning (`osmatrix provision <guest>`, then `env_snapshot`) with the user's agreement; it takes several GB and 10-20 min.
-- Windows legs run in host mode inside the VM: `shell: bash` steps need Git Bash (installed), Docker-based actions don't work there. When a Windows leg `needs:` a Linux job, act runs that job in the VM too; osmatrix runs its `run:` steps that have no `shell:` with Git Bash (GitHub would use bash), but Linux-only tools in it (`apt-get`, `docker`, …) fail. To check such a job itself, run it on its own Linux leg.
+- Windows legs run in host mode inside the VM: `shell: bash` steps need Git Bash (installed), Docker-based actions don't work there. When a Linux need of a Windows leg has no local target and runs in the VM, osmatrix runs its `run:` steps that have no `shell:` with Git Bash (GitHub would use bash), but Linux-only tools in it (`apt-get`, `docker`, …) fail. To check such a job itself, run it on its own Linux leg.
 
 ## Artifacts
 

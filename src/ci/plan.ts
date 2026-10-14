@@ -15,14 +15,30 @@ export interface Leg {
   jobName?: string;
   matrix: MatrixCombo;
   runsOn: string[];
-  /** runs-on labels of jobs this leg transitively needs (act runs them in the same environment). */
+  /** runs-on labels of the needed jobs act runs inside this leg (see inlineNeeds). */
   needsLabels: string[];
   /** Jobs this leg's job directly needs. */
   needs: string[];
-  /** Every job this leg's job transitively needs (act -j runs them all). */
+  /** Every job this leg's job transitively needs. */
   needsAll?: string[];
-  /** Needed jobs (transitively) that target Linux, when this leg doesn't: act runs them in this leg's OS. */
+  /**
+   * Needed jobs that run as their own legs in this run (each exactly once, on its own runs-on target):
+   * this leg waits for them and act gets stubs that replay their results, outputs and artifacts.
+   */
+  replayNeeds?: string[];
+  /**
+   * Needed jobs that can't run as their own legs (no local target): act runs them inside this leg, as
+   * `act -j` does, in this leg's environment.
+   */
+  inlineNeeds?: string[];
+  /** The inline needs that target Linux only, when this leg doesn't (Windows legs run them with Git Bash). */
   linuxNeeds?: string[];
+  /** Legs (ids) of the replayed needs: this leg starts when they have finished. */
+  waitsFor?: string[];
+  /** Legs (ids) that wait for this one: osmatrix records its job's result and outputs for them. */
+  neededBy?: string[];
+  /** Not selected by the filter: runs only because selected legs need its job. */
+  neededOnly?: boolean;
   /** "host" = act on the host docker (Linux legs); otherwise a guest name. */
   target?: string;
   targetOs?: string;
@@ -250,6 +266,11 @@ export function plan(repo: string, cfg: Config, filter: PlanFilter = {}): Plan {
   }
   if (!workflows.length) warnings.push(`no workflows found in ${repo}/.github/workflows`);
 
+  const only = filter.only?.map((s) => s.toLowerCase());
+  const onlyMatches = (l: Leg) => {
+    const keys = [l.target, l.targetOs, l.target === "host" ? "linux" : undefined].filter(Boolean) as string[];
+    return keys.some((k) => only!.includes(k.toLowerCase()));
+  };
   const legs: Leg[] = [];
   const seen = new Set<string>();
   for (const wf of workflows) {
@@ -261,14 +282,18 @@ export function plan(repo: string, cfg: Config, filter: PlanFilter = {}): Plan {
       continue;
     }
     const jobs = (doc.jobs ?? {}) as Record<string, Record<string, unknown>>;
+    // Every leg of the workflow: legs the filter doesn't select still run when a selected leg needs their job.
     const wfLegs: Leg[] = [];
+    const selected = new Set<Leg>();
     for (const [jobId, job] of Object.entries(jobs)) {
-      if (filter.job && filter.job !== jobId) continue;
       const jw: string[] = [];
       const strategy = (job.strategy ?? {}) as Record<string, unknown>;
       const combos = expandMatrix(strategy.matrix, jw);
       for (const combo of combos) {
-        if (filter.matrix && !Object.entries(filter.matrix).every(([k, v]) => String(combo[k]) === v)) continue;
+        // A matrix filter selects legs whose combination has every key. Like act's --matrix, it leaves the
+        // legs of a needed job that lacks a key alone: they all run.
+        const matrixKeys = Object.entries(filter.matrix ?? {});
+        if (!matrixKeys.every(([k, v]) => !(k in combo) || String(combo[k]) === v)) continue;
         const lw = [...jw];
         let labels: string[] = [];
         let skip: string | undefined;
@@ -290,7 +315,7 @@ export function plan(repo: string, cfg: Config, filter: PlanFilter = {}): Plan {
         if (workflows.length > 1) id = `${path.posix.basename(wf).replace(/\.ya?ml$/, "")}.${id}`;
         while (seen.has(id)) id += "_";
         seen.add(id);
-        wfLegs.push({
+        const leg: Leg = {
           id,
           workflow: wf,
           workflowName: typeof doc.name === "string" ? doc.name : undefined,
@@ -305,10 +330,11 @@ export function plan(repo: string, cfg: Config, filter: PlanFilter = {}): Plan {
           warnings: lw,
           needsLabels: [],
           needs: [],
-        });
+        };
+        wfLegs.push(leg);
+        if ((!filter.job || filter.job === jobId) && matrixKeys.every(([k]) => k in combo) && (!only || onlyMatches(leg))) selected.add(leg);
       }
     }
-    // Labels of every job in a leg's transitive needs: act -j runs those jobs too, in the same environment.
     const labelsOf = (jobId: string): string[] => {
       const job = jobs[jobId] ?? {};
       if (typeof job.uses === "string") return ["ubuntu-latest"];
@@ -317,12 +343,15 @@ export function plan(repo: string, cfg: Config, filter: PlanFilter = {}): Plan {
     };
     const needsOf = (jobId: string): string[] => {
       const n = jobs[jobId]?.needs;
-      // A copy: callers mutate the result (the traversal below pops from it).
+      // A copy: callers mutate the result (the traversals below pop from it).
       return typeof n === "string" ? [n] : Array.isArray(n) ? [...(n as string[])] : [];
     };
     // OS families a job targets, from its labels; independent of the job filter, so needs are classified too.
     const osOf = (jobId: string): Set<string> =>
       new Set(labelsOf(jobId).flatMap((l) => pickTarget([l], cfg).os ?? (/^ubuntu-/.test(l) ? "linux" : [])));
+    // A needed job with legs that can run here runs as those legs, each once, on its own target; the legs
+    // that need it wait for them and get its results replayed.
+    const ownLegs = (jobId: string) => wfLegs.filter((l) => l.job === jobId && !l.skip);
     for (const leg of wfLegs) {
       const seenJobs = new Set<string>();
       const stack = needsOf(leg.job);
@@ -332,13 +361,41 @@ export function plan(repo: string, cfg: Config, filter: PlanFilter = {}): Plan {
         seenJobs.add(j);
         stack.push(...needsOf(j));
       }
-      leg.needsLabels = [...new Set([...seenJobs].flatMap(labelsOf))].filter((l) => !l.includes("${{"));
       leg.needs = needsOf(leg.job);
       leg.needsAll = [...seenJobs].sort();
+      if (seenJobs.has(leg.job)) {
+        // GitHub rejects such a workflow; waiting for its own needs would never end.
+        leg.skip ??= `its needs form a cycle through ${leg.job}`;
+        continue;
+      }
+      // act runs the needs that can't run as their own legs inside this leg (as act -j does), and so
+      // their needs too, down to the ones that are replayed.
+      const replay = new Set<string>();
+      const inline = new Set<string>();
+      const walk = needsOf(leg.job);
+      while (walk.length) {
+        const j = walk.pop()!;
+        if (replay.has(j) || inline.has(j)) continue;
+        if (ownLegs(j).length) replay.add(j);
+        else {
+          inline.add(j);
+          walk.push(...needsOf(j));
+        }
+      }
+      leg.replayNeeds = [...replay].sort();
+      leg.inlineNeeds = [...inline].sort();
+      leg.waitsFor = wfLegs.filter((l) => replay.has(l.job) && !l.skip).map((l) => l.id);
+      leg.needsLabels = [...new Set(leg.inlineNeeds.flatMap(labelsOf))].filter((l) => !l.includes("${{"));
+      for (const n of leg.replayNeeds) {
+        for (const l of wfLegs.filter((l) => l.job === n && l.skip)) {
+          leg.warnings.push(`needs "${n}": its leg ${l.id} can't run here (${l.skip}), so needs.${n} lacks that leg's result`);
+        }
+      }
       if (leg.targetOs === "windows") {
-        // act -j runs the needed jobs inside this Windows guest too, so their Rust/C++ steps need MSVC there as well.
+        // Needs that act runs inside this Windows guest (inlineNeeds) need MSVC there as well for their
+        // Rust/C++ steps; replayed needs run on their own legs.
         const uses = new Set(leg.msvcUses ?? []);
-        for (const n of leg.needsAll) for (const u of msvcUses(jobs[n] ?? {})) uses.add(`${u} (needs: ${n})`);
+        for (const n of leg.inlineNeeds) for (const u of msvcUses(jobs[n] ?? {})) uses.add(`${u} (needs: ${n})`);
         if (uses.size) leg.msvcUses = [...uses];
         // Whether the guest really has the tools is checked when the leg runs (over ssh); an opt-out is known now.
         const guest = leg.target ? cfg.guests[leg.target] : undefined;
@@ -346,66 +403,102 @@ export function plan(repo: string, cfg: Config, filter: PlanFilter = {}): Plan {
           leg.warnings.push(msvcHint(guest, leg.msvcUses, `guest ${guest.name} is set up without them (msvc = false)`));
         }
       }
-      // needs: across OS boundaries can't be honored when legs run in separate environments.
       if (!leg.targetOs) continue;
-      const crossOs = leg.needsAll.filter((n) => [...osOf(n)].some((o) => o !== leg.targetOs));
+      const crossOs = (n: string) => [...osOf(n)].some((o) => o !== leg.targetOs);
       // Only jobs that target Linux alone: a job-wide shell default would also change a mixed-OS job's other legs.
       const linuxOnly = (n: string) => [...osOf(n)].every((o) => o === "linux");
-      if (leg.targetOs !== "linux") leg.linuxNeeds = crossOs.filter(linuxOnly);
-      for (const n of crossOs) {
+      if (leg.targetOs !== "linux") leg.linuxNeeds = leg.inlineNeeds.filter((n) => crossOs(n) && linuxOnly(n));
+      for (const n of leg.replayNeeds.filter(crossOs)) {
+        const oses = [...osOf(n)].sort().join("/");
+        leg.warnings.push(
+          `needs "${n}" runs on ${oses}; it runs once, as its own leg${ownLegs(n).length > 1 ? "s" : ""}, and osmatrix replays its result, outputs and artifacts into this leg, as GitHub hands them over from another runner`,
+        );
+      }
+      for (const n of leg.inlineNeeds) {
+        const why = wfLegs.find((l) => l.job === n)?.skip;
+        const because = why ? ` (${why})` : "";
         if (leg.targetOs === "windows" && osOf(n).has("linux") && !linuxOnly(n)) {
           leg.warnings.push(
-            `needs "${n}" runs on Linux and other OSes; act runs all of its matrix legs inside this Windows leg, where its run: steps without a shell: use pwsh, so its Linux legs will likely fail. Check it on its own legs instead`,
+            `needs "${n}" can't run as its own legs${because}; act runs all of its matrix legs inside this Windows leg, where its run: steps without a shell: use pwsh, so its Linux legs will likely fail`,
           );
-        } else if (leg.targetOs === "windows" && leg.linuxNeeds?.includes(n)) {
+        } else if (leg.linuxNeeds?.includes(n) && leg.targetOs === "windows") {
           leg.warnings.push(
-            `needs "${n}" targets Linux; act runs it inside this Windows leg. osmatrix runs its run: steps without a shell: under Git Bash, as GitHub would use bash, but Linux-only tools (apt-get, docker, …) fail there and outputs/artifacts may differ`,
+            `needs "${n}" targets Linux but can't run as its own leg${because}; act runs it inside this Windows leg. osmatrix runs its run: steps without a shell: under Git Bash, as GitHub would use bash, but Linux-only tools (apt-get, docker, …) fail there and outputs/artifacts may differ`,
           );
         } else {
-          leg.warnings.push(`needs "${n}" runs on another OS; act will run it inside this leg's environment (outputs/artifacts may differ)`);
+          leg.warnings.push(`needs "${n}" can't run as its own leg${because}; act runs it inside this leg's environment${crossOs(n) ? " (outputs/artifacts may differ)" : ""}`);
         }
       }
     }
-    legs.push(...wfLegs);
-  }
-
-  const only = filter.only?.map((s) => s.toLowerCase());
-  const filtered = only
-    ? legs.filter((l) => {
-        const keys = [l.target, l.targetOs, l.target === "host" ? "linux" : undefined].filter(Boolean) as string[];
-        return keys.some((k) => only.includes(k.toLowerCase()));
-      })
-    : legs;
-
-  // act -j <job> also runs the job's needs. When every needed job already runs as its own leg in
-  // this run (typical for gate / fan-in jobs such as "CI Gate"), running the dependent job would
-  // repeat all of them, on the wrong OS for Windows/macOS legs. Skip it unless asked for by name.
-  if (!filter.job) {
-    for (const leg of filtered) {
-      if (leg.skip || !leg.needs.length) continue;
-      const covered = leg.needs.every((n) => filtered.some((o) => o !== leg && o.workflow === leg.workflow && o.job === n && !o.skip));
-      if (covered) {
-        leg.skip = `its needs (${leg.needs.join(", ")}) already run as legs here; act would repeat them. Run it alone with --job ${leg.job}`;
+    // The selected legs and, transitively, the legs they wait for.
+    const byId = new Map(wfLegs.map((l) => [l.id, l]));
+    const include = new Set(selected);
+    const queue = [...selected];
+    while (queue.length) {
+      const l = queue.pop()!;
+      if (l.skip) continue;
+      for (const id of l.waitsFor ?? []) {
+        const n = byId.get(id)!;
+        if (include.has(n)) continue;
+        include.add(n);
+        n.neededOnly = true;
+        queue.push(n);
       }
     }
+    for (const l of include) {
+      if (l.skip) continue;
+      for (const id of l.waitsFor ?? []) (byId.get(id)!.neededBy ??= []).push(l.id);
+    }
+    legs.push(...wfLegs.filter((l) => include.has(l)));
   }
-  return { repo, legs: filtered, warnings };
+  return { repo, legs, warnings };
 }
 
 /**
- * Give `jobs` a `defaults.run.shell` of `shell` (keeping comments and layout), so their run: steps without
- * a shell: don't fall back to act's host default (pwsh on Windows). Jobs that already set one, reusable
- * workflow calls, and every job when the workflow sets a default are left alone. Returns the jobs changed.
+ * Give `jobs` a `defaults.run.shell` of `shell`, so their run: steps without a shell: don't fall back to
+ * act's host default (pwsh on Windows). Jobs that already set one, reusable workflow calls, and every job
+ * when the workflow sets a default are left alone. Returns the jobs changed.
+ *
+ * The edit inserts lines rather than re-serialising the document, so the rest of the workflow (layout,
+ * comments, quoting) stays as written. Jobs written in flow style ({ ... }) fall back to re-serialising.
  */
 export function setDefaultRunShell(text: string, jobs: string[], shell: string): { text: string; changed: string[] } {
   const doc = YAML.parseDocument(text);
   if (doc.getIn(["defaults", "run", "shell"]) !== undefined) return { text, changed: [] };
   const changed: string[] = [];
+  const inserts: { at: number; text: string }[] = [];
+  let reserialise = false;
   for (const j of jobs) {
     const job = doc.getIn(["jobs", j]);
     if (!YAML.isMap(job) || job.has("uses") || doc.getIn(["jobs", j, "defaults", "run", "shell"]) !== undefined) continue;
-    doc.setIn(["jobs", j, "defaults", "run", "shell"], shell);
     changed.push(j);
+    // The deepest map along jobs.<j>.defaults.run that exists; the missing keys go in at its top.
+    const missing = ["defaults", "run", "shell"];
+    let map: YAML.YAMLMap = job;
+    for (let next = map.get(missing[0], true); missing.length > 1 && YAML.isMap(next); next = map.get(missing[0], true)) {
+      map = next;
+      missing.shift();
+    }
+    const ins = map.has(missing[0]) ? undefined : blockInsert(text, map, missing, shell);
+    if (ins) inserts.push(ins);
+    else reserialise = true;
+    doc.setIn(["jobs", j, "defaults", "run", "shell"], shell);
   }
-  return { text: changed.length ? doc.toString({ lineWidth: 0 }) : text, changed };
+  if (!changed.length) return { text, changed };
+  if (reserialise) return { text: doc.toString({ lineWidth: 0 }), changed };
+  for (const ins of inserts.sort((a, b) => b.at - a.at)) text = text.slice(0, ins.at) + ins.text + text.slice(ins.at);
+  return { text, changed };
+}
+
+/** Lines adding `keys` (nested; the last one set to `value`) at the top of a block map; undefined when it isn't one. */
+function blockInsert(text: string, map: YAML.YAMLMap, keys: string[], value: string): { at: number; text: string } | undefined {
+  const first = map.items[0]?.key;
+  if (map.flow || !YAML.isNode(first) || !first.range) return undefined;
+  const at = text.lastIndexOf("\n", first.range[0] - 1) + 1;
+  const indent = text.slice(at, first.range[0]);
+  if (!/^ *$/.test(indent)) return undefined; // the key shares its line with something else, such as "- "
+  const eol = text.includes("\r\n") ? "\r\n" : "\n";
+  const last = keys.length - 1;
+  const lines = keys.map((k, i) => `${indent}${"  ".repeat(i)}${k}:${i === last ? ` ${YAML.stringify(value, { lineWidth: 0 }).trimEnd()}` : ""}`);
+  return { at, text: lines.join(eol) + eol };
 }

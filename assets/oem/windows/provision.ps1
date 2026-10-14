@@ -60,7 +60,9 @@ Log 'installing Git'
 Retry {
   $u = Get-LatestAsset 'git-for-windows/git' $(if ($arm) { '^Git-[\d.]+-arm64\.exe$' } else { '^Git-[\d.]+-64-bit\.exe$' })
   $f = Download $u 'git.exe'
-  $p = Start-Process $f -Wait -PassThru -ArgumentList '/VERYSILENT /NORESTART /NOCANCEL /SP- /SUPPRESSMSGBOXES /COMPONENTS="gitlfs,assoc,autoupdate" /o:PathOption=CmdTools'
+  # As GitHub's image (runner-images Install-Git.ps1): symlinks on, line endings left at the installer's
+  # default (core.autocrlf=true), so checkouts in the guest match actions/checkout.
+  $p = Start-Process $f -Wait -PassThru -ArgumentList '/VERYSILENT /NORESTART /NOCANCEL /SP- /SUPPRESSMSGBOXES /COMPONENTS="gitlfs,assoc,autoupdate" /o:PathOption=CmdTools /o:EnableSymlinks=Enabled'
   if ($p.ExitCode -ne 0) { throw "git installer exit $($p.ExitCode)" }
 } | Out-Null
 
@@ -96,6 +98,13 @@ Retry {
 } | Out-Null
 
 & 'C:\Program Files\Git\cmd\git.exe' config --system core.longpaths true
+& 'C:\Program Files\Git\cmd\git.exe' config --system core.symlinks true
+
+# Developer Mode lets non-elevated processes create symlinks, which Git needs for core.symlinks
+# (runner-images Configure-DeveloperMode.ps1 does the same on GitHub's Windows image).
+$devMode = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\AppModelUnlock'
+if (-not (Test-Path $devMode)) { New-Item -Path $devMode -Force | Out-Null }
+New-ItemProperty -Path $devMode -Name AllowDevelopmentWithoutDevLicense -Value 1 -PropertyType DWord -Force | Out-Null
 
 # MSVC Build Tools + Windows SDK, as on windows-latest (Rust's msvc targets and C/C++ builds link with them).
 # On unless the guest sets msvc = false. A failure is logged, not fatal: the rest of the guest still works.
