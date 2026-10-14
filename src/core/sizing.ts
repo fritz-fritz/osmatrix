@@ -1,5 +1,5 @@
 import os from "node:os";
-import type { GuestConfig } from "./config.ts";
+import { guestMsvc, type GuestConfig } from "./config.ts";
 
 /** Resource needs of a guest. Sizes are GiB. */
 export interface Requirements {
@@ -12,11 +12,16 @@ export interface Requirements {
   note?: string;
 }
 
+/** Disk the VS 2022 Build Tools C++ workload (MSVC, Windows SDK, CMake) uses in a Windows guest. */
+export const MSVC_GB = 8;
+/** Smallest disk Windows Server 2025 and the base toolchain work with. */
+const WINDOWS_SERVER_DISK_GB = 40;
+
 /**
  * What each kind of guest needs. Minimums are what the OS and osmatrix's provisioning still work with;
  * recommended values are the defaults and leave room for a typical CI leg (npm/pip installs, builds).
  */
-export function requirements(g: Pick<GuestConfig, "os" | "backend" | "image">): Requirements {
+export function requirements(g: Pick<GuestConfig, "os" | "backend" | "image" | "msvc">): Requirements {
   if (g.backend === "container") {
     return {
       cpus: { min: 1, recommended: 2 },
@@ -29,13 +34,19 @@ export function requirements(g: Pick<GuestConfig, "os" | "backend" | "image">): 
   }
   if (g.os === "windows") {
     const arm = /windows-arm/.test(g.image ?? "");
+    // The MSVC Build Tools C++ workload with the Windows SDK takes about 8G once installed.
+    const msvc = guestMsvc(g) ? MSVC_GB : 0;
     return {
       cpus: { min: 2, recommended: 4 },
       memoryGB: { min: 4, recommended: 8 },
       // Windows 11 (the ARM image) refuses to install on less than 64G; Server 2025 needs 32G plus room for the toolchain.
-      diskGB: arm ? { min: 64, recommended: 64 } : { min: 40, recommended: 64 },
-      footprintGB: arm ? 20 : 12,
-      note: "First setup also downloads the install ISO (~6G) into the guest's volume.",
+      // The hard minimum stays the OS's: guests sized 40G before the Build Tools existed must keep working.
+      // checkSizing warns below WINDOWS_SERVER_DISK_GB + MSVC_GB instead.
+      diskGB: arm ? { min: 64, recommended: 64 } : { min: WINDOWS_SERVER_DISK_GB, recommended: 64 },
+      footprintGB: (arm ? 20 : 12) + msvc,
+      note:
+        "First setup also downloads the install ISO (~6G) into the guest's volume." +
+        (msvc ? ` Includes the MSVC Build Tools (~${MSVC_GB}G, ~10-20 min of setup); msvc = false skips them.` : ""),
     };
   }
   if (g.backend === "tart") {
@@ -111,6 +122,11 @@ export function checkSizing(
   if (g.disk !== undefined && r.diskGB) {
     const disk = parseSizeGB(g.disk);
     if (disk < r.diskGB.min) errors.push(`disk = ${g.disk} is below the minimum of ${r.diskGB.min}G`);
+    else if (guestMsvc(g) && disk < WINDOWS_SERVER_DISK_GB + MSVC_GB) {
+      warnings.push(
+        `disk = ${g.disk} leaves little room: the MSVC Build Tools need about ${MSVC_GB}G more (${WINDOWS_SERVER_DISK_GB + MSVC_GB}G or more); raise disk or set msvc = false`,
+      );
+    }
     if (current?.disk !== undefined && disk < parseSizeGB(current.disk)) {
       errors.push(`disk can only grow (currently ${current.disk}); shrinking a VM disk is not supported`);
     }

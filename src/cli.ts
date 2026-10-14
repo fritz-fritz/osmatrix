@@ -4,7 +4,7 @@ import path from "node:path";
 import { Command, InvalidArgumentError, Option } from "commander";
 import YAML from "yaml";
 import { ciLogs, ciPlan, ciRun, ciStatus, listRuns, worker } from "./ci/run.ts";
-import { ensureAct } from "./core/act.ts";
+import { ALL_GUEST_TARGETS, defaultTargets, ensureAct } from "./core/act.ts";
 import { defaultConfig, readRawConfig, writeConfig, loadConfig } from "./core/config.ts";
 import { doctor } from "./core/host.ts";
 import { paths, pkgRoot } from "./core/paths.ts";
@@ -86,8 +86,9 @@ program.command("doctor").description("Check host capabilities and which guests 
 
 program
   .command("install-act")
-  .description("Download the pinned act release into the osmatrix data dir (if act is not on PATH)")
-  .action(action(async () => ({ act: await ensureAct() })));
+  .description("Build osmatrix's patched act for this host and its guests now (it otherwise builds on the first `ci run`; needs Docker)")
+  .option("--all-targets", "also build every guest platform osmatrix knows (windows/darwin, amd64/arm64), not only the configured guests'")
+  .action(action(async (o: { allTargets?: boolean }) => ({ act: await ensureAct({ targets: o.allTargets ? ALL_GUEST_TARGETS : defaultTargets(loadConfig()) }) })));
 
 program
   .command("install-agents")
@@ -226,7 +227,9 @@ program
 
 program
   .command("provision <guest>")
-  .description("Install the CI toolchain in a macOS guest (Xcode CLT, Homebrew, git, node, python, act); asks for the guest sudo password once")
+  .description(
+    "Install the CI toolchain: macOS (Xcode CLT, Homebrew, git, node, python, act; asks for the guest sudo password once) or, on Windows guests set up before osmatrix installed them, the MSVC Build Tools",
+  )
   .option("--passwordless-sudo", "also allow sudo without a password, like GitHub's macOS runners (needed by workflows with sudo steps)")
   .action(
     action(async (g: string, o: { passwordlessSudo?: boolean }) => {
@@ -392,6 +395,8 @@ function summarize(s: ReturnType<typeof ciStatus>) {
       state: l.state,
       ...(l.durationSec !== undefined ? { sec: l.durationSec } : {}),
       ...(l.waitingFor ? { waitingFor: l.waitingFor } : {}),
+      ...(l.neededOnly ? { neededOnly: true } : {}),
+      ...(l.replayed?.length ? { replayed: l.replayed.map((n) => `${n.job}: ${n.result}`).join(", ") } : {}),
       ...(l.failedStep ? { failedStep: l.failedStep } : {}),
       ...(l.error ? { error: l.error } : {}),
     })),
