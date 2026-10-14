@@ -38,6 +38,11 @@ export interface GuestConfig {
   /** qemu backend: accelerator override ("hvf", "kvm" or "tcg"); defaults to the best the host has. */
   accel?: string;
   /**
+   * Windows guests: install the Visual Studio 2022 Build Tools C++ workload (MSVC + Windows SDK) while
+   * provisioning, as on GitHub's windows-latest. Default true; false saves several GB and ~10-20 min.
+   */
+  msvc?: boolean;
+  /**
    * macOS guests' Homebrew. Intel: the pinned brew tag and homebrew-core commit (missing fields take
    * DEFAULT_HOMEBREW), or false for none. Apple Silicon: `brew` pins the brew tag; without it brew
    * matches GitHub's arm64 runner image, and false leaves brew as it is.
@@ -57,7 +62,13 @@ export interface Config {
   max_vms: number;
   /** Required to run macOS guests on non-Apple hardware (dockur backend). */
   macos_eula_acknowledged: boolean;
+  /**
+   * act release. The default (PATCHED_ACT_VERSION in act.ts) runs osmatrix's patched build of it; another
+   * version downloads that stock release.
+   */
   act_version: string;
+  /** The user's own act: a path, or a command name looked up on PATH ("act"). Unset: osmatrix's act. */
+  act_path?: string;
   /** Image used for ubuntu-* legs run by act on the host. */
   act_linux_image: string;
   guests: Record<string, GuestConfig>;
@@ -173,7 +184,7 @@ export function loadConfig(file = paths.configFile): Config {
 }
 
 export function mergeConfig(cfg: Config, raw: Record<string, unknown>): Config {
-  for (const k of ["max_vms", "macos_eula_acknowledged", "act_version", "act_linux_image"] as const) {
+  for (const k of ["max_vms", "macos_eula_acknowledged", "act_version", "act_path", "act_linux_image"] as const) {
     if (raw[k] !== undefined) (cfg as unknown as Record<string, unknown>)[k] = raw[k];
   }
   const guests = (raw.guests ?? {}) as Record<string, Partial<GuestConfig> & { enabled?: boolean }>;
@@ -187,6 +198,9 @@ export function mergeConfig(cfg: Config, raw: Record<string, unknown>): Config {
     delete (merged as { enabled?: boolean }).enabled;
     if (!merged.os || !merged.backend) {
       throw new Error(`config: guest "${name}" needs "os" and "backend"`);
+    }
+    if (merged.msvc !== undefined && typeof merged.msvc !== "boolean") {
+      throw new Error(`config: guest "${name}": msvc must be true or false (got ${JSON.stringify(merged.msvc)})`);
     }
     cfg.guests[name] = merged;
   }
@@ -212,6 +226,16 @@ export function guestLabels(g: GuestConfig): string[] {
 
 export function guestShell(g: GuestConfig): Shell {
   return g.shell ?? defaultShell(g.os);
+}
+
+/** Whether a guest gets the MSVC Build Tools: Windows guests, unless they opt out with msvc = false. */
+export function guestMsvc(g: Pick<GuestConfig, "os" | "msvc">): boolean {
+  return g.os === "windows" && g.msvc !== false;
+}
+
+/** Choices for the Windows unattended install, written as C:\OEM\options.json (read by provision.ps1). */
+export function windowsOemOptions(g: GuestConfig): { msvc: boolean } {
+  return { msvc: guestMsvc(g) };
 }
 
 export function guestWorkdir(g: GuestConfig): string {

@@ -1,0 +1,8 @@
+name: docker-file-commands
+description: A Docker container action that writes GITHUB_OUTPUT and GITHUB_ENV; act runs it in its own container.
+outputs:
+  greeting:
+    description: set through GITHUB_OUTPUT
+runs:
+  using: docker
+  image: Dockerfile

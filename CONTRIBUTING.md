@@ -32,7 +32,11 @@ node src/cli.ts doctor
 
 To try your checkout as a plugin, run `npm run package:plugins`. It builds Claude, Cursor and Codex plugins that bundle the runtime, plus a local marketplace in `artifacts/`; the README explains how to install from it. To use your checkout from a terminal or agent without packaging, run `npm link` (or `node src/cli.ts …`), then `osmatrix install-agents`.
 
-Set `OSMATRIX_HOME=/some/dir` to keep experiments apart from your real guests: config, data and Docker resource names are then all separate.
+Set `OSMATRIX_HOME=/some/dir` to keep experiments apart from your real guests: config, data and Docker resource names are then all separate. (The patched act's Go cache volume and the lock around building it are shared by every install on the host.)
+
+### Changing the act patch
+
+osmatrix builds act from source with `assets/act/act-v0.2.89-osmatrix.patch` (see `src/core/act.ts`). To change it, apply it to the v0.2.89 source with `git apply`, edit, run `gofmt`, and write the result back with `git diff` (keep the header text). Any change to the patch, the Go image or the build script changes the build's cache key, so the next run rebuilds act and pushes it to guests again. Check it with `node src/cli.ts install-act --all-targets` and `node src/cli.ts ci run --repo fixtures/act-compat --only linux --job <job> --wait` for each of `file-commands`, `docker-action` and `download`. Moving to a newer act means a new source sha256 and patch in `act.ts`.
 
 ## Checks before you push
 
@@ -65,9 +69,10 @@ Query packs are downloaded and cached on first use.
 | `src/core/` | config, paths, processes, ssh (exec, file transfer, forwards), host checks |
 | `src/backends/` | guest backends: `container`, `dockur`, `tart`, `ssh` (one `Backend` interface) |
 | `src/setup.ts` | unattended guest setup (macOS Recovery automation lives here) |
-| `src/ci/` | workflow planning (matrix expansion, routing) and the act runner |
+| `src/ci/` | workflow planning (matrix expansion, routing), the act runner, and the scheduler that runs each job once and replays its results into the legs that need it |
 | `src/mcp.ts`, `src/cli.ts` | the MCP server and the CLI, thin layers over the same functions |
-| `assets/` | guest provisioning scripts and the container image (shipped in the npm package) |
+| `assets/` | guest provisioning scripts, the container image and the act patch (shipped in the npm package) |
+| `fixtures/` | workflows that CI runs through osmatrix: `matrix-demo` (an OS matrix) and `act-compat` (the act differences the patch fixes) |
 | `skills/` | the agent skills: `osmatrix-ci`, `osmatrix-guests`, `osmatrix-setup`, each with its own `references/` |
 | `.claude-plugin/`, `.cursor-plugin/`, `.agents/plugins/`, `plugin.json`, `mcp.json` | per-client manifests; the repository root is the plugin |
 | `scripts/` | manifest sync, skill and plugin validation, packaging |

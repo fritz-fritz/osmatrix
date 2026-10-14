@@ -1,11 +1,13 @@
 import fs from "node:fs";
 import os from "node:os";
 import { backendFor } from "../backends/index.ts";
-import { dockerBin, dockerHasKvm } from "../backends/docker.ts";
-import { loadConfig, type GuestConfig } from "./config.ts";
+import { ContainerBackend } from "../backends/container.ts";
+import { dockerBin, dockerHasKvm, imageExists } from "../backends/docker.ts";
+import { parityImageTag, runnerRust } from "../backends/linux-image.ts";
+import { DEFAULT_LINUX_IMAGE, loadConfig, type GuestConfig } from "./config.ts";
 import { ensureDir, paths } from "./paths.ts";
 import { run, which } from "./proc.ts";
-import { findAct } from "./act.ts";
+import { actReport, type ActReport } from "./act.ts";
 import { compatibility } from "./compat.ts";
 import { checkSizing, requirements } from "./sizing.ts";
 import { detectContainerHost, dockerReach, remoteDockerHost, type ContainerHost, type DockerReach } from "./nesting.ts";
@@ -14,6 +16,8 @@ export interface DoctorReport {
   /** kvm: KVM for VMs (Linux: /dev/kvm; Windows: inside Docker Desktop); absent where it doesn't apply. */
   host: { platform: string; arch: string; cpus: number; memoryGB: number; freeDiskGB?: number; kvm?: boolean };
   tools: Record<string, string | null>;
+  /** Which act CI legs run (osmatrix's patched build, a stock release, or the user's act_path) and whether it's ready. */
+  act: ActReport;
   guests: Record<string, { backend: string; os: string; runnable: boolean; reason?: string; compatibility: string; resources?: string }>;
   /** Present when osmatrix runs inside a container or against a remote Docker daemon. */
   nesting?: {
@@ -24,6 +28,11 @@ export interface DoctorReport {
     /** What the daemon shares with this environment, when Docker is available. */
     docker?: DockerReach;
   };
+  /**
+   * The image Linux CI legs use: `act_linux_image` itself, or with the default, the parity image for the
+   * Rust version of GitHub's runner image (`runner`, `rust`) and whether it's `built` yet.
+   */
+  linuxImage: { configured: string; image?: string; runner?: string; rust?: string; built?: boolean; error?: string };
   notes: string[];
 }
 
@@ -61,13 +70,34 @@ export async function doctor(): Promise<DoctorReport> {
     "ssh-keygen": which("ssh-keygen") ? "present" : null,
     tar: await version(which("tar"), ["--version"]),
     git: await version(which("git"), ["--version"]),
-    act: (await findAct()) ?? null,
+    act: null,
     tart: process.platform === "darwin" ? await version(which("tart"), ["--version"]) : null,
     "qemu-system-aarch64": await version(which("qemu-system-aarch64"), ["--version"]),
   };
+  const act = await actReport(cfg);
+  tools.act =
+    act.source === "user" ? (act.path ?? null) : `${act.version} (${act.source === "patched" ? `osmatrix's patched build, ${act.missing?.length ? "not fully built yet" : "built"}` : "stock release"})`;
   const notes: string[] = [];
   if (!tools.docker) notes.push("Docker is required for the ubuntu guest, dockur VMs and Linux CI legs.");
-  if (!tools.act) notes.push("act not found; it will be downloaded automatically on first `ci run` (or run `osmatrix install-act`).");
+  if (act.source !== "patched" || act.missing?.length) notes.push(act.note);
+  const linuxImage: DoctorReport["linuxImage"] = { configured: cfg.act_linux_image };
+  if (cfg.act_linux_image !== DEFAULT_LINUX_IMAGE) {
+    linuxImage.image = cfg.act_linux_image;
+  } else {
+    const { rust, tag, error } = await runnerRust();
+    if (!rust) {
+      linuxImage.error = error;
+      notes.push(`Couldn't look up the Rust version of GitHub's ubuntu24 runner image (${error}); Linux CI legs use the newest local osmatrix/ubuntu image, or build one with the current stable Rust.`);
+    } else {
+      Object.assign(linuxImage, { image: parityImageTag(rust), runner: tag, rust });
+      if (tools.docker) {
+        linuxImage.built = await imageExists(linuxImage.image!);
+        if (!linuxImage.built) {
+          notes.push(`Linux CI legs run in ${linuxImage.image}: act's default image plus Rust ${rust}, as in GitHub's ${tag} runner image. It isn't built yet; the first Linux leg builds it, which takes a few minutes and needs network access.`);
+        }
+      }
+    }
+  }
   if (!tools.ssh) notes.push("Install an OpenSSH client (built into Windows 10 1809+, macOS and most Linux distros).");
 
   const host = detectContainerHost();
@@ -103,6 +133,11 @@ export async function doctor(): Promise<DoctorReport> {
       sz = { errors: [(e as Error).message], warnings: [] };
     }
     for (const m of [...sz.errors, ...sz.warnings]) notes.push(`${g.name}: ${m} (change with env_configure / \`osmatrix configure\`)`);
+    const b = backendFor(g);
+    if (s.ok && b instanceof ContainerBackend) {
+      const stale = await b.staleBase().catch(() => undefined);
+      if (stale) notes.push(`${g.name}: ${stale}`);
+    }
   }
   const memGB = Math.round(os.totalmem() / 1024 ** 3);
   const vmMem = Object.values(cfg.guests)
@@ -114,7 +149,9 @@ export async function doctor(): Promise<DoctorReport> {
   return {
     host: { platform: process.platform, arch: process.arch, cpus: os.cpus().length, memoryGB: memGB, freeDiskGB, ...(kvm === undefined ? {} : { kvm }) },
     tools,
+    act,
     guests,
+    linuxImage,
     ...(nesting ? { nesting } : {}),
     notes,
   };

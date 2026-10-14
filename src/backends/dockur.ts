@@ -2,7 +2,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import YAML from "yaml";
-import { guestShell, loadConfig, type GuestConfig } from "../core/config.ts";
+import { guestShell, loadConfig, windowsOemOptions, type GuestConfig } from "../core/config.ts";
 import { assertLocalGuestsReachable, dockerReach, localGuestBlockReason } from "../core/nesting.ts";
 import { assetsDir, ensureDir, paths, resourcePrefix } from "../core/paths.ts";
 import { run } from "../core/proc.ts";
@@ -110,6 +110,7 @@ export class DockurBackend implements Backend {
       }
       const { publicKey } = await ensureKey();
       fs.writeFileSync(path.join(oem, "authorized_keys"), publicKey + "\r\n");
+      fs.writeFileSync(path.join(oem, "options.json"), JSON.stringify(windowsOemOptions(this.cfg)));
       // :z relabels for SELinux hosts (Fedora, openSUSE); ignored elsewhere.
       volumes.push(`${oem}:/oem:z`);
     }

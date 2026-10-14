@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { backendFor, type Backend, type GuestStatus } from "./backends/index.ts";
-import { guestArm64Brew, guestHomebrew, guestWorkdir, homebrewProvisionEnv, loadConfig, readRawConfig, writeConfig, type GuestConfig } from "./core/config.ts";
+import { guestArm64Brew, guestHomebrew, guestMsvc, guestWorkdir, homebrewProvisionEnv, loadConfig, readRawConfig, writeConfig, type GuestConfig } from "./core/config.ts";
 import { macArm64Image, runnerHomebrew } from "./core/runner-images.ts";
 import { checkSizing, requirements, type Sizing } from "./core/sizing.ts";
 import { assetsDir, paths } from "./core/paths.ts";
@@ -9,6 +9,7 @@ import { kill, sleep } from "./core/proc.ts";
 import {
   ensureKey,
   freePort,
+  powershell,
   quotePosix,
   quotePwsh,
   pull as sshPull,
@@ -495,13 +496,15 @@ export async function macProvisionPlan(ep: Endpoint, cfg: GuestConfig, bashArgs:
 }
 
 /**
- * Run the bundled provisioning script for the guest OS (macOS: Xcode CLT, Homebrew, git, node, python, act).
- * Interactive: runs in a terminal so sudo can ask for the guest password once. Idempotent, so it also adds
- * what newer osmatrix versions provision (such as Homebrew on Intel guests) to an existing guest.
+ * Run the bundled provisioning script for the guest OS (macOS: Xcode CLT, Homebrew, git, node, python, act;
+ * Windows: the MSVC Build Tools). Interactive: runs in a terminal so sudo can ask for the guest password once.
+ * Idempotent, so it also adds what newer osmatrix versions provision (such as Homebrew on Intel guests) to an
+ * existing guest.
  */
-export async function provision(name: string, opts: { passwordlessSudo?: boolean } = {}) {
+export async function provision(name: string, opts: { passwordlessSudo?: boolean } = {}): Promise<{ guest: string; exitCode: number; homebrew?: string; hint?: string }> {
   const g = getGuest(name);
-  if (g.cfg.os !== "macos") throw new Error("provision is only needed for macOS guests (Windows provisions itself at install, the ubuntu image is preconfigured)");
+  if (g.cfg.os === "windows") return provisionWindows(g);
+  if (g.cfg.os !== "macos") throw new Error("provision is only needed for macOS and Windows guests (the ubuntu image is preconfigured)");
   guestHomebrew(g.cfg); // a bad `homebrew` setting fails before anything runs in the guest
   const script = fs.readFileSync(path.join(assetsDir, "provision", "macos.sh"), "utf8");
   const ep = await readyEndpoint(name);
@@ -518,4 +521,29 @@ export async function provision(name: string, opts: { passwordlessSudo?: boolean
       ? `Run \`osmatrix snapshot ${name}\` (MCP: env_snapshot) to keep this in the golden snapshot; \`osmatrix reset ${name}\` restores the old one otherwise.`
       : undefined;
   return { guest: name, exitCode, ...(note ? { homebrew: note } : {}), ...(hint ? { hint } : {}) };
+}
+
+/**
+ * Windows guests provision themselves at install. This adds what osmatrix provisions now but didn't when
+ * an older guest (and its golden snapshot) was set up: the MSVC Build Tools (msvc.ps1, idempotent).
+ */
+async function provisionWindows(g: Guest): Promise<{ guest: string; exitCode: number; hint?: string }> {
+  const name = g.cfg.name;
+  if (!guestMsvc(g.cfg)) throw new Error(`${name} has msvc = false; remove it from [guests.${name}] in config.toml to install the MSVC Build Tools`);
+  const script = fs.readFileSync(path.join(assetsDir, "oem", "windows", "msvc.ps1"), "utf8");
+  const ep = await readyEndpoint(name);
+  const file = "$f = Join-Path $env:TEMP 'osmatrix-msvc.ps1'";
+  // base64: PowerShell reads stdin in the console's code page.
+  const up = await sshExec(ep, powershell(ep, `${file}; [IO.File]::WriteAllBytes($f, [Convert]::FromBase64String([Console]::In.ReadToEnd()))`), {
+    input: Buffer.from(script, "utf8").toString("base64"),
+    timeoutMs: 60_000,
+  });
+  if (up.code !== 0) throw new Error(`failed to copy provisioning script: ${up.stderr}`);
+  const { spawnSync } = await import("node:child_process");
+  const cmd = powershell(ep, `${file}; powershell.exe -NoProfile -ExecutionPolicy Bypass -File $f; $c = $LASTEXITCODE; Remove-Item -Force $f; exit $c`);
+  const r = spawnSync(sshBin(), [...sshArgs(ep, ["-T"]), cmd], { stdio: "inherit" });
+  const exitCode = r.status ?? 1;
+  return exitCode === 0
+    ? { guest: name, exitCode, hint: `Run \`osmatrix snapshot ${name}\` (MCP: env_snapshot) to keep this in the golden snapshot; \`osmatrix reset ${name}\` restores the old one otherwise.` }
+    : { guest: name, exitCode };
 }

@@ -104,6 +104,20 @@ jobs:
             node dist/cli.js ci status --repo fixtures/matrix-demo --full
             exit 1
           }
+      - name: act differences osmatrix patches (file commands under RUNNER_TEMP, Docker actions, upload/download-artifact v7)
+        # download needs upload, so upload runs first as its own leg and download gets its artifacts. Its
+        # matrix filter also limits upload to its Linux leg: needed legs on guests this runner lacks would error.
+        run: |
+          for job in file-commands docker-action "download --matrix os=ubuntu-latest"; do
+            # shellcheck disable=SC2086 # $job carries the filter flags
+            node dist/cli.js ci run --repo fixtures/act-compat --only linux --job $job --wait || {
+              node dist/cli.js ci status --repo fixtures/act-compat --full
+              exit 1
+            }
+          done
+          # The patch's per-job file-command volumes go away with their jobs.
+          left=$(docker volume ls -q --filter name=act-act-compat | grep -- -filecmds || true)
+          if [ -n "$left" ]; then echo "::error::file-command volumes left behind: $left"; exit 1; fi
       - name: Clean up the guest (matters when this job runs locally under act)
         if: always()
         run: node dist/cli.js destroy ubuntu --yes
