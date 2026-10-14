@@ -323,11 +323,15 @@ const SECRET_DIRS = [
  * overwrite dotfiles. Symlinks are resolved first.
  */
 export function sensitiveHostPath(p: string, home = os.homedir(), own = [paths.dataDir, paths.configDir]): string | undefined {
-  const real = (q: string) => {
+  // Resolve symlinks through the nearest existing ancestor, so a path that doesn't exist yet (a pull
+  // destination) compares like its parent (macOS: /var is /private/var).
+  const real = (q: string): string => {
+    const abs = path.resolve(q);
     try {
-      return fs.realpathSync(q);
+      return fs.realpathSync(abs);
     } catch {
-      return path.resolve(q);
+      const parent = path.dirname(abs);
+      return parent === abs ? abs : path.join(real(parent), path.basename(abs));
     }
   };
   const abs = real(p);

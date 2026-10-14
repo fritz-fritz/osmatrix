@@ -264,6 +264,9 @@ test("sensitiveHostPath keeps the home directory, credential stores and osmatrix
     // A symlink into a credential store counts as that store.
     assert.match(check(path.join(home, "src", "keys"))!, /credentials/);
     assert.match(check(path.join(data, "guests"))!, /osmatrix's own data/);
+    // A destination that doesn't exist yet, through a symlinked prefix, still counts.
+    fs.symlinkSync(home, path.join(root, "alias"));
+    assert.match(check(path.join(root, "alias", ".aws", "new", "dir"))!, /credentials/);
     assert.match(check(path.join(root, "data"))!, /osmatrix's own data/);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
