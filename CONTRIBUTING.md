@@ -69,7 +69,7 @@ Query packs are downloaded and cached on first use.
 | `src/core/` | config, paths, processes, ssh (exec, file transfer, forwards), host checks |
 | `src/backends/` | guest backends: `container`, `dockur`, `tart`, `ssh` (one `Backend` interface) |
 | `src/setup.ts` | unattended guest setup (macOS Recovery automation lives here) |
-| `src/ci/` | workflow planning (matrix expansion, routing) and the act runner |
+| `src/ci/` | workflow planning (matrix expansion, routing), the act runner, and the scheduler that runs each job once and replays its results into the legs that need it |
 | `src/mcp.ts`, `src/cli.ts` | the MCP server and the CLI, thin layers over the same functions |
 | `assets/` | guest provisioning scripts, the container image and the act patch (shipped in the npm package) |
 | `fixtures/` | workflows that CI runs through osmatrix: `matrix-demo` (an OS matrix) and `act-compat` (the act differences the patch fixes) |

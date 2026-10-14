@@ -227,7 +227,9 @@ program
 
 program
   .command("provision <guest>")
-  .description("Install the CI toolchain in a macOS guest (Xcode CLT, Homebrew, git, node, python, act); asks for the guest sudo password once")
+  .description(
+    "Install the CI toolchain: macOS (Xcode CLT, Homebrew, git, node, python, act; asks for the guest sudo password once) or, on Windows guests set up before osmatrix installed them, the MSVC Build Tools",
+  )
   .option("--passwordless-sudo", "also allow sudo without a password, like GitHub's macOS runners (needed by workflows with sudo steps)")
   .action(
     action(async (g: string, o: { passwordlessSudo?: boolean }) => {
@@ -393,6 +395,8 @@ function summarize(s: ReturnType<typeof ciStatus>) {
       state: l.state,
       ...(l.durationSec !== undefined ? { sec: l.durationSec } : {}),
       ...(l.waitingFor ? { waitingFor: l.waitingFor } : {}),
+      ...(l.neededOnly ? { neededOnly: true } : {}),
+      ...(l.replayed?.length ? { replayed: l.replayed.map((n) => `${n.job}: ${n.result}`).join(", ") } : {}),
       ...(l.failedStep ? { failedStep: l.failedStep } : {}),
       ...(l.error ? { error: l.error } : {}),
     })),

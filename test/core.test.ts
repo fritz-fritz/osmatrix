@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { test } from "node:test";
-import { ActJsonParser, actDifferenceHints, powershell } from "../src/ci/run.ts";
-import { defaultGuests, labelMatches, mergeConfig, defaultConfig } from "../src/core/config.ts";
+import { ActJsonParser, VC_TOOLS_PROBE, actDifferenceHints, commonActArgs, guestLegDir, macToolCacheCmd, msvcMissing, powershell, pwshHomePath, removeCmd } from "../src/ci/run.ts";
+import { defaultGuests, guestMsvc, labelMatches, mergeConfig, defaultConfig, windowsOemOptions } from "../src/core/config.ts";
 import { commandLine, quotePosix, quotePwsh, withCwd } from "../src/core/ssh.ts";
 import { encodePng } from "../src/gui.ts";
 import { bootBudget, bootHang } from "../src/env.ts";
@@ -46,6 +50,40 @@ test("config merge: override, add ssh guest, disable guest", () => {
   assert.throws(() => mergeConfig(defaultConfig(), { guests: { x: { host: "y" } } }));
 });
 
+test("config: Windows guests get the MSVC Build Tools unless msvc = false", () => {
+  const win = { os: "windows", backend: "dockur" };
+  const on = mergeConfig(defaultConfig(), { guests: { windows: win } }).guests.windows;
+  assert.equal(on.msvc, undefined);
+  assert.equal(guestMsvc(on), true);
+  assert.deepEqual(windowsOemOptions(on), { msvc: true });
+  const off = mergeConfig(defaultConfig(), { guests: { windows: { ...win, msvc: false } } }).guests.windows;
+  assert.equal(guestMsvc(off), false);
+  assert.deepEqual(windowsOemOptions(off), { msvc: false });
+  assert.equal(guestMsvc({ os: "windows", msvc: true }), true);
+  // Only Windows guests have it.
+  assert.equal(guestMsvc({ os: "macos" }), false);
+  assert.equal(guestMsvc({ os: "linux", msvc: true }), false);
+  assert.throws(() => mergeConfig(defaultConfig(), { guests: { windows: { ...win, msvc: "no" } } }), /msvc must be true or false/);
+});
+
+test("the MSVC probe asks vswhere for Build Tools with x64 or ARM64 C++ tools", () => {
+  assert.match(VC_TOOLS_PROBE, /vswhere\.exe/);
+  assert.match(VC_TOOLS_PROBE, /-products \*/);
+  assert.match(VC_TOOLS_PROBE, /-requiresAny -requires Microsoft\.VisualStudio\.Component\.VC\.Tools\.x86\.x64 Microsoft\.VisualStudio\.Component\.VC\.Tools\.ARM64/);
+  // The SDK counts only with import libraries for the guest's architecture.
+  assert.match(VC_TOOLS_PROBE, /KitsRoot10/);
+  assert.match(VC_TOOLS_PROBE, /um\\\$a\\kernel32\.lib/);
+  assert.match(VC_TOOLS_PROBE, /; exit 0$/);
+});
+
+test("msvcMissing needs both the C++ tools and a Windows SDK", () => {
+  const vc = "vc:C:\\Program Files (x86)\\Microsoft Visual Studio\\2022\\BuildTools";
+  assert.equal(msvcMissing(`${vc}\r\nsdk:10.0.26100.0\r\n`), undefined);
+  assert.match(msvcMissing(`${vc}\r\n`)!, /no Windows SDK/);
+  assert.match(msvcMissing("sdk:10.0.26100.0\n")!, /no MSVC C\+\+ tools/);
+  assert.match(msvcMissing("")!, /no MSVC C\+\+ tools and there is no Windows SDK/);
+});
+
 test("label globs", () => {
   const g = defaultGuests("linux", "x64");
   assert.ok(labelMatches("windows-2025", g.windows));
@@ -86,6 +124,71 @@ test("PowerShell scripts run as-is on pwsh endpoints and encoded on cmd ones", (
   const m = /^powershell -NoProfile -NonInteractive -EncodedCommand ([A-Za-z0-9+/=]+)$/.exec(powershell({ shell: "cmd" }, script));
   assert.ok(m);
   assert.equal(Buffer.from(m[1], "base64").toString("utf16le"), script);
+});
+
+test("VM legs keep their own files next to the work tree and pass a derived workflow with -W", () => {
+  const own = guestLegDir("work", "20261012T101010-ab12", "gw-windows-latest");
+  assert.equal(own.path, "work/.osmatrix/20261012T101010-ab12/gw-windows-latest");
+  // act runs in work/<repo>, so the same directory is one level up from there.
+  assert.equal(own.fromWorkTree, "../.osmatrix/20261012T101010-ab12/gw-windows-latest");
+  assert.equal(own.run, "work/.osmatrix/20261012T101010-ab12");
+  const leg = { workflow: ".github/workflows/ci.yml", job: "gw", matrix: { os: "windows-latest", cfg: { a: 1 } } } as never;
+  assert.deepEqual(commonActArgs(leg), ["-W", ".github/workflows/ci.yml", "-j", "gw", "--json", "--matrix", "os:windows-latest"]);
+  assert.deepEqual(commonActArgs(leg, `${own.fromWorkTree}/ci.yml`).slice(0, 2), ["-W", `${own.fromWorkTree}/ci.yml`]);
+  // Guest paths in PowerShell expressions are quoted strings, even when quoting wouldn't be needed as an argument.
+  assert.equal(pwshHomePath(own.path), "[IO.Path]::Combine($HOME, 'work/.osmatrix/20261012T101010-ab12/gw-windows-latest')");
+  assert.equal(pwshHomePath("it's"), "[IO.Path]::Combine($HOME, 'it''s')");
+  // Removal fails loudly (non-zero exit) so a leftover secrets file can be reported; a missing path is fine.
+  assert.equal(removeCmd({ shell: "posix" }, own.run), "rm -rf work/.osmatrix/20261012T101010-ab12");
+  const ps = removeCmd({ shell: "pwsh" }, own.run);
+  assert.match(ps, /if \(Test-Path -LiteralPath \$p\) \{ Remove-Item -Recurse -Force -ErrorAction Stop -LiteralPath \$p \}/);
+  assert.ok(!ps.includes("SilentlyContinue"));
+});
+
+test("macOS tool cache check repairs only what isn't owned, writable and searchable, and reports a failed repair", { skip: process.platform === "win32" }, () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "osmatrix-toolcache-"));
+  try {
+    // A stand-in sudo that records its arguments and runs them without root. chown is only recorded:
+    // the test's files already belong to the test user, and Linux has no "staff" group.
+    // OSMATRIX_TEST_SUDO_FAIL makes it fail, like sudo -n without passwordless sudo.
+    const calls = path.join(tmp, "sudo-calls");
+    fs.mkdirSync(path.join(tmp, "bin"));
+    const fake = `#!/bin/sh\necho "$*" >> ${JSON.stringify(calls)}\n[ -z "$OSMATRIX_TEST_SUDO_FAIL" ] || exit 1\n[ "$1" = -n ] && shift\n[ "$1" = chown ] && exit 0\nexec "$@"\n`;
+    fs.writeFileSync(path.join(tmp, "bin", "sudo"), fake, { mode: 0o755 });
+    const sh = (cmd: string, env: Record<string, string> = {}) =>
+      spawnSync("sh", ["-c", cmd], { env: { ...process.env, ...env, PATH: `${path.join(tmp, "bin")}:${process.env.PATH}` } }).status;
+    const sudoCalls = () => (fs.existsSync(calls) ? fs.readFileSync(calls, "utf8").trim().split("\n") : []);
+    const runner = path.join(tmp, "runner");
+    const cache = path.join(runner, "hostedtoolcache");
+
+    // Missing: created, given to the user, and the postcondition holds.
+    assert.equal(sh(macToolCacheCmd(cache)), 0);
+    const lines = sudoCalls();
+    assert.equal(lines[0], `-n mkdir -p ${cache}`);
+    assert.match(lines[1], new RegExp(`^-n chown -R \\S+:staff ${runner}$`));
+    assert.equal(lines[2], `-n chmod u+rwx ${runner} ${cache}`);
+    fs.rmSync(calls);
+
+    // Already fine: no sudo at all.
+    assert.equal(sh(macToolCacheCmd(cache)), 0);
+    assert.deepEqual(sudoCalls(), []);
+
+    // Read-only (root ignores permission bits, so only meaningful for a normal user).
+    if (process.getuid?.() !== 0) {
+      fs.chmodSync(cache, 0o555);
+      assert.equal(sh(macToolCacheCmd(cache)), 0);
+      assert.equal(sudoCalls().length, 3);
+      fs.accessSync(cache, fs.constants.W_OK | fs.constants.X_OK);
+      fs.rmSync(calls);
+
+      // A repair that fails leaves the postcondition unmet, so the command fails and the leg warns.
+      fs.chmodSync(cache, 0o555);
+      assert.notEqual(sh(macToolCacheCmd(cache), { OSMATRIX_TEST_SUDO_FAIL: "1" }), 0);
+      fs.chmodSync(cache, 0o755);
+    }
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
 });
 
 test("bootBudget scales with the slowest recent boot", () => {

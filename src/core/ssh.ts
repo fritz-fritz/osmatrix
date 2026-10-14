@@ -75,12 +75,41 @@ export function commandLine(shell: Shell, argv: string[]): string {
   return shell === "pwsh" ? `& ${q.join(" ")}` : q.join(" ");
 }
 
+/**
+ * A PowerShell script as a command for a Windows endpoint. Guests whose ssh shell is cmd get Windows
+ * PowerShell with the script encoded, which sidesteps cmd's quoting.
+ */
+export function powershell(ep: Pick<Endpoint, "shell">, script: string): string {
+  if (ep.shell === "pwsh") return script;
+  return `powershell -NoProfile -NonInteractive -EncodedCommand ${Buffer.from(script, "utf16le").toString("base64")}`;
+}
+
 /** Prefix a command with a working-directory change (relative paths are relative to the guest home). */
 export function withCwd(shell: Shell, cwd: string | undefined, command: string): string {
   if (!cwd) return command;
   if (shell === "pwsh") return `Set-Location -LiteralPath ${quotePwsh(cwd)}; ${command}`;
   if (shell === "cmd") return `cd /d ${quoteFor("cmd", cwd)} && ${command}`;
   return `cd ${quotePosix(cwd)} && ${command}`;
+}
+
+export interface ChainStep {
+  argv: string[];
+  /** Keep going when this step fails. */
+  optional?: boolean;
+}
+
+/**
+ * Run native commands one after another in the guest shell, stopping at the first required step that
+ * fails. Windows PowerShell 5.1 has no `&&`, so pwsh checks $LASTEXITCODE after each step instead.
+ */
+export function commandChain(shell: Shell, steps: ChainStep[]): string {
+  if (shell === "pwsh") {
+    // Stop turns "command not found" into a failure; otherwise pwsh prints it and carries on.
+    const body = steps.map((s) => commandLine(shell, s.argv) + (s.optional ? "" : "; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }"));
+    return ["$ErrorActionPreference = 'Stop'", ...body].join("; ");
+  }
+  const ok = shell === "cmd" ? "ver >nul" : "true";
+  return steps.map((s) => (s.optional ? `(${commandLine(shell, s.argv)} || ${ok})` : commandLine(shell, s.argv))).join(" && ");
 }
 
 // ---------- exec ----------
@@ -113,7 +142,8 @@ export async function sshProbe(ep: Endpoint): Promise<ProbeResult> {
 
 // ---------- file transfer (tar over ssh) ----------
 
-function mkdirCmd(shell: Shell, dir: string, clean: boolean): string {
+/** Create dir in the guest (relative paths are relative to the guest home); clean deletes it first. */
+export function mkdirCmd(shell: Shell, dir: string, clean: boolean): string {
   if (shell === "pwsh") {
     const q = quotePwsh(dir);
     return (

@@ -105,7 +105,7 @@ jobs:
             exit 1
           }
       - name: act differences osmatrix patches (file commands under RUNNER_TEMP, Docker actions, upload/download-artifact v7)
-        # download needs upload, so this runs both; a plain --only linux run would skip download.
+        # download needs upload, so upload runs first as its own leg and download gets its artifacts.
         run: |
           for job in file-commands docker-action download; do
             node dist/cli.js ci run --repo fixtures/act-compat --only linux --job "$job" --wait || {

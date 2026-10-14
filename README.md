@@ -111,14 +111,15 @@ Run `osmatrix doctor` to see what this host can do. It also needs an OpenSSH cli
 | Guest | CPUs (min / default) | RAM (min / default) | Virtual disk (min / default) | Host disk once set up |
 |---|---|---|---|---|
 | ubuntu (container) | 1 / unlimited | 1G / unlimited | none | the act image |
-| windows: Server 2025, x86_64 | 2 / 4 | 4G / 8G | 40G / 64G | ~12G (measured), plus the install ISO (~6G) during first setup |
-| windows: Windows 11 ARM | 2 / 4 | 4G / 8G | 64G / 64G | ~20G (estimate) |
+| windows: Server 2025, x86_64 | 2 / 4 | 4G / 8G | 40G / 64G (48G or more with the MSVC Build Tools) | ~20G (estimate: ~12G measured without the MSVC Build Tools), plus the install ISO (~6G) during first setup |
+| windows: Windows 11 ARM | 2 / 4 | 4G / 8G | 64G / 64G | ~28G (estimate) |
 | macos: dockur (Intel) | 2 / 4 | 4G / 8G | 48G / 64G | ~25G (measured) |
 | macos: tart | 2 / 4 | 4G / 8G | from the image (50G) | ~25G (estimate) |
 
 - VM disks are sparse: the host only stores what the guest has written. Each VM's golden snapshot is another copy (less on copy-on-write filesystems such as btrfs).
 - Each running VM holds its full RAM. Running Windows and macOS together at the defaults takes 16G for the guests alone, so plan on 24G or more of host RAM; on a 16G host, run one VM at a time (`max_vms = 1`).
 - The minimums are what the OS and osmatrix's provisioning still work with. Builds go faster with the defaults or more.
+- Windows guests include the Visual Studio 2022 Build Tools C++ workload (MSVC and the Windows SDK), like GitHub's `windows-latest`. They take about 8G of the guest's disk and add 10–20 minutes to setup. Set `msvc = false` on the guest to skip them (see [Configuration](#configuration)).
 
 Change a guest's size with `osmatrix configure` (MCP: `env_configure`). It checks the new values against the minimums and what the host has:
 
@@ -168,11 +169,11 @@ Agents use `env_setup` and poll `env_status`. Afterwards, `osmatrix reset <guest
 How each guest gets there:
 
 - **ubuntu**: a container built from `catthehacker/ubuntu:act-24.04` with sshd added.
-- **windows**: dockur downloads Windows Server 2025 (evaluation) from Microsoft and installs it unattended. [`provision.ps1`](assets/oem/windows/provision.ps1) installs PowerShell 7, Git, Node LTS, Python and stock act (used only when osmatrix's [patched act](#act) isn't), then enables sshd. Its log is at `C:\OEM\provision.log`.
+- **windows**: dockur downloads Windows Server 2025 (evaluation) from Microsoft and installs it unattended. [`provision.ps1`](assets/oem/windows/provision.ps1) installs PowerShell 7, Git, Node LTS, Python, stock act (used only when osmatrix's [patched act](#act) isn't) and the MSVC Build Tools with the Windows SDK ([`msvc.ps1`](assets/oem/windows/msvc.ps1), which checks the installer's Microsoft signature before running it), then enables sshd. Like GitHub's image, it enables Git symlinks and Developer Mode (so symlinks can be created) and leaves `core.autocrlf` at Git for Windows' default (`true`). Its log is at `C:\OEM\provision.log`.
 - **macos (dockur)**:
   1. osmatrix boots macOS Recovery. It drives Recovery's Terminal through the VNC display and a small [command bridge](assets/macos/bridge.py) inside the container, erases the disk, and runs `startosinstall --agreetolicense`.
   2. After the install it boots Recovery again and runs [`configure.sh`](assets/macos/configure.sh) on the new system. That creates the `osmatrix` admin user with the SSH key, Remote Login, passwordless sudo and auto-login, and skips Setup Assistant.
-  3. Finally [`macos.sh`](assets/provision/macos.sh) installs the Xcode command-line tools, Node, Python and act.
+  3. Finally [`macos.sh`](assets/provision/macos.sh) installs the Xcode command-line tools, Node, Python and act, and creates `/Users/runner/hostedtoolcache`, where the macOS packages behind `actions/setup-python` and similar actions install on GitHub's runners.
 
   These guests are Intel (x86_64), so they have no Homebrew; Homebrew dropped Intel support.
 - **macos (tart)**: clones a cirruslabs image, installs the key through the guest agent, then provisions with Homebrew.
@@ -198,6 +199,8 @@ osmatrix ci run --wait                    # foreground, exit code reflects the r
 
 Secrets for CI go in `<repo>/.osmatrix/secrets` (or `.secrets`) as `KEY=value` lines. Run logs land in `<repo>/.osmatrix/runs/`, which is git-ignored automatically.
 
+For Windows and macOS legs, osmatrix checks your working tree out in the guest with Git, as `actions/checkout` does on GitHub's runners. Uncommitted changes and untracked files that aren't ignored are included. The guest's Git settings decide line endings, file modes and symlinks, so Windows legs get CRLF files and a clean `git status`, as on GitHub. Each run gets a fresh clone, so config or hooks that a previous run's steps changed don't carry over. The guest and the host (in the osmatrix data dir) keep the objects, so later runs send only what changed. `HEAD` in the guest is your commit and branch, so `GITHUB_SHA` and `GITHUB_REF` are yours, and the index is your index: uncommitted changes show up in `git status` and `git diff` exactly as on the host, as they do on Linux legs. Directories outside a Git repository and repositories that use Git LFS (or another filter), submodules or nested repositories are copied file by file instead; then line endings, modes and symlinks follow the host, and the leg's log says so. `osmatrix push` always copies files as they are, without `.git`.
+
 ### act
 
 osmatrix runs a patched build of act 0.2.89, on the host and in every guest. [The patch](assets/act/act-v0.2.89-osmatrix.patch) fixes two ways stock act differs from GitHub's runners:
@@ -213,13 +216,27 @@ An `act` on your PATH isn't used unless you ask for it. In `config.toml`, `act_p
 
 `osmatrix config` prints the effective config and its file path. See [skills/osmatrix-setup/references/reference.md](skills/osmatrix-setup/references/reference.md) for every option, including adding `ssh` guests such as a real Mac on your network.
 
+Windows guests get the MSVC Build Tools and Windows SDK during setup, because Rust's default `x86_64-pc-windows-msvc` target and C/C++ builds link with them. Without them, rustc falls back to Git's coreutils `link.exe` and fails with `link: extra operand`. They cost about 8G of disk and 10–20 minutes of setup. To leave them out, set this before `osmatrix setup windows`:
+
+```toml
+[guests.windows]
+msvc = false
+```
+
+Windows guests set up before osmatrix installed the Build Tools don't have them, and neither does their golden snapshot. A Windows CI leg that uses a Rust toolchain action (including any `actions-rs/*`), runs `rustup` or `cargo`, or uses `ilammy/msvc-dev-cmd` or `microsoft/setup-msbuild` warns when its guest lacks the C++ tools or a Windows SDK. Jobs it `needs:` count too when act runs them in the same guest (needs without a local target of their own); needs that run on their own legs and are replayed don't. `osmatrix provision` also completes an install that has the C++ tools but no SDK; `ci plan` already warns for a guest with `msvc = false`. To add them to an existing guest:
+
+```bash
+osmatrix provision windows    # installs the Build Tools over ssh; does nothing if they're there
+osmatrix snapshot windows     # keep them in the golden snapshot
+```
+
 ## What local runs don't reproduce
 
 `ci plan` warns about each of these:
 
 - `services:` on non-Linux legs.
 - OIDC.
-- `needs:` across OSes. act runs the dependency in the same environment; on Windows legs, osmatrix runs a needed Linux job's `run:` steps without a `shell:` with Git Bash.
+- Some `needs:`. osmatrix runs every job of a run once, on its own `runs-on` target, and replays its result, outputs and artifacts into each leg that needs it, as GitHub hands them over between runners: a Windows/macOS leg gets a Linux job's results from its one run on the host, and a Linux leg gets a Windows job's artifacts from its VM. A needed job with no local target runs inside each leg that needs it instead (on Windows with Git Bash for `run:` steps without a `shell:`), and `ci plan` says so. Either way osmatrix leaves the guest's synced tree untouched: act gets a derived copy of the workflow from outside it.
 - Matrices built from expressions.
 - Remote reusable workflows.
 

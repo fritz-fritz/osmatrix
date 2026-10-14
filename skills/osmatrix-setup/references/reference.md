@@ -17,7 +17,7 @@ Every command accepts `--json`. Exit code is non-zero on errors.
 | `env_screenshot` | `osmatrix screenshot <guest> -o shot.png` |
 | `env_input` | `osmatrix input <guest> [--click x,y] [--text "..."] [--keys enter ctrl+a]` |
 
-CLI-only: `osmatrix init` (config + ssh key + host check), `config`, `install-act [--all-targets]` (build the patched act now instead of on the first `ci run`), `install-agents`, `setup-ssh <guest> --user u` (ssh guests only accepting passwords), `provision <guest> [--passwordless-sudo]` (re-run the macOS toolchain install), `destroy <guest> --yes`.
+CLI-only: `osmatrix init` (config + ssh key + host check), `config`, `install-act [--all-targets]` (build the patched act now instead of on the first `ci run`), `install-agents`, `setup-ssh <guest> --user u` (ssh guests only accepting passwords), `provision <guest> [--passwordless-sudo]` (re-run the macOS toolchain install; on Windows guests, install the MSVC Build Tools if they're missing), `destroy <guest> --yes`.
 
 ## Compatibility matrix
 
@@ -70,7 +70,8 @@ macos_eula_acknowledged = true   # required for dockur macOS on non-Apple hardwa
 [guests.windows]
 memory = "12G"                   # min 4G; prefer env_configure, which checks the values
 cpus = 6                         # min 2
-disk = "96G"                     # dockur VMs; min 40G (Windows 11 ARM 64G, macOS 48G); grow only
+disk = "96G"                     # dockur VMs; min 40G, 48G+ with msvc (Windows 11 ARM 64G, macOS 48G); grow only
+msvc = false                     # Windows: skip the MSVC Build Tools + Windows SDK (default true: ~8G, +10-20 min setup)
 
 [guests.macos]
 enabled = false                  # drop a default guest
@@ -84,13 +85,15 @@ identity = "~/.ssh/id_ed25519"
 labels = ["macos-*"]
 ```
 
+`msvc` is read when Windows installs, so set it before `env_setup`. Rust's default `*-pc-windows-msvc` targets and C/C++ builds need the Build Tools; without them rustc picks up Git's `link.exe` (`link: extra operand`). Guests set up before osmatrix installed them, and their golden snapshots, lack them: run `osmatrix provision <guest>` (several GB, 10-20 min, idempotent), then `env_snapshot` to keep them. Windows CI legs that use Rust or C/C++ toolchain steps (their own or in jobs they `needs:`, which act runs in the same guest) warn when the guest lacks the C++ tools or a Windows SDK.
+
 `ssh_port`, `web_port` and `vnc_port` are preferences: a busy port is replaced by a free one when the guest starts, and `osmatrix status` shows the ports in use.
 
 Labels decide which guest serves a `runs-on` label (globs, first match wins). Linux labels are served by act on the host.
 
 ## Guest-side layout
 
-- Windows: user `osmatrix` (admin), sshd default shell `pwsh`, tools: Git (+bash), Node LTS, Python, PowerShell 7, act (stock; CI legs run osmatrix's patched act from `~/.osmatrix/bin`). Provisioning log: `C:\OEM\provision.log`.
-- macOS: user `osmatrix` (admin, passwordless sudo, auto-login to the desktop), Xcode Command Line Tools, git, Node LTS, Python, act (stock; CI legs run osmatrix's patched act from `~/.osmatrix/bin`), jq; Homebrew on Apple Silicon only. Password in the host's osmatrix data dir (`guests/<name>/credentials.json`).
+- Windows: user `osmatrix` (admin), sshd default shell `pwsh`, tools: Git (+bash), Node LTS, Python, PowerShell 7, act (stock; CI legs run osmatrix's patched act from `~/.osmatrix/bin`), VS 2022 Build Tools C++ workload with the Windows SDK (unless `msvc = false`). Provisioning log: `C:\OEM\provision.log`.
+- macOS: user `osmatrix` (admin, passwordless sudo, auto-login to the desktop), Xcode Command Line Tools, git, Node LTS, Python, act (stock; CI legs run osmatrix's patched act from `~/.osmatrix/bin`), jq; Homebrew on Apple Silicon only. `/Users/runner/hostedtoolcache` exists and belongs to that user, because the macOS packages `actions/setup-python` and the other `actions/*-versions` installers download install there, as on GitHub's runners (`ci_run` creates it before each macOS leg on guests set up without it). Password in the host's osmatrix data dir (`guests/<name>/credentials.json`).
 - Data dir (guest state, ssh key, credentials, logs, the act builds in `bin/`): Linux `~/.local/share/osmatrix`.
 - act: osmatrix builds act 0.2.89 with its patch (file commands under `RUNNER_TEMP`, artifact server that works with `upload-artifact` v7, Docker actions still get the file commands) from source in a pinned `golang` Docker image, for the host and the guests' platforms, the first time CI needs it. An `act` on PATH is not used unless `act_path` names it. Without Docker, osmatrix falls back to the stock release and warns. Guests' provisioned act (`C:\Program Files\act`, `/usr/local/bin/act`) is stock, and is only used when the patched build isn't.
