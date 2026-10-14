@@ -173,10 +173,10 @@ How each guest gets there:
 - **macos (dockur)**:
   1. osmatrix boots macOS Recovery. It drives Recovery's Terminal through the VNC display and a small [command bridge](assets/macos/bridge.py) inside the container, erases the disk, and runs `startosinstall --agreetolicense`.
   2. After the install it boots Recovery again and runs [`configure.sh`](assets/macos/configure.sh) on the new system. That creates the `osmatrix` admin user with the SSH key, Remote Login, passwordless sudo and auto-login, and skips Setup Assistant.
-  3. Finally [`macos.sh`](assets/provision/macos.sh) installs the Xcode command-line tools, Node, Python and act, and creates `/Users/runner/hostedtoolcache`, where the macOS packages behind `actions/setup-python` and similar actions install on GitHub's runners.
+  3. Finally [`macos.sh`](assets/provision/macos.sh) installs the Xcode command-line tools, Node, Python, act and Homebrew, and creates `/Users/runner/hostedtoolcache`, where the macOS packages behind `actions/setup-python` and similar actions install on GitHub's runners.
 
-  These guests are Intel (x86_64), so they have no Homebrew; Homebrew dropped Intel support.
-- **macos (tart)**: clones a cirruslabs image, installs the key through the guest agent, then provisions with Homebrew.
+  These guests are Intel (x86_64). Homebrew stopped building Intel bottles in August 2026 and its installer no longer supports Intel, so osmatrix installs Homebrew into `/usr/local` (as on GitHub's Intel runner) pinned to brew 6.0.22 and the last homebrew-core commit whose formulae have Intel bottles. `brew install` then pours bottles instead of compiling, at the formula versions of that commit, which are older than on GitHub's runners. The `homebrew` guest setting changes the pins or turns Homebrew off ([reference](skills/osmatrix-setup/references/reference.md)). Guests set up before this get it with `osmatrix provision macos`, then `osmatrix snapshot macos` to keep it in the golden snapshot.
+- **macos (tart)**: clones a cirruslabs image, installs the key through the guest agent, then provisions with Homebrew, set to the brew version GitHub's arm64 runner image for that macOS ships (looked up in actions/runner-images, cached for a day).
 
 The generated guest passwords are stored in the osmatrix data dir under `guests/<name>/credentials.json`, for RDP or the VNC viewer.
 
@@ -241,6 +241,7 @@ osmatrix snapshot windows     # keep them in the golden snapshot
 - Some `needs:`. osmatrix runs every job of a run once, on its own `runs-on` target, and replays its result, outputs and artifacts into each leg that needs it, as GitHub hands them over between runners: a Windows/macOS leg gets a Linux job's results from its one run on the host, and a Linux leg gets a Windows job's artifacts from its VM. A needed job with no local target runs inside each leg that needs it instead (on Windows with Git Bash for `run:` steps without a `shell:`), and `ci plan` says so. Either way osmatrix leaves the guest's synced tree untouched: act gets a derived copy of the workflow from outside it.
 - Matrices built from expressions.
 - Remote reusable workflows.
+- `brew` steps on Intel macOS guests, whose Homebrew is pinned to older formula versions.
 - Linux legs that use Rust when `act_linux_image` is set to an image other than the default, which may lack the Rust GitHub preinstalls.
 
 osmatrix's [patched act](#act) puts the file-command files (`GITHUB_OUTPUT`, `GITHUB_ENV`, …) under `RUNNER_TEMP` and works with `upload-artifact` v7, which stock act doesn't. A leg that runs stock act anyway (see [act](#act)) says so in its warnings.

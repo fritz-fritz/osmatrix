@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import YAML from "yaml";
-import { DEFAULT_LINUX_IMAGE, guestMsvc, labelMatches, type Config, type GuestConfig } from "../core/config.ts";
+import { DEFAULT_LINUX_IMAGE, guestHomebrew, guestMsvc, labelMatches, type Config, type GuestConfig } from "../core/config.ts";
 
 export type Scalar = string | number | boolean | null;
 export type MatrixCombo = Record<string, unknown>;
@@ -268,6 +268,45 @@ export function rustUse(job: Record<string, unknown>, toolchainFile?: string): s
   return toolchainFile ? `the repo has ${toolchainFile}` : undefined;
 }
 
+/**
+ * dockur macOS guests are Intel, where Homebrew is pinned to the last homebrew-core with Intel bottles
+ * (or not installed by provisioning with `homebrew = false`). Tell the agent before a `brew` step behaves differently than on GitHub.
+ */
+export function brewWarnings(job: Record<string, unknown>, g: GuestConfig): string[] {
+  if (g.os !== "macos" || g.backend !== "dockur" || !Array.isArray(job.steps)) return [];
+  const brew = (job.steps as Record<string, unknown>[])
+    // Steps guarded to another OS don't run here. Only a condition that is nothing but `runner.os == 'Linux'`
+    // (or Windows) counts: `runner.os == 'Linux' || runner.os == 'macOS'` still runs on macOS.
+    .filter((s) => s && typeof s.run === "string" && !/^\s*(\$\{\{\s*)?runner\.os\s*==\s*['"](Linux|Windows)['"]\s*(\}\}\s*)?$/.test(String(s.if ?? "")))
+    .map((s) => s.run)
+    .join("\n");
+  // brew run as a command (see runCommands), not mentioned in an echo or a comment.
+  if (!runCommands(brew).includes("brew")) return [];
+  let pins;
+  try {
+    pins = guestHomebrew(g);
+  } catch (e) {
+    return [(e as Error).message];
+  }
+  if (!pins) {
+    return [
+      `steps run brew, but guest ${g.name} has homebrew = false: provisioning skips Homebrew there but doesn't remove one installed earlier, so brew may be missing`,
+    ];
+  }
+  const w: string[] = [];
+  if (/\bbrew\s+(install|reinstall|bundle)\b/.test(brew)) {
+    w.push(
+      `steps run brew install: guest ${g.name} is Intel macOS, where Homebrew ${pins.brew} is pinned to homebrew-core ${pins.core.slice(0, 12)} (the last with Intel bottles). Formulae install at those versions, older than on GitHub's runners; a formula without an Intel bottle there builds from source`,
+    );
+  }
+  if (/\bbrew\s+(update|upgrade)\b/.test(brew)) {
+    w.push(
+      `steps run brew update/upgrade: on Intel guest ${g.name} that moves Homebrew off its pins to formulae without Intel bottles (builds from source); \`osmatrix reset ${g.name}\` restores the pinned state`,
+    );
+  }
+  return w;
+}
+
 // ---------- workflows ----------
 
 export function listWorkflows(repo: string): string[] {
@@ -340,6 +379,7 @@ export function plan(repo: string, cfg: Config, filter: PlanFilter = {}): Plan {
         const { target, os } = pickTarget(labels, cfg);
         if (!target && !skip) skip = `no configured guest serves runs-on ${JSON.stringify(labels)}`;
         if (job.services && os && os !== "linux") lw.push("job services: are only supported on Linux legs");
+        if (target && cfg.guests[target]) lw.push(...brewWarnings(job, cfg.guests[target]));
         if (job.permissions && JSON.stringify(job.permissions).includes("id-token")) lw.push("OIDC (id-token) is not available locally");
         if (target === "host" && cfg.act_linux_image !== DEFAULT_LINUX_IMAGE) {
           const why = rustUse(job, toolchainFile);

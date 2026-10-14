@@ -1,7 +1,8 @@
 import fs from "node:fs";
 import path from "node:path";
 import { backendFor, type Backend, type GuestStatus } from "./backends/index.ts";
-import { guestMsvc, guestWorkdir, loadConfig, readRawConfig, writeConfig, type GuestConfig } from "./core/config.ts";
+import { guestArm64Brew, guestHomebrew, guestMsvc, guestWorkdir, homebrewProvisionEnv, loadConfig, readRawConfig, writeConfig, type GuestConfig } from "./core/config.ts";
+import { macArm64Image, runnerHomebrew } from "./core/runner-images.ts";
 import { checkSizing, requirements, type Sizing } from "./core/sizing.ts";
 import { assetsDir, paths } from "./core/paths.ts";
 import { kill, sleep } from "./core/proc.ts";
@@ -453,29 +454,80 @@ export async function setupSsh(name: string, user?: string): Promise<GuestStatus
   return g.backend.status();
 }
 
+/** `bash <args>` with the provisioning script's settings for this guest (which Homebrew it gets) in its environment. */
+export function macProvisionCommand(cfg: GuestConfig, bashArgs: string, arm64Brew?: string): string {
+  const env = Object.entries(homebrewProvisionEnv(cfg, arm64Brew)).map(([k, v]) => `${k}=${quotePosix(v)}`);
+  return [...env, "bash", bashArgs].join(" ");
+}
+
+/**
+ * The brew tag for an Apple Silicon guest: its configured one, else the one GitHub's arm64 runner image
+ * for the guest's macOS version ships. Undefined (with a note) keeps the guest's brew as it is.
+ */
+export async function resolveArm64Brew(
+  cfg: GuestConfig,
+  guest: { arch: string; productVersion: string },
+  lookup: typeof runnerHomebrew = runnerHomebrew,
+): Promise<{ brew?: string; note?: string }> {
+  if (guest.arch !== "arm64") return {};
+  const configured = guestArm64Brew(cfg);
+  if (configured === false) return { note: "homebrew = false: the guest's Homebrew version is left as it is" };
+  if (configured) return { brew: configured, note: `Homebrew ${configured} (from config)` };
+  const image = macArm64Image(guest.productVersion);
+  if (!image) return { note: `unknown macOS version "${guest.productVersion}": the guest's Homebrew version is left as it is` };
+  const r = await lookup(image);
+  if (!r.brew) return { note: `could not look up the Homebrew version of GitHub's ${image} runner image (${r.error}); the guest's Homebrew is left as it is` };
+  return { brew: r.brew, note: `Homebrew ${r.brew}, as in GitHub's ${image} runner image (actions/runner-images ${r.ref})` };
+}
+
+/** Probe the guest's architecture and macOS version, then work out which brew an Apple Silicon guest gets. */
+async function macHomebrew(ep: Endpoint, cfg: GuestConfig): Promise<{ brew?: string; note?: string }> {
+  // dockur guests are always Intel; skip the probe.
+  if (cfg.backend === "dockur") return {};
+  const p = await sshExec(ep, "uname -m; sw_vers -productVersion", { timeoutMs: 60_000 });
+  const [arch = "", productVersion = ""] = p.stdout.trim().split(/\s+/);
+  return resolveArm64Brew(cfg, { arch, productVersion });
+}
+
+/** The command that runs the provisioning script, plus a note on the Homebrew version chosen. */
+export async function macProvisionPlan(ep: Endpoint, cfg: GuestConfig, bashArgs: string): Promise<{ command: string; note?: string }> {
+  const { brew, note } = await macHomebrew(ep, cfg);
+  return { command: macProvisionCommand(cfg, bashArgs, brew), note };
+}
+
 /**
  * Run the bundled provisioning script for the guest OS (macOS: Xcode CLT, Homebrew, git, node, python, act;
  * Windows: the MSVC Build Tools). Interactive: runs in a terminal so sudo can ask for the guest password once.
+ * Idempotent, so it also adds what newer osmatrix versions provision (such as Homebrew on Intel guests) to an
+ * existing guest.
  */
-export async function provision(name: string, opts: { passwordlessSudo?: boolean } = {}): Promise<{ guest: string; exitCode: number; next?: string }> {
+export async function provision(name: string, opts: { passwordlessSudo?: boolean } = {}): Promise<{ guest: string; exitCode: number; homebrew?: string; hint?: string }> {
   const g = getGuest(name);
   if (g.cfg.os === "windows") return provisionWindows(g);
   if (g.cfg.os !== "macos") throw new Error("provision is only needed for macOS and Windows guests (the ubuntu image is preconfigured)");
+  guestHomebrew(g.cfg); // a bad `homebrew` setting fails before anything runs in the guest
   const script = fs.readFileSync(path.join(assetsDir, "provision", "macos.sh"), "utf8");
   const ep = await readyEndpoint(name);
+  const { command: cmd, note } = await macProvisionPlan(ep, g.cfg, `~/.osmatrix-provision.sh${opts.passwordlessSudo ? " --passwordless-sudo" : ""}`);
+  if (note) process.stderr.write(`[osmatrix] ${note}\n`);
   const up = await sshExec(ep, "cat > ~/.osmatrix-provision.sh && chmod +x ~/.osmatrix-provision.sh", { input: script, timeoutMs: 60_000 });
   if (up.code !== 0) throw new Error(`failed to copy provisioning script: ${up.stderr}`);
   const { spawnSync } = await import("node:child_process");
-  const cmd = `bash ~/.osmatrix-provision.sh${opts.passwordlessSudo ? " --passwordless-sudo" : ""}`;
   const r = spawnSync(sshBin(), [...sshArgs(ep, ["-t"]), cmd], { stdio: "inherit" });
-  return { guest: name, exitCode: r.status ?? 1 };
+  const exitCode = r.status ?? 1;
+  // The golden snapshot still has the old toolchain; `reset` would drop what was just installed.
+  const hint =
+    exitCode === 0 && g.cfg.backend !== "ssh"
+      ? `Run \`osmatrix snapshot ${name}\` (MCP: env_snapshot) to keep this in the golden snapshot; \`osmatrix reset ${name}\` restores the old one otherwise.`
+      : undefined;
+  return { guest: name, exitCode, ...(note ? { homebrew: note } : {}), ...(hint ? { hint } : {}) };
 }
 
 /**
  * Windows guests provision themselves at install. This adds what osmatrix provisions now but didn't when
  * an older guest (and its golden snapshot) was set up: the MSVC Build Tools (msvc.ps1, idempotent).
  */
-async function provisionWindows(g: Guest): Promise<{ guest: string; exitCode: number; next?: string }> {
+async function provisionWindows(g: Guest): Promise<{ guest: string; exitCode: number; hint?: string }> {
   const name = g.cfg.name;
   if (!guestMsvc(g.cfg)) throw new Error(`${name} has msvc = false; remove it from [guests.${name}] in config.toml to install the MSVC Build Tools`);
   const script = fs.readFileSync(path.join(assetsDir, "oem", "windows", "msvc.ps1"), "utf8");
@@ -492,6 +544,6 @@ async function provisionWindows(g: Guest): Promise<{ guest: string; exitCode: nu
   const r = spawnSync(sshBin(), [...sshArgs(ep, ["-T"]), cmd], { stdio: "inherit" });
   const exitCode = r.status ?? 1;
   return exitCode === 0
-    ? { guest: name, exitCode, next: `run \`osmatrix snapshot ${name}\` to keep this in the golden snapshot (env_reset restores it)` }
+    ? { guest: name, exitCode, hint: `Run \`osmatrix snapshot ${name}\` (MCP: env_snapshot) to keep this in the golden snapshot; \`osmatrix reset ${name}\` restores the old one otherwise.` }
     : { guest: name, exitCode };
 }

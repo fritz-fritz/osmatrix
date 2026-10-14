@@ -541,3 +541,57 @@ jobs:
   fs.writeFileSync(path.join(repo, "rust-toolchain.toml"), '[toolchain]\nchannel = "stable"\n');
   assert.match(rust(custom, "js")[0], /the repo has rust-toolchain\.toml/);
 });
+
+test("brew steps on Intel macOS guests warn about the pinned Homebrew", () => {
+  const repo = tmpRepo(`
+on: push
+jobs:
+  build:
+    strategy: { matrix: { os: [ubuntu-latest, macos-latest] } }
+    runs-on: \${{ matrix.os }}
+    steps:
+      - run: sudo apt-get install -y capnproto
+        if: runner.os == 'Linux'
+      - run: brew install capnp
+        if: runner.os == 'macOS'
+  linuxbrew:
+    runs-on: macos-latest
+    steps:
+      - run: brew update
+        if: runner.os == 'Linux'
+      - run: brew update
+        if: \${{ runner.os == 'Windows' }}
+  either:
+    runs-on: macos-latest
+    steps:
+      - run: brew install capnp
+        if: runner.os == 'Linux' || runner.os == 'macOS'
+  upgrade:
+    runs-on: macos-latest
+    steps: [{ run: brew update && brew upgrade }]
+  mention:
+    runs-on: macos-latest
+    steps:
+      - run: |
+          echo "brew install capnp"
+          # brew update
+`);
+  const legs = plan(repo, linuxCfg()).legs;
+  const mac = legs.find((l) => l.job === "build" && l.targetOs === "macos")!;
+  assert.ok(mac.warnings.some((w) => w.startsWith("steps run brew install: guest macos is Intel macOS") && w.includes("6.0.22")));
+  assert.ok(!legs.find((l) => l.job === "build" && l.targetOs === "linux")!.warnings.some((w) => w.includes("brew")));
+  // A brew step guarded to Linux doesn't run on the macOS leg.
+  assert.deepEqual(legs.find((l) => l.job === "linuxbrew")!.warnings, []);
+  // A condition that also admits macOS still runs there.
+  assert.ok(legs.find((l) => l.job === "either")!.warnings.some((w) => w.startsWith("steps run brew install:")));
+  assert.ok(legs.find((l) => l.job === "upgrade")!.warnings.some((w) => w.includes("osmatrix reset macos")));
+  // brew mentioned in an argument or a comment isn't run.
+  assert.deepEqual(legs.find((l) => l.job === "mention")!.warnings, []);
+
+  const off = mergeConfig(defaultConfig(), { guests: { macos: { os: "macos", backend: "dockur", homebrew: false } } });
+  const offLeg = plan(repo, off, { job: "build" }).legs.find((l) => l.targetOs === "macos")!;
+  assert.ok(offLeg.warnings.some((w) => w.includes("has homebrew = false") && w.includes("doesn't remove one installed earlier")));
+  // Apple Silicon (tart) guests match GitHub's Homebrew: nothing to warn about.
+  const tart = mergeConfig(defaultConfig(), { guests: { macos: { os: "macos", backend: "tart" } } });
+  assert.ok(!plan(repo, tart, { job: "build" }).legs.find((l) => l.targetOs === "macos")!.warnings.some((w) => w.includes("brew")));
+});

@@ -5,6 +5,7 @@ import { DEFAULT_LINUX_IMAGE } from "../core/config.ts";
 import { acquireLocks, type LockOwner } from "../core/locks.ts";
 import { assetsDir, ensureDir, paths } from "../core/paths.ts";
 import { run } from "../core/proc.ts";
+import { latestImageTag } from "../core/runner-images.ts";
 import { dockerBin, imageExists } from "./docker.ts";
 
 /**
@@ -63,11 +64,7 @@ interface RunnerCache {
  * release; with none in the listing the lookup fails rather than pinning a prerelease.
  */
 export function latestRunnerTag(releases: unknown): string | undefined {
-  if (!Array.isArray(releases)) return undefined;
-  const full = (releases as { tag_name?: unknown; draft?: unknown; prerelease?: unknown }[]).find(
-    (r) => !r?.draft && !r?.prerelease && typeof r?.tag_name === "string" && r.tag_name.startsWith("ubuntu24/"),
-  );
-  return full?.tag_name as string | undefined;
+  return latestImageTag(releases, "ubuntu24");
 }
 
 /** "- Rust 1.99.0" in the readme's "### Rust Tools" section. */
