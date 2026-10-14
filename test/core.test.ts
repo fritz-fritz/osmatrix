@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
-import { ActJsonParser, actDifferenceHints, macToolCacheCmd, powershell } from "../src/ci/run.ts";
+import { ActJsonParser, actDifferenceHints, commonActArgs, guestLegDir, macToolCacheCmd, powershell, pwshHomePath, removeCmd } from "../src/ci/run.ts";
 import { defaultGuests, labelMatches, mergeConfig, defaultConfig } from "../src/core/config.ts";
 import { commandLine, quotePosix, quotePwsh, withCwd } from "../src/core/ssh.ts";
 import { encodePng } from "../src/gui.ts";
@@ -90,6 +90,25 @@ test("PowerShell scripts run as-is on pwsh endpoints and encoded on cmd ones", (
   const m = /^powershell -NoProfile -NonInteractive -EncodedCommand ([A-Za-z0-9+/=]+)$/.exec(powershell({ shell: "cmd" }, script));
   assert.ok(m);
   assert.equal(Buffer.from(m[1], "base64").toString("utf16le"), script);
+});
+
+test("VM legs keep their own files next to the work tree and pass a derived workflow with -W", () => {
+  const own = guestLegDir("work", "20261012T101010-ab12", "gw-windows-latest");
+  assert.equal(own.path, "work/.osmatrix/20261012T101010-ab12/gw-windows-latest");
+  // act runs in work/<repo>, so the same directory is one level up from there.
+  assert.equal(own.fromWorkTree, "../.osmatrix/20261012T101010-ab12/gw-windows-latest");
+  assert.equal(own.run, "work/.osmatrix/20261012T101010-ab12");
+  const leg = { workflow: ".github/workflows/ci.yml", job: "gw", matrix: { os: "windows-latest", cfg: { a: 1 } } } as never;
+  assert.deepEqual(commonActArgs(leg), ["-W", ".github/workflows/ci.yml", "-j", "gw", "--json", "--matrix", "os:windows-latest"]);
+  assert.deepEqual(commonActArgs(leg, `${own.fromWorkTree}/ci.yml`).slice(0, 2), ["-W", `${own.fromWorkTree}/ci.yml`]);
+  // Guest paths in PowerShell expressions are quoted strings, even when quoting wouldn't be needed as an argument.
+  assert.equal(pwshHomePath(own.path), "[IO.Path]::Combine($HOME, 'work/.osmatrix/20261012T101010-ab12/gw-windows-latest')");
+  assert.equal(pwshHomePath("it's"), "[IO.Path]::Combine($HOME, 'it''s')");
+  // Removal fails loudly (non-zero exit) so a leftover secrets file can be reported; a missing path is fine.
+  assert.equal(removeCmd({ shell: "posix" }, own.run), "rm -rf work/.osmatrix/20261012T101010-ab12");
+  const ps = removeCmd({ shell: "pwsh" }, own.run);
+  assert.match(ps, /if \(Test-Path -LiteralPath \$p\) \{ Remove-Item -Recurse -Force -ErrorAction Stop -LiteralPath \$p \}/);
+  assert.ok(!ps.includes("SilentlyContinue"));
 });
 
 test("macOS tool cache check repairs only what isn't owned, writable and searchable, and reports a failed repair", { skip: process.platform === "win32" }, () => {

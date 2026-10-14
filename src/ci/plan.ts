@@ -310,19 +310,50 @@ export function plan(repo: string, cfg: Config, filter: PlanFilter = {}): Plan {
 }
 
 /**
- * Give `jobs` a `defaults.run.shell` of `shell` (keeping comments and layout), so their run: steps without
- * a shell: don't fall back to act's host default (pwsh on Windows). Jobs that already set one, reusable
- * workflow calls, and every job when the workflow sets a default are left alone. Returns the jobs changed.
+ * Give `jobs` a `defaults.run.shell` of `shell`, so their run: steps without a shell: don't fall back to
+ * act's host default (pwsh on Windows). Jobs that already set one, reusable workflow calls, and every job
+ * when the workflow sets a default are left alone. Returns the jobs changed.
+ *
+ * The edit inserts lines rather than re-serialising the document, so the rest of the workflow (layout,
+ * comments, quoting) stays as written. Jobs written in flow style ({ ... }) fall back to re-serialising.
  */
 export function setDefaultRunShell(text: string, jobs: string[], shell: string): { text: string; changed: string[] } {
   const doc = YAML.parseDocument(text);
   if (doc.getIn(["defaults", "run", "shell"]) !== undefined) return { text, changed: [] };
   const changed: string[] = [];
+  const inserts: { at: number; text: string }[] = [];
+  let reserialise = false;
   for (const j of jobs) {
     const job = doc.getIn(["jobs", j]);
     if (!YAML.isMap(job) || job.has("uses") || doc.getIn(["jobs", j, "defaults", "run", "shell"]) !== undefined) continue;
-    doc.setIn(["jobs", j, "defaults", "run", "shell"], shell);
     changed.push(j);
+    // The deepest map along jobs.<j>.defaults.run that exists; the missing keys go in at its top.
+    const missing = ["defaults", "run", "shell"];
+    let map: YAML.YAMLMap = job;
+    for (let next = map.get(missing[0], true); missing.length > 1 && YAML.isMap(next); next = map.get(missing[0], true)) {
+      map = next;
+      missing.shift();
+    }
+    const ins = map.has(missing[0]) ? undefined : blockInsert(text, map, missing, shell);
+    if (ins) inserts.push(ins);
+    else reserialise = true;
+    doc.setIn(["jobs", j, "defaults", "run", "shell"], shell);
   }
-  return { text: changed.length ? doc.toString({ lineWidth: 0 }) : text, changed };
+  if (!changed.length) return { text, changed };
+  if (reserialise) return { text: doc.toString({ lineWidth: 0 }), changed };
+  for (const ins of inserts.sort((a, b) => b.at - a.at)) text = text.slice(0, ins.at) + ins.text + text.slice(ins.at);
+  return { text, changed };
+}
+
+/** Lines adding `keys` (nested; the last one set to `value`) at the top of a block map; undefined when it isn't one. */
+function blockInsert(text: string, map: YAML.YAMLMap, keys: string[], value: string): { at: number; text: string } | undefined {
+  const first = map.items[0]?.key;
+  if (map.flow || !YAML.isNode(first) || !first.range) return undefined;
+  const at = text.lastIndexOf("\n", first.range[0] - 1) + 1;
+  const indent = text.slice(at, first.range[0]);
+  if (!/^ *$/.test(indent)) return undefined; // the key shares its line with something else, such as "- "
+  const eol = text.includes("\r\n") ? "\r\n" : "\n";
+  const last = keys.length - 1;
+  const lines = keys.map((k, i) => `${indent}${"  ".repeat(i)}${k}:${i === last ? ` ${YAML.stringify(value, { lineWidth: 0 }).trimEnd()}` : ""}`);
+  return { at, text: lines.join(eol) + eol };
 }

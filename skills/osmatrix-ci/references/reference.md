@@ -17,7 +17,7 @@ CLI-only: `osmatrix ci runs` (list runs of a repo).
 
 ## Where things are
 
-- Repos synced into a guest by `ci_run`: `~/work/<name>` (Windows: `C:\Users\<user>\work\<name>`).
+- Repos synced into a guest by `ci_run`: `~/work/<name>` (Windows: `C:\Users\<user>\work\<name>`). osmatrix leaves the synced tree untouched after syncing it (it is a copy of your working tree, uncommitted changes included): what it hands act for a leg (a derived workflow, the event payload, secrets, act's artifact store) goes in `~/work/.osmatrix/<run>/<leg>/` and is removed when the leg ends. A derived workflow is also saved on the host as `<repo>/.osmatrix/runs/<id>/<leg>.workflow.yml`.
 - Run artifacts and logs: `<repo>/.osmatrix/runs/<id>/` on the host.
 - Secrets: `<repo>/.osmatrix/secrets` or `<repo>/.secrets`, `KEY=value` lines.
 - `max_vms` in the osmatrix config limits how many VM guests run CI legs at the same time (default 2).
