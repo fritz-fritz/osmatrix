@@ -1,9 +1,9 @@
 # Regression checks for the act differences osmatrix patches (assets/act/): they fail with stock act
-# 0.2.89 and pass on GitHub and with osmatrix's patched act. download needs upload, so run it by itself
-# (a whole-workflow run skips it, since upload already runs as its own leg):
+# 0.2.89 and pass on GitHub and with osmatrix's patched act. download needs upload, whose legs run first;
+# the matrix filter keeps both to Linux (without it, download waits for upload's Windows and macOS legs):
 #   osmatrix ci run --repo fixtures/act-compat --only linux --job file-commands --wait
 #   osmatrix ci run --repo fixtures/act-compat --only linux --job docker-action --wait
-#   osmatrix ci run --repo fixtures/act-compat --only linux --job download --wait
+#   osmatrix ci run --repo fixtures/act-compat --only linux --job download --matrix os=ubuntu-latest --wait
 name: act-compat
 on:
   push:
