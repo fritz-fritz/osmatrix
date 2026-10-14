@@ -37,7 +37,7 @@ test("pwsh quoting and command lines", () => {
 
 test("default guests per host", () => {
   assert.deepEqual(Object.keys(defaultGuests("darwin", "arm64")).sort(), ["macos", "ubuntu", "windows"]);
-  assert.deepEqual(Object.keys(defaultGuests("darwin", "x64")).sort(), ["macos", "ubuntu"]);
+  assert.deepEqual(Object.keys(defaultGuests("darwin", "x64")).sort(), ["macos", "ubuntu", "windows"]);
   assert.equal(defaultGuests("darwin", "arm64").macos.backend, "tart");
   assert.deepEqual(Object.keys(defaultGuests("linux", "x64")).sort(), ["macos", "ubuntu", "windows"]);
   assert.deepEqual(Object.keys(defaultGuests("win32", "x64")).sort(), ["macos", "ubuntu", "windows"]);

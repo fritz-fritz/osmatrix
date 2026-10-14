@@ -73,6 +73,7 @@ export async function doctor(): Promise<DoctorReport> {
     act: null,
     tart: process.platform === "darwin" ? await version(which("tart"), ["--version"]) : null,
     "qemu-system-aarch64": await version(which("qemu-system-aarch64"), ["--version"]),
+    "qemu-system-x86_64": await version(which("qemu-system-x86_64"), ["--version"]),
   };
   const act = await actReport(cfg);
   tools.act =

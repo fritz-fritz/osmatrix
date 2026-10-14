@@ -3,7 +3,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { dockerBin } from "../backends/docker.ts";
-import { loadConfig, type Config, type GuestConfig, type OsFamily } from "./config.ts";
+import { loadConfig, windowsArch, type Config, type GuestConfig, type OsFamily } from "./config.ts";
 import { acquireLocks } from "./locks.ts";
 import { assetsDir, ensureDir, paths, resourcePrefix } from "./paths.ts";
 import { run, runOk, which } from "./proc.ts";
@@ -48,7 +48,7 @@ export function hostTarget(platform: string = process.platform, arch: string = p
 
 /**
  * The target a guest's act needs, when its configuration tells: dockur's macOS guests are Intel, tart's
- * run on Apple Silicon, Windows follows its image (dockurr/windows-arm, or the qemu backend) and Linux
+ * run on Apple Silicon, Windows follows its image (dockurr/windows-arm or dockurr/windows) and Linux
  * containers share the host's act. ssh guests can be anything, so their target comes from probing them.
  */
 export function guestTarget(g: GuestConfig): GoTarget | undefined {
@@ -56,7 +56,7 @@ export function guestTarget(g: GuestConfig): GoTarget | undefined {
     case "tart":
       return "darwin/arm64";
     case "qemu":
-      return "windows/arm64";
+      return windowsArch(g) === "aarch64" ? "windows/arm64" : "windows/amd64";
     case "dockur":
       if (g.os === "macos") return "darwin/amd64";
       return /arm/i.test(g.image ?? "") ? "windows/arm64" : "windows/amd64";
