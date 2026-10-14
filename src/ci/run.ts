@@ -237,7 +237,10 @@ export async function worker(repo: string, id: string): Promise<void> {
             vmSlots.release();
             slot = false;
           }
-          const replay = await neededResults(dir, leg, p.legs, outcomes, sf);
+          // Every leg must settle its outcome, or the legs waiting for it on other targets never start.
+          const replay = await neededResults(dir, leg, p.legs, outcomes, sf).catch(
+            (e: Error): Replay => ({ needs: {}, error: `couldn't collect the results of the legs it needs: ${e.message}` }),
+          );
           if (isVm && !slot && !replay?.error) {
             await vmSlots.acquire();
             slot = true;
