@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { test } from "node:test";
-import { ActJsonParser, actDifferenceHints, powershell } from "../src/ci/run.ts";
+import { ActJsonParser, actDifferenceHints, macToolCacheCmd, powershell } from "../src/ci/run.ts";
 import { defaultGuests, labelMatches, mergeConfig, defaultConfig } from "../src/core/config.ts";
 import { commandLine, quotePosix, quotePwsh, withCwd } from "../src/core/ssh.ts";
 import { encodePng } from "../src/gui.ts";
@@ -86,6 +90,52 @@ test("PowerShell scripts run as-is on pwsh endpoints and encoded on cmd ones", (
   const m = /^powershell -NoProfile -NonInteractive -EncodedCommand ([A-Za-z0-9+/=]+)$/.exec(powershell({ shell: "cmd" }, script));
   assert.ok(m);
   assert.equal(Buffer.from(m[1], "base64").toString("utf16le"), script);
+});
+
+test("macOS tool cache check repairs only what isn't owned, writable and searchable, and reports a failed repair", { skip: process.platform === "win32" }, () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "osmatrix-toolcache-"));
+  try {
+    // A stand-in sudo that records its arguments and runs them without root. chown is only recorded:
+    // the test's files already belong to the test user, and Linux has no "staff" group.
+    // OSMATRIX_TEST_SUDO_FAIL makes it fail, like sudo -n without passwordless sudo.
+    const calls = path.join(tmp, "sudo-calls");
+    fs.mkdirSync(path.join(tmp, "bin"));
+    const fake = `#!/bin/sh\necho "$*" >> ${JSON.stringify(calls)}\n[ -z "$OSMATRIX_TEST_SUDO_FAIL" ] || exit 1\n[ "$1" = -n ] && shift\n[ "$1" = chown ] && exit 0\nexec "$@"\n`;
+    fs.writeFileSync(path.join(tmp, "bin", "sudo"), fake, { mode: 0o755 });
+    const sh = (cmd: string, env: Record<string, string> = {}) =>
+      spawnSync("sh", ["-c", cmd], { env: { ...process.env, ...env, PATH: `${path.join(tmp, "bin")}:${process.env.PATH}` } }).status;
+    const sudoCalls = () => (fs.existsSync(calls) ? fs.readFileSync(calls, "utf8").trim().split("\n") : []);
+    const runner = path.join(tmp, "runner");
+    const cache = path.join(runner, "hostedtoolcache");
+
+    // Missing: created, given to the user, and the postcondition holds.
+    assert.equal(sh(macToolCacheCmd(cache)), 0);
+    const lines = sudoCalls();
+    assert.equal(lines[0], `-n mkdir -p ${cache}`);
+    assert.match(lines[1], new RegExp(`^-n chown -R \\S+:staff ${runner}$`));
+    assert.equal(lines[2], `-n chmod u+rwx ${runner} ${cache}`);
+    fs.rmSync(calls);
+
+    // Already fine: no sudo at all.
+    assert.equal(sh(macToolCacheCmd(cache)), 0);
+    assert.deepEqual(sudoCalls(), []);
+
+    // Read-only (root ignores permission bits, so only meaningful for a normal user).
+    if (process.getuid?.() !== 0) {
+      fs.chmodSync(cache, 0o555);
+      assert.equal(sh(macToolCacheCmd(cache)), 0);
+      assert.equal(sudoCalls().length, 3);
+      fs.accessSync(cache, fs.constants.W_OK | fs.constants.X_OK);
+      fs.rmSync(calls);
+
+      // A repair that fails leaves the postcondition unmet, so the command fails and the leg warns.
+      fs.chmodSync(cache, 0o555);
+      assert.notEqual(sh(macToolCacheCmd(cache), { OSMATRIX_TEST_SUDO_FAIL: "1" }), 0);
+      fs.chmodSync(cache, 0o755);
+    }
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
 });
 
 test("bootBudget scales with the slowest recent boot", () => {
