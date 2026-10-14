@@ -94,7 +94,7 @@ Options:
 | macOS Apple Silicon | 🧪 container | 🧪 QEMU + Hypervisor.framework: Windows 11 on ARM | 🧪\* tart |
 | macOS Intel | 🧪 container | ❌ | ❌ |
 
-- ✅ supported and tested. 🧪 supported by the code but not yet tested on that kind of host (CI covers install, the MCP server and planning on Windows and macOS, but GitHub's runners can't start guests there); please tell us how it went with a [compatibility report](https://github.com/fritz-fritz/osmatrix/issues/new?template=compatibility.yml). `osmatrix report <guest> --outcome works|partly|fails` fills one in (sanitized, sends nothing), and agents offer to file one, with your consent, when a result differs from this matrix (an untested combination either way, or a tested one that fails). ❌ not possible on that host.
+- ✅ supported and tested. 🧪 supported by the code but not yet tested on that kind of host (CI covers install, the MCP server and planning on Windows and macOS, but GitHub's runners can't start guests there); please tell us how it went with a [compatibility report](https://github.com/fritz-fritz/osmatrix/issues/new?template=compatibility.yml). `osmatrix report <guest> --outcome works|partly|fails` fills one in (sanitized, sends nothing), `osmatrix report-file <draft>` files it with your `gh` login, and agents offer to file one, with your consent, when a result differs from this matrix (an untested combination either way, or a tested one that fails). ❌ not possible on that host.
 - Any cell marked ❌ can still be served by an `ssh` guest: an existing machine you can reach over ssh (see [Configuration](#configuration)).
 - \* **macOS guests are licensed only on Apple hardware.** Apple's [macOS Software License Agreement](https://www.apple.com/legal/sla/) permits macOS virtual machines only on Apple-branded computers, so only the Apple Silicon row is within the licence. On other hosts the dockur macOS guest works technically, but running it is outside Apple's terms; osmatrix asks you to accept the licence before installing it (below).
 - ¹ dockur needs KVM inside Docker, which Docker Desktop on Windows on ARM doesn't provide.
@@ -267,7 +267,7 @@ osmatrix/                              # the repository root is the plugin, for 
 └── scripts/  sync-manifests.mjs, validate-skills.mjs, validate-plugins.mjs, package-plugins.mjs
 ```
 
-Each client reads its own manifest at the root; `skills/`, `mcp.json` and the artwork are shared, so nothing is generated. After bumping the version in `package.json`, run `npm run sync`. CI runs `npm run validate`, which fails if a manifest version or the MCP pin has drifted, and checks every skill with the clients' own validators.
+Each client reads its own manifest at the root; `skills/`, `mcp.json` and the artwork are shared, so nothing is generated. After bumping the version in `package.json`, run `npm run sync`. CI runs `npm run validate`, which fails if a manifest version, the MCP pin or the skills' exact-version npx fallback has drifted, and checks every skill with the clients' own validators.
 
 Nothing else at the root may use a name a client discovers as a plugin component: no `CLAUDE.md`, `bin/`, `commands/`, `agents/` or `hooks/`.
 
@@ -284,7 +284,7 @@ Every release is one immutable version. The tag is `v<x.y.z>`, matching `osmatri
 
 To release:
 
-1. Bump the version with `npm version patch --no-git-tag-version` (or `minor` / `major`; a breaking CLI/MCP change means a new major), then run `npm run sync` to stamp it into the three plugin manifests and the major-version pin into their MCP configs.
+1. Bump the version with `npm version patch --no-git-tag-version` (or `minor` / `major`; a breaking CLI/MCP change means a new major), then run `npm run sync` to stamp it into the three plugin manifests and the skills' npx fallback, and the major-version pin into their MCP configs.
 2. Run `npm run verify` and `npm run release:rehearse`. The rehearsal runs `release.yml` locally as if `v<version>` had been pushed, with an `npm publish --dry-run` in place of attestation, publishing and the GitHub release (they need GitHub's OIDC token). It refuses a version that's already on npm, and ends with a preview of the release notes.
 3. Commit and push `main`, and let GitHub CI run.
 4. Run `npm run release:tag` (add `--wait` to wait for CI). It creates and pushes the tag only if `HEAD` is pushed, the version and tag are unused, and the commit's CI and other checks, such as CodeQL, have passed. So a tag isn't spent on a commit that can't be released.

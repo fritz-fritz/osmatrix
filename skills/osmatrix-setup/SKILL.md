@@ -7,9 +7,9 @@ description: Check what this host can run (Docker, KVM, Apple Silicon) and creat
 
 osmatrix gives agents local **guests** (an `ubuntu` container, `windows`/`macos` VMs, or any machine over ssh) and **local GitHub Actions runs** with act. This skill covers getting guests ready. Sibling skills in the same plugin: `osmatrix-ci` (run workflows locally) and `osmatrix-guests` (run commands, copy files, forward ports and drive the GUI inside a guest).
 
-Use the **MCP tools** (`host_doctor`, `env_setup`, ...) when they are available: they are the supported interface, and their safety annotations let the client ask for confirmation where it matters.
+Use the **MCP tools** (`host_doctor`, `env_setup`, ...) when they are available: they are the supported interface. Tools that change guests or post outside this host (`env_setup`, `env_reset`, `env_snapshot`, `host_report_file`, …) carry annotations that let the client ask the user to confirm them.
 
-**If the osmatrix MCP tools are missing from this session, tell the user before doing anything else.** Say that the osmatrix MCP server isn't loaded, so you'll use the `osmatrix` CLI instead, and suggest the likely fix: enable or restart the osmatrix MCP server in the client's MCP/plugin settings (a server that failed once may stay failed until it is toggled off and on). Then continue with the CLI: every tool has a matching command (see [references/reference.md](references/reference.md)); add `--json` for machine output. Check `osmatrix --version` first; if the command isn't found, `npx -y osmatrix@0 <command>` works once osmatrix is published on npm. Otherwise tell the user it isn't installed, and stop.
+**If the osmatrix MCP tools are missing from this session, tell the user before doing anything else.** Say that the osmatrix MCP server isn't loaded, so you'll use the `osmatrix` CLI instead, and suggest the likely fix: enable or restart the osmatrix MCP server in the client's MCP/plugin settings (a server that failed once may stay failed until it is toggled off and on). Then continue with the CLI: every tool has a matching command (see [references/reference.md](references/reference.md)); add `--json` for machine output. Check `osmatrix --version` first. If the command isn't found, tell the user osmatrix isn't installed and offer to run it from npm, as `npx osmatrix@0.2.0 <command>` or after `npm i -g osmatrix@0.2.0`. Running either downloads and executes the package, so wait for the user to agree; if they don't, stop.
 
 ## First use
 
@@ -33,10 +33,14 @@ Only start the guests a task needs: each VM takes its full RAM (8 GB by default)
 
 `env_setup` (CLI: `osmatrix setup <guest>`) is fully automatic: it installs the OS, creates the user, enables ssh, provisions the toolchain and saves a golden snapshot. It runs in the background; poll `env_status` and read `setup.phase`. Expect 20–60 min for Windows or macOS; ubuntu takes seconds. `force: true` (`--force`) redoes setup of an existing guest.
 
-- **macOS needs the user's consent once.** Installing macOS accepts Apple's macOS Software License Agreement (https://www.apple.com/legal/sla/), and running it on non-Apple hardware is outside that license. Ask the user and pass `accept_license: true` only after they explicitly agree. Never assume consent. Once given, it's remembered in config (`macos_eula_acknowledged`).
+- **macOS needs the user's consent once** (below).
 - macOS guests on Linux/Windows hosts (dockur) are Intel (x86_64) and get Homebrew pinned to the last homebrew-core with Intel bottles (older formula versions than GitHub's runners; `homebrew` in the guest's config, see the reference); on Apple Silicon (tart) brew is set to the version GitHub's arm64 runner image for that macOS ships. Guests set up before osmatrix did this get it from `osmatrix provision <guest>` (CLI only, asks for the guest's sudo password unless it has passwordless sudo); then ask the user before saving it with `env_snapshot`. dockur guests get passwordless sudo during setup; for tart and `ssh` macOS guests, `osmatrix provision <guest> --passwordless-sudo` (CLI only) re-runs the toolchain install and lets `sudo` steps in workflows run as they do on GitHub's runners.
 - Windows guests also get the MSVC Build Tools and Windows SDK (about 8 GB, 10–20 min more setup), which Rust and C/C++ builds need. A user who doesn't want them sets `msvc = false` on the guest before setup. Guests set up by older osmatrix versions lack them: `osmatrix provision <guest>` (CLI only) installs them, then `env_snapshot` keeps them in the golden snapshot.
 - If setup reports an error, take an `env_screenshot` of the guest to see where it stopped, then tell the user.
+
+<consent>
+Installing macOS accepts Apple's macOS Software License Agreement (https://www.apple.com/legal/sla/), and running it on non-Apple hardware is outside that license. That's the user's decision, not yours: ask them, and pass `accept_license: true` only after they explicitly agree. Once given, it's remembered in config (`macos_eula_acknowledged`).
+</consent>
 
 ## ssh guests (an existing machine)
 
@@ -56,7 +60,7 @@ labels = ["macos-*"]             # which runs-on labels it serves
 
 ## Compatibility reports
 
-The maintainers track which host/guest combinations work through GitHub issues. Offer a report **only when the result differs from the matrix**, and **never file one without the user's explicit yes**:
+The maintainers track which host/guest combinations work through GitHub issues. Offer a report **only when the result differs from the matrix**:
 
 | guest's `compatibility` | worked | failed (in osmatrix: setup, boot, ssh, provisioning; not the user's code) |
 |---|---|---|
@@ -66,9 +70,13 @@ The maintainers track which host/guest combinations work through GitHub issues. 
 
 `host_report` returns `differsFromMatrix` for the outcome you pass; if it's `false`, don't mention a report at all. Offer at most once per guest and session, at a natural stopping point, not in the middle of urgent work.
 
+<consent>
+Filing posts to a public GitHub repository under the user's own account, so it needs their explicit yes for this report, after they have seen it. An earlier yes, or a yes for another guest, doesn't count. If they decline or don't answer, drop it.
+</consent>
+
 1. Build the report (it sends nothing): `host_report` (CLI: `osmatrix report <guest> --outcome works|partly|fails --notes "..."`). In `notes`, say what worked or failed and at which step (setup phase, boot, `env_exec`, CI leg), briefly. Never put secrets, IPs, hostnames, user names, or repository code or names in it. The report sanitizes the home directory, user name and host name, but check the rest yourself.
-2. Show the user the `title` and `body` and ask whether to file it on github.com/fritz-fritz/osmatrix. Let them edit or decline.
-3. Only after they agree: check for an existing report first (`gh issue list --repo fritz-fritz/osmatrix --label compatibility --search "<host row> <guest>"`). If one exists, offer to add a comment there instead (`gh issue comment <n> --body-file <file>`). Otherwise write `body` to a temporary file and run `gh issue create --repo fritz-fritz/osmatrix --label compatibility --title "<title>" --body-file <file>`. If `gh` isn't installed or authenticated, give the user the report's `url` instead: it opens the issue form prefilled, for them to submit.
+2. Show the user the `title` and `body` and ask whether to file it on github.com/fritz-fritz/osmatrix. If they want changes, build the report again with new `notes` and show it again.
+3. Only after they agree: `host_report_file` with the report's `draft` (CLI: `osmatrix report-file <draft>`). It files exactly what they saw, with their `gh` login. When an open report with the same title exists (same host, guest and outcome), it adds a comment there instead of a duplicate. It returns only the issue number and URL; there's no need to read other reports. Without `gh`, it fails and gives the report's prefilled `url`: hand that to the user to submit themselves.
 4. Tell the user the issue link.
 
 ## When a guest is stuck
