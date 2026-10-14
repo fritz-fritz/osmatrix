@@ -353,6 +353,7 @@ async function runLeg(repo: string, dir: string, cfg: Config, leg: Leg, sf: Stat
         const init = "git init -q; git add -A; git -c user.name=osmatrix -c user.email=osmatrix@localhost commit -qm osmatrix";
         await sshExec(ep, withCwd(ep.shell, remote, init), { timeoutMs: 120_000 });
       }
+      if (g.cfg.os === "macos" && ep.shell === "posix") await ensureMacToolCache(ep, r, log);
       // The synced tree is what the job checks out (as on GitHub), so this leg's own files go next to it.
       const own = guestLegDir(workdir, sf.s.id, leg.id);
       try {
@@ -700,6 +701,36 @@ async function bashForLinuxNeeds(ep: Endpoint, workflow: string, leg: Leg, r: Le
   if (!changed.length) return undefined;
   log.write(`[osmatrix] Linux needs ${changed.join(", ")}: run: steps without shell: use ${bash} in this leg\n`);
   return text;
+}
+
+/** Where the macOS packages behind actions/setup-python & co. install, as on GitHub's runners. */
+export const MAC_TOOL_CACHE = "/Users/runner/hostedtoolcache";
+
+/**
+ * A posix command that makes `dir` a directory the ssh user owns and can write to and search, and does
+ * nothing when it already is; it exits non-zero when the repair didn't get there. The actions/*-versions
+ * macOS packages install into /Users/runner/hostedtoolcache whatever RUNNER_TOOL_CACHE says, and act's
+ * host mode can't redirect them. Provisioning creates it; this covers guests provisioned before it did,
+ * and golden snapshots taken then, without re-provisioning.
+ */
+export function macToolCacheCmd(dir: string = MAC_TOOL_CACHE): string {
+  const d = quoteFor("posix", dir);
+  const owner = quoteFor("posix", path.posix.dirname(dir));
+  // Ownership as well as access: the installers create subdirectories and expect to own what they make.
+  const ok = `[ -d ${d} ] && [ -O ${d} ] && [ -w ${d} ] && [ -x ${d} ]`;
+  // sudo -n: never wait for a password prompt that no one will answer. chown alone doesn't add the
+  // owner's permission bits (a 0555 cache stays read-only), hence chmod; then check the result again.
+  const repair = `sudo -n mkdir -p ${d} && sudo -n chown -R "$(id -un)":staff ${owner} && sudo -n chmod u+rwx ${owner} ${d}`;
+  return `${ok} || { ${repair}; ${ok}; }`;
+}
+
+async function ensureMacToolCache(ep: Endpoint, r: LegResult, log: fs.WriteStream) {
+  const res = await sshExec(ep, macToolCacheCmd(), { timeoutMs: 120_000 });
+  if (res.code === 0) return;
+  // Not fatal: only workflows using the actions/*-versions installers (setup-python, …) need it.
+  const msg = `could not make ${MAC_TOOL_CACHE} in the guest a directory the guest user owns and can write to (needs passwordless sudo; try \`osmatrix provision <guest> --passwordless-sudo\`); actions/setup-python and similar installers fail with "mkdir: /Users/runner: Permission denied"`;
+  r.warnings.push(msg);
+  log.write(`[osmatrix] warning: ${msg}\n`);
 }
 
 /**
