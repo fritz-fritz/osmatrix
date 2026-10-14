@@ -212,7 +212,7 @@ Windows guests get the MSVC Build Tools and Windows SDK during setup, because Ru
 msvc = false
 ```
 
-Windows guests set up before osmatrix installed the Build Tools don't have them, and neither does their golden snapshot. A Windows CI leg that uses a Rust toolchain action (including any `actions-rs/*`), runs `rustup` or `cargo`, or uses `ilammy/msvc-dev-cmd` or `microsoft/setup-msbuild` warns when its guest lacks the C++ tools or a Windows SDK. Jobs it `needs:` count too, because act runs them in the same guest. `osmatrix provision` also completes an install that has the C++ tools but no SDK; `ci plan` already warns for a guest with `msvc = false`. To add them to an existing guest:
+Windows guests set up before osmatrix installed the Build Tools don't have them, and neither does their golden snapshot. A Windows CI leg that uses a Rust toolchain action (including any `actions-rs/*`), runs `rustup` or `cargo`, or uses `ilammy/msvc-dev-cmd` or `microsoft/setup-msbuild` warns when its guest lacks the C++ tools or a Windows SDK. Jobs it `needs:` count too when act runs them in the same guest (needs without a local target of their own); needs that run on their own legs and are replayed don't. `osmatrix provision` also completes an install that has the C++ tools but no SDK; `ci plan` already warns for a guest with `msvc = false`. To add them to an existing guest:
 
 ```bash
 osmatrix provision windows    # installs the Build Tools over ssh; does nothing if they're there
