@@ -58,7 +58,8 @@ export class ContainerBackend implements Backend {
       hasSnapshot: await imageExists(this.goldenTag),
     };
     if (st === "absent" && !base.hasSnapshot) return base;
-    const stale = await this.staleBase();
+    // status() is polled (waitReady) and shouldn't wait on the network: the last runner lookup is enough here.
+    const stale = await this.staleBase({ cachedOnly: true });
     if (stale) base.detail = stale;
     if (st === "absent") return base;
     if (st === "stopped") return { ...base, state: "stopped" };
@@ -92,8 +93,8 @@ export class ContainerBackend implements Backend {
    * guest set up before osmatrix added Rust), or undefined. A golden snapshot may hold the user's changes,
    * so it's only reported; a guest without one is recreated by `up`.
    */
-  async staleBase(): Promise<string | undefined> {
-    const expected = await expectedLinuxImage(this.configuredBase);
+  async staleBase(opts: { cachedOnly?: boolean } = {}): Promise<string | undefined> {
+    const expected = await expectedLinuxImage(this.configuredBase, undefined, opts);
     if (!expected) return undefined;
     const name = this.cfg.name;
     const golden = await this.baseOf(this.goldenTag);

@@ -119,6 +119,19 @@ test("runnerRust looks the version up once a day and never throws", async () => 
   assert.equal((await runnerRust({ now: t0 + 26 * 3600_000, cacheFile, fetch: fakeFetch(calls) })).rust, "1.99.0");
 });
 
+test("runnerRust with cachedOnly answers from the last lookup and never fetches", async () => {
+  const cacheFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "osmatrix-runner-")), "runner-image.json");
+  const calls: string[] = [];
+  assert.equal((await runnerRust({ cacheFile, fetch: fakeFetch(calls), cachedOnly: true })).rust, undefined);
+  assert.equal(calls.length, 0);
+  const t0 = Date.parse("2026-10-12T00:00:00Z");
+  await runnerRust({ now: t0, cacheFile, fetch: fakeFetch(calls) });
+  assert.equal(calls.length, 2);
+  // Long past the TTL, still the cached version, and no request.
+  assert.equal((await runnerRust({ now: t0 + 30 * 24 * 3600_000, cacheFile, fetch: fakeFetch(calls), cachedOnly: true })).rust, "1.99.0");
+  assert.equal(calls.length, 2);
+});
+
 test("runnerRust reports an HTTP error as an error", async () => {
   const cacheFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "osmatrix-runner-")), "runner-image.json");
   const limited = (async () => new Response("{}", { status: 403 })) as typeof fetch;

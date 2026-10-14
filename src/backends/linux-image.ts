@@ -80,6 +80,8 @@ export interface RunnerRustOptions {
   now?: number;
   cacheFile?: string;
   fetch?: typeof fetch;
+  /** Only the last successful lookup, whatever its age; never the network (for frequent callers such as status). */
+  cachedOnly?: boolean;
 }
 
 /**
@@ -96,6 +98,7 @@ export async function runnerRust(opts: RunnerRustOptions = {}): Promise<{ rust?:
   } catch {
     cache = undefined;
   }
+  if (opts.cachedOnly) return cache?.rust ? { rust: cache.rust, tag: cache.tag } : { error: cache?.error ?? "not looked up yet" };
   const age = cache ? now - Date.parse(cache.checkedAt) : Infinity;
   if (cache?.rust && age >= 0 && age < CACHE_TTL_MS) return { rust: cache.rust, tag: cache.tag };
   if (cache?.error && age >= 0 && age < FAILURE_TTL_MS) return { error: cache.error };
@@ -130,7 +133,7 @@ export async function runnerRust(opts: RunnerRustOptions = {}): Promise<{ rust?:
 
 /** What image resolution needs from the outside world; tests replace it. */
 export interface ImageDeps {
-  runnerRust: () => Promise<{ rust?: string; tag?: string; error?: string }>;
+  runnerRust: (opts?: Pick<RunnerRustOptions, "cachedOnly">) => Promise<{ rust?: string; tag?: string; error?: string }>;
   exists: (ref: string) => Promise<boolean>;
   /** Local parity images, newest first. */
   localImages: () => Promise<string[]>;
@@ -140,7 +143,7 @@ export interface ImageDeps {
 }
 
 const dockerDeps: ImageDeps = {
-  runnerRust: () => runnerRust(),
+  runnerRust: (opts) => runnerRust(opts),
   exists: imageExists,
   // docker lists images newest first.
   localImages: async () => {
@@ -161,10 +164,15 @@ const dockerDeps: ImageDeps = {
 /**
  * The image Linux legs should use now, without building anything: `configured` unless it's act's
  * default, else the parity image for the runner's Rust version; undefined when that version is unknown.
+ * `cachedOnly` answers from the last lookup without going to the network.
  */
-export async function expectedLinuxImage(configured: string, deps: ImageDeps = dockerDeps): Promise<string | undefined> {
+export async function expectedLinuxImage(
+  configured: string,
+  deps: ImageDeps = dockerDeps,
+  opts: Pick<RunnerRustOptions, "cachedOnly"> = {},
+): Promise<string | undefined> {
   if (configured !== DEFAULT_LINUX_IMAGE) return configured;
-  const { rust } = await deps.runnerRust();
+  const { rust } = await deps.runnerRust(opts);
   return rust ? parityImageTag(rust) : undefined;
 }
 
