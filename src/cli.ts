@@ -392,6 +392,8 @@ function summarize(s: ReturnType<typeof ciStatus>) {
       state: l.state,
       ...(l.durationSec !== undefined ? { sec: l.durationSec } : {}),
       ...(l.waitingFor ? { waitingFor: l.waitingFor } : {}),
+      ...(l.neededOnly ? { neededOnly: true } : {}),
+      ...(l.replayed?.length ? { replayed: l.replayed.map((n) => `${n.job}: ${n.result}`).join(", ") } : {}),
       ...(l.failedStep ? { failedStep: l.failedStep } : {}),
       ...(l.error ? { error: l.error } : {}),
     })),

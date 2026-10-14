@@ -1,0 +1,92 @@
+name: cross-os-needs
+# Every job runs exactly once, on its own runner, and the jobs that need it get its result, outputs and
+# artifacts, as on GitHub. "plan" runs once (on the host) and hands a random nonce to all three legs of
+# "test"; each test leg uploads the nonce it saw, and "gate" (Linux) checks they all saw the same one,
+# so a second run of "plan" anywhere fails it. "gate" also downloads what the Windows/macOS legs uploaded.
+# Run it with: osmatrix ci run --repo fixtures/cross-os-needs --wait
+on:
+  push:
+  pull_request:
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      mode: ${{ steps.plan.outputs.mode }}
+      run_id: ${{ steps.plan.outputs.run_id }}
+      notes: ${{ steps.plan.outputs.notes }}
+      nonce: ${{ steps.plan.outputs.nonce }}
+    steps:
+      - id: plan
+        name: Plan
+        run: |
+          echo "mode=full" >> "$GITHUB_OUTPUT"
+          echo "run_id=$GITHUB_RUN_ID" >> "$GITHUB_OUTPUT"
+          nonce="$(date +%s%N)-$RANDOM$RANDOM"
+          echo "nonce=$nonce" >> "$GITHUB_OUTPUT"
+          # A multi-line value with a quote and something that looks like an expression.
+          { echo "notes<<END"; echo "it's planned on $(uname -s)"; printf 'literal %s{{ x }}\n' '$'; echo "END"; } >> "$GITHUB_OUTPUT"
+          mkdir -p out/sub
+          echo "$GITHUB_RUN_ID" > out/run-id.txt
+          echo "$nonce" > out/nonce.txt
+          uname -s > out/sub/os.txt
+          echo hidden > out/.hidden
+      # v4: stock act 0.2.89 rejects later majors (osmatrix issue #24).
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: plan
+          path: out
+          include-hidden-files: true
+
+  test:
+    needs: plan
+    if: needs.plan.outputs.mode == 'full'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: plan
+          path: plan
+      - name: Check what plan handed over
+        shell: bash
+        env:
+          NOTES: ${{ needs.plan.outputs.notes }}
+          NONCE: ${{ needs.plan.outputs.nonce }}
+          PLAN_RUN_ID: ${{ needs.plan.outputs.run_id }}
+        run: |
+          set -eux
+          test "$PLAN_RUN_ID" = "$GITHUB_RUN_ID"
+          test "$(cat plan/run-id.txt)" = "$GITHUB_RUN_ID"
+          test "$(cat plan/nonce.txt)" = "$NONCE"
+          test "$(cat plan/sub/os.txt)" = Linux
+          test -f plan/.hidden
+          test "$NOTES" = "$(printf "it's planned on Linux\nliteral %s{{ x }}" '$')"
+          mkdir -p seen
+          echo "$NONCE" > "seen/${{ matrix.os }}.txt"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: seen-${{ matrix.os }}
+          path: seen
+
+  # Runs after every leg of test; on GitHub, and under osmatrix, plan has run once for all of them.
+  gate:
+    needs: [plan, test]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: seen-*
+          path: seen
+          merge-multiple: true
+      - name: Every test leg saw the one run of plan
+        env:
+          NONCE: ${{ needs.plan.outputs.nonce }}
+        run: |
+          set -eux
+          ls -la seen
+          test "$(ls seen | wc -l)" = 3
+          for f in seen/*.txt; do test "$(cat "$f")" = "$NONCE"; done
