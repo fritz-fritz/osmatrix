@@ -81,7 +81,7 @@ Filing posts to a public GitHub repository under the user's own account, so it n
 
 ## When a guest is stuck
 
-- During boot or setup: `env_screenshot` shows the VM display; `env_input` can nudge a dialog (`"enter"`, clicks). Windows provisioning logs to `C:\OEM\provision.log` inside the guest.
+- During boot or setup: `env_screenshot` shows the VM display; `env_input` can nudge a dialog (`"enter"`, clicks). If the user wants to watch, give them `env_viewer`'s URL (browser for dockur, VNC for qemu and tart). Windows provisioning logs to `C:\OEM\provision.log` inside the guest.
 - A guest you've polluted: `env_reset` restores the golden snapshot (discards everything changed inside).
 - Broken beyond that: `osmatrix destroy <guest> --yes` (CLI only) then `env_setup` again.
 - A setup that keeps failing on the same phase is usually a host problem: re-run `host_doctor` and report its output to the user. If it looks like an osmatrix problem, offer a compatibility report (above).

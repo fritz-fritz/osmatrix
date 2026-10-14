@@ -55,4 +55,18 @@ export interface Backend {
   bootProbe?(): Promise<{ io: number; boots: number } | undefined>;
   /** VNC endpoint for screenshots/input, when available. */
   vnc?(): Promise<{ host: string; port: number } | undefined>;
+  /**
+   * How a person watches this guest's screen, for backends whose display isn't the web viewer or VNC
+   * endpoint above (env.viewer falls back to those).
+   */
+  viewer?(): Promise<Viewer>;
+}
+
+/** Where a person can watch and use a guest's screen. */
+export interface Viewer {
+  /** "web": open url in a browser; "vnc": open it with a VNC client (Screen Sharing on macOS). */
+  kind: "web" | "vnc";
+  url: string;
+  /** How to open it, in the user's terms. */
+  how: string;
 }
