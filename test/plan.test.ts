@@ -163,7 +163,7 @@ jobs:
   assert.match(plan(repo, linuxCfg(), { only: ["linux"] }).legs.find((l) => l.job === "gate")!.skip ?? "", /already run/);
 });
 
-test("Windows legs list their Linux needs, also when planned with --job", () => {
+test("VM legs replay their Linux needs from a host run, also when planned with --job", () => {
   const repo = tmpRepo(`
 on: push
 jobs:
@@ -177,14 +177,49 @@ jobs:
     steps: [{ run: echo }]
 `);
   const legs = plan(repo, linuxCfg(), { job: "gw" }).legs;
-  const win = legs.find((l) => l.targetOs === "windows")!;
-  assert.deepEqual(win.linuxNeeds, ["plan"]);
-  assert.ok(win.warnings.some((w) => w.includes("Git Bash")));
-  const mac = legs.find((l) => l.targetOs === "macos")!;
-  assert.ok(mac.warnings.some((w) => w.includes(`needs "plan" runs on another OS`)));
+  for (const os of ["windows", "macos"]) {
+    const leg = legs.find((l) => l.targetOs === os)!;
+    assert.deepEqual(leg.replayNeeds, ["plan"]);
+    assert.deepEqual(leg.linuxNeeds, []);
+    assert.ok(leg.warnings.some((w) => w.includes(`needs "plan" targets Linux; osmatrix runs it once on the host`) && w.includes("replays its outputs and artifacts")));
+  }
   const linux = legs.find((l) => l.targetOs === "linux")!;
   assert.equal(linux.linuxNeeds, undefined);
+  assert.equal(linux.replayNeeds, undefined);
   assert.ok(!linux.warnings.some((w) => w.includes("needs")));
+});
+
+test("Linux needs that can't be replayed keep running inside the VM leg", () => {
+  const repo = tmpRepo(`
+on: push
+jobs:
+  win-prep:
+    runs-on: windows-latest
+    steps: [{ run: echo }]
+  lin-after-win:
+    needs: win-prep
+    runs-on: ubuntu-latest
+    steps: [{ run: echo }]
+  base:
+    runs-on: ubuntu-latest
+    steps: [{ run: echo }]
+  called:
+    uses: ./.github/workflows/called.yml
+  lin:
+    needs: base
+    runs-on: ubuntu-latest
+    steps: [{ run: echo }]
+  ship:
+    needs: [lin-after-win, called, lin]
+    runs-on: windows-latest
+    steps: [{ run: echo }]
+`);
+  const ship = plan(repo, linuxCfg(), { job: "ship" }).legs[0];
+  // lin and its own need base run on the host; a Linux job that needs a Windows job, and a reusable
+  // workflow call, still run inside the leg (with Git Bash for run: steps on Windows).
+  assert.deepEqual(ship.replayNeeds, ["base", "lin"]);
+  assert.deepEqual(ship.linuxNeeds, ["called", "lin-after-win"]);
+  assert.ok(ship.warnings.some((w) => w.includes(`needs "lin-after-win" targets Linux; act runs it inside this Windows leg`)));
 });
 
 test("setDefaultRunShell gives jobs a run shell unless one is set", () => {

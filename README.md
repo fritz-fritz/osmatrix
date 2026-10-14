@@ -208,7 +208,7 @@ Secrets for CI go in `<repo>/.osmatrix/secrets` (or `.secrets`) as `KEY=value` l
 
 - `services:` on non-Linux legs.
 - OIDC.
-- `needs:` across OSes. act runs the dependency in the same environment; on Windows legs, osmatrix runs a needed Linux job's `run:` steps without a `shell:` with Git Bash. It does that in a derived copy of the workflow outside the guest's synced tree, which osmatrix leaves untouched.
+- Some `needs:` across OSes. When a Windows/macOS job needs Linux jobs, osmatrix runs them once on the host and replays their outputs and artifacts into the VM leg, as GitHub hands them over from a Linux runner. Linux needs that can't be replayed (a Linux job that itself needs a Windows/macOS job, or a reusable workflow call) run inside the VM leg; on Windows, osmatrix runs their `run:` steps without a `shell:` with Git Bash. Either way osmatrix leaves the guest's synced tree untouched: act gets a derived copy of the workflow from outside it.
 - Matrices built from expressions.
 - Remote reusable workflows.
 

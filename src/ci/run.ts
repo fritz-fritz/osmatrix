@@ -13,6 +13,16 @@ import { isAlive, spawnDetached } from "../core/proc.ts";
 import { commandLine, freePort, push as sshPush, quoteFor, sshArgs, sshBin, sshExec, withCwd, type Endpoint } from "../core/ssh.ts";
 import { getGuest, readyEndpoint, waitReady } from "../env.ts";
 import { plan as makePlan, setDefaultRunShell, type Leg, type Plan, type PlanFilter } from "./plan.ts";
+import {
+  collectorWorkflow,
+  extractArtifacts,
+  parseNeedsRecord,
+  replayStubWorkflow,
+  uploadArtifactAction,
+  UPLOAD_ARTIFACT,
+  type NeededJob,
+  type ReplayArtifact,
+} from "./replay.ts";
 
 export type LegState = "pending" | "running" | "success" | "failure" | "skipped" | "error";
 
@@ -35,6 +45,20 @@ export interface LegResult {
   log: string;
   /** Last lines of the log for failed legs. */
   tail?: string;
+  /** The host run of needed Linux jobs replayed into this VM leg (shared by legs that need the same jobs). */
+  replay?: ReplaySummary;
+}
+
+export interface ReplaySummary {
+  jobs: string[];
+  state: LegState;
+  /** Its own log; the leg's log has a copy. */
+  log: string;
+  durationSec?: number;
+  failedStep?: string;
+  error?: string;
+  /** Artifacts it uploaded, which the leg's guest re-uploads. */
+  artifacts?: string[];
 }
 
 export interface RunStatus {
@@ -48,6 +72,8 @@ export interface RunStatus {
   counts: Record<LegState, number>;
   legs: LegResult[];
   planWarnings: string[];
+  /** GITHUB_RUN_ID of every act run in this run: on GitHub all jobs of a run share one. */
+  githubRunId?: string;
 }
 
 export interface RunOptions extends PlanFilter {
@@ -142,6 +168,7 @@ export async function ciRun(repoIn: string, opts: RunOptions = {}, wait = false)
     options: opts,
     counts: emptyCounts(),
     planWarnings: p.warnings,
+    githubRunId: String(Date.now()),
     legs: p.legs.map((l) => ({
       id: l.id,
       target: l.target,
@@ -215,13 +242,20 @@ export async function worker(repo: string, id: string): Promise<void> {
     groups.set(leg.target, [...(groups.get(leg.target) ?? []), leg]);
   }
 
+  // Host runs of replayed needs, shared by the VM legs that need the same jobs.
+  const replays: Replays = new Map();
   const vmSlots = new Semaphore(cfg.max_vms);
   await Promise.all(
     [...groups.entries()].map(async ([target, legs]) => {
       const isVm = target !== "host";
-      if (isVm) await vmSlots.acquire();
+      // Host runs of replayed needs only use Docker: finish them before taking one of the max_vms slots.
+      const replayed = new Map<string, HostReplay>();
+      if (isVm) {
+        for (const leg of legs) if (leg.replayNeeds?.length) replayed.set(leg.id, await replayFor(repo, dir, cfg, leg, sf, replays));
+        await vmSlots.acquire();
+      }
       try {
-        for (const leg of legs) await runLeg(repo, dir, cfg, leg, sf);
+        for (const leg of legs) await runLeg(repo, dir, cfg, leg, sf, replayed.get(leg.id));
       } finally {
         if (isVm) vmSlots.release();
       }
@@ -241,44 +275,51 @@ export async function worker(repo: string, id: string): Promise<void> {
  * one desktop, so its legs take turns too.
  */
 export function legLockKeys(leg: Leg): string[] {
-  if (leg.target !== "host") return [`guest:${leg.target}`];
-  // act falls back to the workflow's file name.
-  const name = leg.workflowName ?? path.posix.basename(leg.workflow);
-  return [`host:act-workflow:${`act-${name}`.replace(/[^a-zA-Z0-9]/g, "-").replaceAll("--", "-")}`];
+  return leg.target === "host" ? [hostLockKey(leg)] : [`guest:${leg.target}`];
 }
 
-async function runLeg(repo: string, dir: string, cfg: Config, leg: Leg, sf: StatusFile): Promise<void> {
+function hostLockKey(leg: Pick<Leg, "workflow" | "workflowName">): string {
+  // act falls back to the workflow's file name.
+  const name = leg.workflowName ?? path.posix.basename(leg.workflow);
+  return `host:act-workflow:${`act-${name}`.replace(/[^a-zA-Z0-9]/g, "-").replaceAll("--", "-")}`;
+}
+
+/** Run one leg. `replay` is the finished host run of its replayed needs (VM legs with replayNeeds). */
+async function runLeg(repo: string, dir: string, cfg: Config, leg: Leg, sf: StatusFile, replay?: HostReplay): Promise<void> {
   const r = sf.s.legs.find((l) => l.id === leg.id)!;
   const logFile = path.join(dir, `${leg.id}.log`);
   const log = fs.createWriteStream(logFile, { flags: "a" });
-  let waited: string | undefined;
-  const release = await acquireLocks(legLockKeys(leg), { pid: process.pid, run: sf.s.id, repo, leg: leg.id }, (key, h) => {
-    waited = key.startsWith("guest:") ? `guest ${leg.target}` : `workflow "${leg.workflowName ?? leg.workflow}" (act containers)`;
-    r.waitingFor = `${waited} is in use by run ${h.run} (leg ${h.leg}${h.repo === repo ? "" : `, ${h.repo}`})`;
-    log.write(`[osmatrix] waiting: ${r.waitingFor}\n`);
-    sf.save();
-  });
-  if (waited) log.write(`[osmatrix] ${waited} is free; starting\n`);
-  r.waitingFor = undefined;
-  r.state = "running";
-  r.startedAt = new Date().toISOString();
-  sf.save();
   const parser = new ActJsonParser((line) => log.write(line + "\n"), leg.job);
   const timeoutMs = (sf.s.options.timeoutMin ?? 60) * 60_000;
+  let release: (() => void) | undefined;
   try {
+    // Without the replayed jobs' results there is nothing to hand the guest. A replayed job that failed
+    // is no reason to stop: its stub fails too, and act decides which dependents still run, as GitHub would.
+    if (replay?.state === "error") {
+      r.state = "error";
+      r.error = `${replay.error}; the host run's log is in this leg's log and in ${replay.logRel}`;
+      log.write(`[osmatrix] ${r.error}\n`);
+      return;
+    }
+    let waited: string | undefined;
+    release = await acquireLocks(legLockKeys(leg), { pid: process.pid, run: sf.s.id, repo, leg: leg.id }, (key, h) => {
+      waited = key.startsWith("guest:") ? `guest ${leg.target}` : `workflow "${leg.workflowName ?? leg.workflow}" (act containers)`;
+      r.waitingFor = `${waited} is in use by run ${h.run} (leg ${h.leg}${h.repo === repo ? "" : `, ${h.repo}`})`;
+      log.write(`[osmatrix] waiting: ${r.waitingFor}\n`);
+      sf.save();
+    });
+    if (waited) log.write(`[osmatrix] ${waited} is free; starting\n`);
+    r.waitingFor = undefined;
+    r.state = "running";
+    r.startedAt ??= new Date().toISOString();
+    sf.save();
     const event = sf.s.options.event ?? detectEvent(path.join(repo, leg.workflow));
     const secretFile = resolveSecretFile(repo, sf.s.options.secretFile);
     let code: number;
     if (leg.target === "host") {
       const act = await ensureAct();
-      const args = [event, ...commonActArgs(leg), "--pull=false", "--rm", "--artifact-server-path", path.join(dir, "artifacts")];
-      for (const l of new Set([...leg.runsOn, ...(leg.needsLabels ?? [])])) args.push("-P", `${l}=${cfg.act_linux_image}`);
-      // act mounts the Docker socket into job containers; SELinux (Fedora, openSUSE, RHEL) denies
-      // that unless the container runs unconfined, which matches GitHub's runners.
-      if (selinuxEnforcing()) args.push("--container-options", "--security-opt label=disable");
-      // act's artifact server defaults to a fixed port (34567); concurrent or nested runs would collide.
-      args.push("--artifact-server-port", String(await freePort()));
-      if (secretFile) args.push("--secret-file", secretFile);
+      const labels = [...leg.runsOn, ...(leg.needsLabels ?? [])];
+      const args = [event, ...commonActArgs(leg, leg.workflow, sf.s.githubRunId), ...(await hostActArgs(cfg, dir, sf, labels, path.join(dir, "artifacts"), secretFile))];
       const reach = await dockerReach();
       if (reach && !reach.error && (!reach.files || !reach.loopback)) {
         // act copies the checkout into job containers, so legs still run; what can break is anything that
@@ -288,11 +329,6 @@ async function runLeg(repo: string, dir: string, cfg: Config, leg: Leg, sf: Stat
             "Steps that upload/download artifacts or use the actions cache can fail when job containers can't reach this environment, " +
             "and steps that bind-mount host paths see the daemon host's filesystem.\n",
         );
-      }
-      if (sf.s.options.eventPayload) {
-        const eventFile = path.join(dir, "event.json");
-        fs.writeFileSync(eventFile, JSON.stringify(sf.s.options.eventPayload));
-        args.push("-e", eventFile);
       }
       log.write(`$ act ${args.join(" ")}\n`);
       code = await streamProcess(act, args, repo, parser, timeoutMs);
@@ -321,12 +357,12 @@ async function runLeg(repo: string, dir: string, cfg: Config, leg: Leg, sf: Stat
       // The synced tree is what the job checks out (as on GitHub), so this leg's own files go next to it.
       const own = guestLegDir(workdir, sf.s.id, leg.id);
       try {
-        let workflow = leg.workflow;
-        if (g.cfg.os === "windows" && leg.linuxNeeds?.length) {
-          const derived = await bashForLinuxNeeds(ep, repo, leg, r, log);
-          if (derived !== undefined) workflow = await writeDerivedWorkflow(ep, dir, own, leg, derived, log);
-        }
-        const args = [event, ...commonActArgs(leg, workflow), "--artifact-server-path", `${own.fromWorkTree}/artifacts`];
+        const original = fs.readFileSync(path.join(repo, leg.workflow), "utf8");
+        let derived: string | undefined;
+        if (replay) derived = await replayStubs(ep, g.cfg.os, own, leg, replay, original, log);
+        if (g.cfg.os === "windows" && leg.linuxNeeds?.length) derived = (await bashForLinuxNeeds(ep, derived ?? original, leg, r, log)) ?? derived;
+        const workflow = derived === undefined ? leg.workflow : await writeDerivedWorkflow(ep, dir, own, leg, derived, log);
+        const args = [event, ...commonActArgs(leg, workflow, sf.s.githubRunId), "--artifact-server-path", `${own.fromWorkTree}/artifacts`];
         for (const l of new Set([...leg.runsOn, ...(leg.needsLabels ?? [])])) args.push("-P", `${l}=-self-hosted`);
         if (sf.s.options.eventPayload) {
           await writeRemoteFile(ep, `${own.path}/event.json`, JSON.stringify(sf.s.options.eventPayload));
@@ -353,6 +389,10 @@ async function runLeg(repo: string, dir: string, cfg: Config, leg: Leg, sf: Stat
     parser.flush();
     r.steps = parser.steps;
     r.failedStep = parser.failedStep;
+    // A failing replay stub stands for the step that failed in the host run; name that one.
+    if (replay?.failedStep && replay.state === "failure" && replay.jobs.some((j) => parser.failedStep?.startsWith(`${j}: `))) {
+      r.failedStep = `host run: ${replay.failedStep}`;
+    }
     r.state = code === 0 && parser.jobResult !== "failure" ? "success" : "failure";
     if (code === 124) r.error = `timed out after ${sf.s.options.timeoutMin ?? 60} min`;
   } catch (e) {
@@ -360,8 +400,9 @@ async function runLeg(repo: string, dir: string, cfg: Config, leg: Leg, sf: Stat
     r.error = (e as Error).message;
     log.write(`[osmatrix] error: ${r.error}\n`);
   } finally {
-    release();
+    release?.();
     await new Promise((res) => log.end(res));
+    r.startedAt ??= new Date().toISOString();
     r.finishedAt = new Date().toISOString();
     r.durationSec = Math.round((Date.parse(r.finishedAt) - Date.parse(r.startedAt!)) / 1000);
     if (r.state !== "success") {
@@ -383,6 +424,195 @@ export function actDifferenceHints(log: string): string[] {
   return [
     `the failure mentions ${m[0]}: act keeps GITHUB_OUTPUT/GITHUB_ENV/GITHUB_PATH/GITHUB_STATE/GITHUB_STEP_SUMMARY there, outside RUNNER_TEMP, while GitHub keeps them under RUNNER_TEMP. A check that these paths lie inside RUNNER_TEMP or GITHUB_WORKSPACE fails only locally; skip it when env.ACT is set`,
   ];
+}
+
+/** act's arguments for a run on the host's Docker (Linux legs and the host runs of replayed needs). */
+async function hostActArgs(cfg: Config, dir: string, sf: StatusFile, labels: string[], artifactPath: string, secretFile?: string): Promise<string[]> {
+  const args = ["--pull=false", "--rm", "--artifact-server-path", artifactPath];
+  for (const l of new Set(labels)) args.push("-P", `${l}=${cfg.act_linux_image}`);
+  // act mounts the Docker socket into job containers; SELinux (Fedora, openSUSE, RHEL) denies
+  // that unless the container runs unconfined, which matches GitHub's runners.
+  if (selinuxEnforcing()) args.push("--container-options", "--security-opt label=disable");
+  // act's artifact server defaults to a fixed port (34567); concurrent or nested runs would collide.
+  args.push("--artifact-server-port", String(await freePort()));
+  if (secretFile) args.push("--secret-file", secretFile);
+  if (sf.s.options.eventPayload) {
+    const eventFile = path.join(dir, "event.json");
+    fs.writeFileSync(eventFile, JSON.stringify(sf.s.options.eventPayload));
+    args.push("-e", eventFile);
+  }
+  return args;
+}
+
+// ---------- replayed needs (see replay.ts) ----------
+
+interface HostReplay {
+  jobs: string[];
+  /**
+   * success: every replayed job succeeded or was skipped; failure: some failed or were cancelled (their
+   * stubs fail the same way); error: no usable results (act failed, timed out, or recorded nothing).
+   */
+  state: "success" | "failure" | "error";
+  log: string;
+  logRel: string;
+  /** Result and outputs of each replayed job. */
+  needs: Record<string, NeededJob>;
+  /** Artifacts the host run uploaded, unpacked on the host. */
+  artifacts: ReplayArtifact[];
+  upload: { ref: string; version?: string };
+  durationSec: number;
+  failedStep?: string;
+  error?: string;
+}
+
+type Replays = Map<string, { logRel: string; done: Promise<HostReplay> }>;
+
+/**
+ * The host run of a VM leg's replayed needs: started by the first leg that needs these jobs, awaited by
+ * the others. Its log is copied into the leg's log and summarized in the leg's status.
+ */
+async function replayFor(repo: string, dir: string, cfg: Config, leg: Leg, sf: StatusFile, replays: Replays): Promise<HostReplay> {
+  const r = sf.s.legs.find((l) => l.id === leg.id)!;
+  const log = fs.createWriteStream(path.join(dir, `${leg.id}.log`), { flags: "a" });
+  r.state = "running";
+  r.startedAt = new Date().toISOString();
+  const jobs = [...leg.replayNeeds!].sort();
+  const key = `${leg.workflow}\n${jobs.join("\n")}`;
+  let entry = replays.get(key);
+  const first = !entry;
+  if (!entry) {
+    const n = replays.size + 1;
+    const logRel = path.join(".osmatrix", "runs", sf.s.id, `replay-${n}.log`);
+    entry = { logRel, done: hostReplay(repo, dir, cfg, leg, jobs, sf, n, logRel) };
+    replays.set(key, entry);
+  }
+  r.replay = { jobs, state: "running", log: entry.logRel };
+  sf.save();
+  log.write(
+    `[osmatrix] needs ${jobs.join(", ")} target Linux: ${first ? "running them" : "waiting for their run"} on the host (act on Docker), ` +
+      `then replaying their outputs and artifacts into this leg, as GitHub hands them over from a Linux runner (log: ${entry.logRel})\n`,
+  );
+  const res = await entry.done;
+  log.write(`[osmatrix] ----- host run of ${jobs.join(", ")} -----\n`);
+  try {
+    log.write(fs.readFileSync(res.log, "utf8"));
+  } catch {
+    /* no log */
+  }
+  log.write(`[osmatrix] ----- end of host run: ${res.state}${res.error ? ` (${res.error})` : ""} -----\n`);
+  r.replay = {
+    jobs,
+    state: res.state,
+    log: res.logRel,
+    durationSec: res.durationSec,
+    ...(res.failedStep ? { failedStep: res.failedStep } : {}),
+    ...(res.error ? { error: res.error } : {}),
+    ...(res.artifacts.length ? { artifacts: res.artifacts.map((a) => a.name) } : {}),
+  };
+  if (res.state === "failure") {
+    log.write(`[osmatrix] ${res.error}: their stubs fail in this leg too, and act decides which dependent jobs still run\n`);
+  }
+  // Back to pending while the leg waits for a VM slot and its guest.
+  r.state = "pending";
+  sf.save();
+  await new Promise((done) => log.end(done));
+  return res;
+}
+
+/**
+ * Run `jobs` once on the host with act, through a collector job that records their results and outputs,
+ * and unpack the artifacts they uploaded. Never throws: problems end up in the returned state and error.
+ */
+async function hostReplay(repo: string, dir: string, cfg: Config, leg: Leg, jobs: string[], sf: StatusFile, n: number, logRel: string): Promise<HostReplay> {
+  const rdir = ensureDir(path.join(dir, "replay", String(n)));
+  const out: HostReplay = { jobs, state: "error", log: path.join(dir, `replay-${n}.log`), logRel, needs: {}, artifacts: [], upload: UPLOAD_ARTIFACT, durationSec: 0 };
+  const log = fs.createWriteStream(out.log, { flags: "a" });
+  const started = Date.now();
+  const names = jobs.join(", ");
+  let release: (() => void) | undefined;
+  try {
+    const text = fs.readFileSync(path.join(repo, leg.workflow), "utf8");
+    out.upload = uploadArtifactAction(text, jobs);
+    const collector = collectorWorkflow(text, jobs);
+    // Outside the work tree, under the workflow's file name (act's fallback for the workflow's name).
+    const wf = path.join(rdir, path.posix.basename(leg.workflow));
+    fs.writeFileSync(wf, collector.text);
+    let record: Record<string, NeededJob> | undefined;
+    const parser = new ActJsonParser((line) => {
+      log.write(line + "\n");
+      record = parseNeedsRecord(line) ?? record;
+    }, collector.job);
+    release = await acquireLocks([hostLockKey(leg)], { pid: process.pid, run: sf.s.id, repo, leg: `host run of ${names}` }, (_key, h) => {
+      log.write(`[osmatrix] waiting: workflow "${leg.workflowName ?? leg.workflow}" (act containers) is in use by run ${h.run} (leg ${h.leg})\n`);
+    });
+    const act = await ensureAct();
+    const event = sf.s.options.event ?? detectEvent(path.join(repo, leg.workflow));
+    const secretFile = resolveSecretFile(repo, sf.s.options.secretFile);
+    const labels = [...leg.needsLabels, "ubuntu-latest"];
+    const args = [
+      event,
+      ...commonActArgs({ workflow: wf, job: collector.job, matrix: {} }, wf, sf.s.githubRunId),
+      ...(await hostActArgs(cfg, dir, sf, labels, path.join(rdir, "artifacts"), secretFile)),
+    ];
+    log.write(`[osmatrix] running ${names} on the host; job ${collector.job} records their results and outputs\n$ act ${args.join(" ")}\n`);
+    const code = await streamProcess(act, args, repo, parser, (sf.s.options.timeoutMin ?? 60) * 60_000);
+    parser.flush();
+    out.failedStep = parser.failedStep;
+    const failed = jobs.filter((j) => record?.[j] && !["success", "skipped"].includes(record[j].result));
+    const missing = jobs.filter((j) => !record?.[j]);
+    if (code === 124) out.error = `the host run of ${names} timed out after ${sf.s.options.timeoutMin ?? 60} min`;
+    else if (!record) out.error = `the host run of ${names} ended without recording their results (act exit code ${code})`;
+    else if (missing.length) out.error = `the host run recorded no result for ${missing.join(", ")}`;
+    // act exits non-zero when a job fails; with no failed job recorded, the failure is act's own.
+    else if (code !== 0 && !failed.length) out.error = `act exited with code ${code} in the host run of ${names}, though all of them succeeded or were skipped`;
+    if (out.error || !record) return out; // state stays "error"
+    out.needs = Object.fromEntries(jobs.map((j) => [j, record![j]]));
+    // Artifacts uploaded before a failure exist on GitHub too.
+    out.artifacts = extractArtifacts(path.join(rdir, "artifacts"), sf.s.githubRunId ?? "1", path.join(rdir, "files"));
+    if (failed.length) {
+      out.state = "failure";
+      const how = (j: string) => `${j} ${record![j].result === "failure" ? "failed" : `ended as ${record![j].result}`}`;
+      out.error = `needed job${failed.length > 1 ? "s" : ""} ${failed.map(how).join(", ")} in the host run`;
+    } else out.state = "success";
+    log.write(
+      `[osmatrix] recorded ${jobs.map((j) => `${j} (${out.needs[j].result}, ${Object.keys(out.needs[j].outputs).length} outputs)`).join(", ")}; ` +
+        `artifacts: ${out.artifacts.map((a) => a.name).join(", ") || "none"}\n`,
+    );
+  } catch (e) {
+    out.state = "error";
+    out.error = `the host run of ${names} failed to run: ${(e as Error).message}`;
+  } finally {
+    if (out.error) log.write(`[osmatrix] ${out.error}\n`);
+    release?.();
+    out.durationSec = Math.round((Date.now() - started) / 1000);
+    await new Promise((res) => log.end(res));
+  }
+  return out;
+}
+
+/**
+ * The leg's workflow with its replayed needs as stubs. The recorded artifacts go into the guest next to
+ * the work tree first: stubs have no checkout, so they upload from absolute paths.
+ */
+async function replayStubs(ep: Endpoint, os: string, own: ReturnType<typeof guestLegDir>, leg: Leg, replay: HostReplay, original: string, log: fs.WriteStream): Promise<string> {
+  let artifacts: ReplayArtifact[] = [];
+  if (replay.artifacts.length) {
+    log.write(`[osmatrix] copying artifacts of the host run (${replay.artifacts.map((a) => a.name).join(", ")}) to ${own.path}/replay\n`);
+    await sshPush(ep, path.dirname(replay.artifacts[0].dir), `${own.path}/replay`, { gitAware: false });
+    const abs = await guestAbsPath(ep, `${own.path}/replay`);
+    const sep = os === "windows" ? "\\" : "/";
+    artifacts = replay.artifacts.map((a) => ({ name: a.name, dir: `${abs}${sep}${path.basename(a.dir)}` }));
+  }
+  log.write(`[osmatrix] ${replay.jobs.join(", ")}: replayed in this leg from the host run\n`);
+  return replayStubWorkflow(original, { needs: replay.needs, runsOn: leg.runsOn, artifacts, upload: replay.upload });
+}
+
+async function guestAbsPath(ep: Endpoint, p: string): Promise<string> {
+  const cmd = ep.shell === "posix" ? `cd ${quoteFor("posix", p)} && pwd` : powershell(ep, `[IO.Path]::GetFullPath(${pwshHomePath(p)})`);
+  const r = await sshExec(ep, cmd, { timeoutMs: 60_000 });
+  const abs = r.stdout.trim();
+  if (r.code !== 0 || !abs) throw new Error(`could not resolve ${p} in the guest: ${r.stderr.trim()}`);
+  return abs;
 }
 
 /**
@@ -416,9 +646,13 @@ async function writeDerivedWorkflow(
   return `${own.fromWorkTree}/${name}`;
 }
 
-/** act's arguments for a leg; `workflow` replaces the leg's own workflow file (a derived copy outside the work tree). */
-export function commonActArgs(leg: Leg, workflow = leg.workflow): string[] {
+/**
+ * act's arguments for a leg; `workflow` replaces the leg's own workflow file (a derived copy outside the
+ * work tree). `githubRunId` is the run's shared GITHUB_RUN_ID (act's default is 1).
+ */
+export function commonActArgs(leg: Pick<Leg, "workflow" | "job" | "matrix">, workflow = leg.workflow, githubRunId?: string): string[] {
   const a = ["-W", workflow, "-j", leg.job, "--json"];
+  if (githubRunId) a.push("--env", `GITHUB_RUN_ID=${githubRunId}`);
   for (const [k, v] of Object.entries(leg.matrix)) {
     if (v === null || ["string", "number", "boolean"].includes(typeof v)) a.push("--matrix", `${k}:${String(v)}`);
   }
@@ -449,10 +683,11 @@ function resolveSecretFile(repo: string, explicit?: string): string | undefined 
 
 /**
  * act runs a Windows leg's Linux needs in the VM, where run: steps without a shell: default to pwsh.
- * GitHub would run them with bash, so point those jobs at Git Bash. Returns the derived workflow, or
- * undefined when nothing changes.
+ * GitHub would run them with bash, so point those jobs at Git Bash. Only needs that can't be replayed
+ * from a host run (see Leg.replayNeeds) get here. Returns the derived workflow, or undefined when
+ * nothing changes.
  */
-async function bashForLinuxNeeds(ep: Endpoint, repo: string, leg: Leg, r: LegResult, log: fs.WriteStream): Promise<string | undefined> {
+async function bashForLinuxNeeds(ep: Endpoint, workflow: string, leg: Leg, r: LegResult, log: fs.WriteStream): Promise<string | undefined> {
   // Git Bash's launcher (bin\bash.exe) sets up PATH; System32\bash.exe would be WSL, so don't rely on PATH.
   const find = `$g = Get-Command git -ErrorAction SilentlyContinue; $c = @('C:\\Program Files\\Git\\bin\\bash.exe'); if ($g) { $c = @((Join-Path (Split-Path (Split-Path $g.Source)) 'bin\\bash.exe'), (Join-Path (Split-Path (Split-Path (Split-Path $g.Source))) 'bin\\bash.exe')) + $c }; $c | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1`;
   const bash = (await sshExec(ep, powershell(ep, find), { timeoutMs: 60_000 })).stdout.trim().replace(/\\/g, "/");
@@ -462,7 +697,7 @@ async function bashForLinuxNeeds(ep: Endpoint, repo: string, leg: Leg, r: LegRes
   }
   // GitHub's default for a run: step without shell: on Linux is `bash -e {0}`. Double quotes: act splits
   // the string to find the program, but on Windows hands the raw string to CreateProcess as the command line.
-  const { text, changed } = setDefaultRunShell(fs.readFileSync(path.join(repo, leg.workflow), "utf8"), leg.linuxNeeds!, `"${bash}" -e {0}`);
+  const { text, changed } = setDefaultRunShell(workflow, leg.linuxNeeds!, `"${bash}" -e {0}`);
   if (!changed.length) return undefined;
   log.write(`[osmatrix] Linux needs ${changed.join(", ")}: run: steps without shell: use ${bash} in this leg\n`);
   return text;

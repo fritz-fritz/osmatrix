@@ -1,0 +1,59 @@
+name: cross-os-needs
+# A Windows/macOS job that needs a Linux job: osmatrix runs "plan" once on the host and replays its
+# outputs and artifact into the VM legs of "test", as GitHub hands them over from a Linux runner.
+# Run it with: osmatrix ci run --repo fixtures/cross-os-needs --job test
+on:
+  push:
+  pull_request:
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      mode: ${{ steps.plan.outputs.mode }}
+      run_id: ${{ steps.plan.outputs.run_id }}
+      notes: ${{ steps.plan.outputs.notes }}
+    steps:
+      - id: plan
+        name: Plan
+        run: |
+          echo "mode=full" >> "$GITHUB_OUTPUT"
+          echo "run_id=$GITHUB_RUN_ID" >> "$GITHUB_OUTPUT"
+          # A multi-line value with a quote and something that looks like an expression.
+          { echo "notes<<END"; echo "it's planned on $(uname -s)"; printf 'literal %s{{ x }}\n' '$'; echo "END"; } >> "$GITHUB_OUTPUT"
+          mkdir -p out/sub
+          echo "$GITHUB_RUN_ID" > out/run-id.txt
+          uname -s > out/sub/os.txt
+          echo hidden > out/.hidden
+      # v4: stock act 0.2.89 rejects later majors (osmatrix issue #24).
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: plan
+          path: out
+          include-hidden-files: true
+
+  test:
+    needs: plan
+    if: needs.plan.outputs.mode == 'full'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: plan
+          path: plan
+      - name: Check what plan handed over
+        shell: bash
+        env:
+          NOTES: ${{ needs.plan.outputs.notes }}
+          PLAN_RUN_ID: ${{ needs.plan.outputs.run_id }}
+        run: |
+          set -eux
+          test "$PLAN_RUN_ID" = "$GITHUB_RUN_ID"
+          test "$(cat plan/run-id.txt)" = "$GITHUB_RUN_ID"
+          test "$(cat plan/sub/os.txt)" = Linux
+          test -f plan/.hidden
+          test "$NOTES" = "$(printf "it's planned on Linux\nliteral %s{{ x }}" '$')"
