@@ -15,22 +15,30 @@ export interface Leg {
   jobName?: string;
   matrix: MatrixCombo;
   runsOn: string[];
-  /** runs-on labels of jobs this leg transitively needs (act runs them in the same environment). */
+  /** runs-on labels of the needed jobs act runs inside this leg (see inlineNeeds). */
   needsLabels: string[];
   /** Jobs this leg's job directly needs. */
   needs: string[];
-  /** Every job this leg's job transitively needs (act -j runs them all). */
+  /** Every job this leg's job transitively needs. */
   needsAll?: string[];
   /**
-   * Needed jobs (transitively) that target Linux, when this leg doesn't, and that can't be replayed (see
-   * replayNeeds): act runs them in this leg's OS.
-   */
-  linuxNeeds?: string[];
-  /**
-   * Needed jobs (transitively) that target Linux, when this leg doesn't, and whose own needs do too:
-   * osmatrix runs them once on the host and replays their outputs and artifacts into this leg.
+   * Needed jobs that run as their own legs in this run (each exactly once, on its own runs-on target):
+   * this leg waits for them and act gets stubs that replay their results, outputs and artifacts.
    */
   replayNeeds?: string[];
+  /**
+   * Needed jobs that can't run as their own legs (no local target): act runs them inside this leg, as
+   * `act -j` does, in this leg's environment.
+   */
+  inlineNeeds?: string[];
+  /** The inline needs that target Linux only, when this leg doesn't (Windows legs run them with Git Bash). */
+  linuxNeeds?: string[];
+  /** Legs (ids) of the replayed needs: this leg starts when they have finished. */
+  waitsFor?: string[];
+  /** Legs (ids) that wait for this one: osmatrix records its job's result and outputs for them. */
+  neededBy?: string[];
+  /** Not selected by the filter: runs only because selected legs need its job. */
+  neededOnly?: boolean;
   /** "host" = act on the host docker (Linux legs); otherwise a guest name. */
   target?: string;
   targetOs?: string;
@@ -189,6 +197,11 @@ export function plan(repo: string, cfg: Config, filter: PlanFilter = {}): Plan {
   }
   if (!workflows.length) warnings.push(`no workflows found in ${repo}/.github/workflows`);
 
+  const only = filter.only?.map((s) => s.toLowerCase());
+  const onlyMatches = (l: Leg) => {
+    const keys = [l.target, l.targetOs, l.target === "host" ? "linux" : undefined].filter(Boolean) as string[];
+    return keys.some((k) => only!.includes(k.toLowerCase()));
+  };
   const legs: Leg[] = [];
   const seen = new Set<string>();
   for (const wf of workflows) {
@@ -200,14 +213,18 @@ export function plan(repo: string, cfg: Config, filter: PlanFilter = {}): Plan {
       continue;
     }
     const jobs = (doc.jobs ?? {}) as Record<string, Record<string, unknown>>;
+    // Every leg of the workflow: legs the filter doesn't select still run when a selected leg needs their job.
     const wfLegs: Leg[] = [];
+    const selected = new Set<Leg>();
     for (const [jobId, job] of Object.entries(jobs)) {
-      if (filter.job && filter.job !== jobId) continue;
       const jw: string[] = [];
       const strategy = (job.strategy ?? {}) as Record<string, unknown>;
       const combos = expandMatrix(strategy.matrix, jw);
       for (const combo of combos) {
-        if (filter.matrix && !Object.entries(filter.matrix).every(([k, v]) => String(combo[k]) === v)) continue;
+        // A matrix filter selects legs whose combination has every key. Like act's --matrix, it leaves the
+        // legs of a needed job that lacks a key alone: they all run.
+        const matrixKeys = Object.entries(filter.matrix ?? {});
+        if (!matrixKeys.every(([k, v]) => !(k in combo) || String(combo[k]) === v)) continue;
         const lw = [...jw];
         let labels: string[] = [];
         let skip: string | undefined;
@@ -227,7 +244,7 @@ export function plan(repo: string, cfg: Config, filter: PlanFilter = {}): Plan {
         if (workflows.length > 1) id = `${path.posix.basename(wf).replace(/\.ya?ml$/, "")}.${id}`;
         while (seen.has(id)) id += "_";
         seen.add(id);
-        wfLegs.push({
+        const leg: Leg = {
           id,
           workflow: wf,
           workflowName: typeof doc.name === "string" ? doc.name : undefined,
@@ -241,10 +258,11 @@ export function plan(repo: string, cfg: Config, filter: PlanFilter = {}): Plan {
           warnings: lw,
           needsLabels: [],
           needs: [],
-        });
+        };
+        wfLegs.push(leg);
+        if ((!filter.job || filter.job === jobId) && matrixKeys.every(([k]) => k in combo) && (!only || onlyMatches(leg))) selected.add(leg);
       }
     }
-    // Labels of every job in a leg's transitive needs: act -j runs those jobs too, in the same environment.
     const labelsOf = (jobId: string): string[] => {
       const job = jobs[jobId] ?? {};
       if (typeof job.uses === "string") return ["ubuntu-latest"];
@@ -253,12 +271,15 @@ export function plan(repo: string, cfg: Config, filter: PlanFilter = {}): Plan {
     };
     const needsOf = (jobId: string): string[] => {
       const n = jobs[jobId]?.needs;
-      // A copy: callers mutate the result (the traversal below pops from it).
+      // A copy: callers mutate the result (the traversals below pop from it).
       return typeof n === "string" ? [n] : Array.isArray(n) ? [...(n as string[])] : [];
     };
     // OS families a job targets, from its labels; independent of the job filter, so needs are classified too.
     const osOf = (jobId: string): Set<string> =>
       new Set(labelsOf(jobId).flatMap((l) => pickTarget([l], cfg).os ?? (/^ubuntu-/.test(l) ? "linux" : [])));
+    // A needed job with legs that can run here runs as those legs, each once, on its own target; the legs
+    // that need it wait for them and get its results replayed.
+    const ownLegs = (jobId: string) => wfLegs.filter((l) => l.job === jobId && !l.skip);
     for (const leg of wfLegs) {
       const seenJobs = new Set<string>();
       const stack = needsOf(leg.job);
@@ -268,70 +289,85 @@ export function plan(repo: string, cfg: Config, filter: PlanFilter = {}): Plan {
         seenJobs.add(j);
         stack.push(...needsOf(j));
       }
-      leg.needsLabels = [...new Set([...seenJobs].flatMap(labelsOf))].filter((l) => !l.includes("${{"));
       leg.needs = needsOf(leg.job);
       leg.needsAll = [...seenJobs].sort();
-      // needs: across OS boundaries can't be honored when legs run in separate environments.
+      if (seenJobs.has(leg.job)) {
+        // GitHub rejects such a workflow; waiting for its own needs would never end.
+        leg.skip ??= `its needs form a cycle through ${leg.job}`;
+        continue;
+      }
+      // act runs the needs that can't run as their own legs inside this leg (as act -j does), and so
+      // their needs too, down to the ones that are replayed.
+      const replay = new Set<string>();
+      const inline = new Set<string>();
+      const walk = needsOf(leg.job);
+      while (walk.length) {
+        const j = walk.pop()!;
+        if (replay.has(j) || inline.has(j)) continue;
+        if (ownLegs(j).length) replay.add(j);
+        else {
+          inline.add(j);
+          walk.push(...needsOf(j));
+        }
+      }
+      leg.replayNeeds = [...replay].sort();
+      leg.inlineNeeds = [...inline].sort();
+      leg.waitsFor = wfLegs.filter((l) => replay.has(l.job) && !l.skip).map((l) => l.id);
+      leg.needsLabels = [...new Set(leg.inlineNeeds.flatMap(labelsOf))].filter((l) => !l.includes("${{"));
+      for (const n of leg.replayNeeds) {
+        for (const l of wfLegs.filter((l) => l.job === n && l.skip)) {
+          leg.warnings.push(`needs "${n}": its leg ${l.id} can't run here (${l.skip}), so needs.${n} lacks that leg's result`);
+        }
+      }
       if (!leg.targetOs) continue;
-      const crossOs = leg.needsAll.filter((n) => [...osOf(n)].some((o) => o !== leg.targetOs));
+      const crossOs = (n: string) => [...osOf(n)].some((o) => o !== leg.targetOs);
       // Only jobs that target Linux alone: a job-wide shell default would also change a mixed-OS job's other legs.
       const linuxOnly = (n: string) => [...osOf(n)].every((o) => o === "linux");
-      if (leg.targetOs !== "linux") {
-        // Linux jobs whose own needs are all on Linux too run once on the host, as on GitHub, and are
-        // replayed into this leg. Reusable workflow calls keep running inside the leg.
-        const memo = new Map<string, boolean>();
-        const replayable = (n: string): boolean => {
-          if (!memo.has(n)) {
-            memo.set(n, true); // a needs cycle is invalid anyway; don't recurse forever
-            memo.set(n, osOf(n).size > 0 && linuxOnly(n) && typeof jobs[n]?.uses !== "string" && needsOf(n).every(replayable));
-          }
-          return memo.get(n)!;
-        };
-        leg.replayNeeds = crossOs.filter(replayable);
-        leg.linuxNeeds = crossOs.filter((n) => linuxOnly(n) && !leg.replayNeeds!.includes(n));
+      if (leg.targetOs !== "linux") leg.linuxNeeds = leg.inlineNeeds.filter((n) => crossOs(n) && linuxOnly(n));
+      for (const n of leg.replayNeeds.filter(crossOs)) {
+        const oses = [...osOf(n)].sort().join("/");
+        leg.warnings.push(
+          `needs "${n}" runs on ${oses}; it runs once, as its own leg${ownLegs(n).length > 1 ? "s" : ""}, and osmatrix replays its result, outputs and artifacts into this leg, as GitHub hands them over from another runner`,
+        );
       }
-      for (const n of crossOs) {
-        if (leg.replayNeeds?.includes(n)) {
+      for (const n of leg.inlineNeeds) {
+        const why = wfLegs.find((l) => l.job === n)?.skip;
+        const because = why ? ` (${why})` : "";
+        if (leg.targetOs === "windows" && osOf(n).has("linux") && !linuxOnly(n)) {
           leg.warnings.push(
-            `needs "${n}" targets Linux; osmatrix runs it once on the host (act on Docker) and replays its outputs and artifacts into this leg, as GitHub would hand them over from a Linux runner`,
+            `needs "${n}" can't run as its own legs${because}; act runs all of its matrix legs inside this Windows leg, where its run: steps without a shell: use pwsh, so its Linux legs will likely fail`,
           );
-        } else if (leg.targetOs === "windows" && osOf(n).has("linux") && !linuxOnly(n)) {
+        } else if (leg.linuxNeeds?.includes(n) && leg.targetOs === "windows") {
           leg.warnings.push(
-            `needs "${n}" runs on Linux and other OSes; act runs all of its matrix legs inside this Windows leg, where its run: steps without a shell: use pwsh, so its Linux legs will likely fail. Check it on its own legs instead`,
-          );
-        } else if (leg.targetOs === "windows" && leg.linuxNeeds?.includes(n)) {
-          leg.warnings.push(
-            `needs "${n}" targets Linux; act runs it inside this Windows leg. osmatrix runs its run: steps without a shell: under Git Bash, as GitHub would use bash, but Linux-only tools (apt-get, docker, …) fail there and outputs/artifacts may differ`,
+            `needs "${n}" targets Linux but can't run as its own leg${because}; act runs it inside this Windows leg. osmatrix runs its run: steps without a shell: under Git Bash, as GitHub would use bash, but Linux-only tools (apt-get, docker, …) fail there and outputs/artifacts may differ`,
           );
         } else {
-          leg.warnings.push(`needs "${n}" runs on another OS; act will run it inside this leg's environment (outputs/artifacts may differ)`);
+          leg.warnings.push(`needs "${n}" can't run as its own leg${because}; act runs it inside this leg's environment${crossOs(n) ? " (outputs/artifacts may differ)" : ""}`);
         }
       }
     }
-    legs.push(...wfLegs);
-  }
-
-  const only = filter.only?.map((s) => s.toLowerCase());
-  const filtered = only
-    ? legs.filter((l) => {
-        const keys = [l.target, l.targetOs, l.target === "host" ? "linux" : undefined].filter(Boolean) as string[];
-        return keys.some((k) => only.includes(k.toLowerCase()));
-      })
-    : legs;
-
-  // act -j <job> also runs the job's needs. When every needed job already runs as its own leg in
-  // this run (typical for gate / fan-in jobs such as "CI Gate"), running the dependent job would
-  // repeat all of them, on the wrong OS for Windows/macOS legs. Skip it unless asked for by name.
-  if (!filter.job) {
-    for (const leg of filtered) {
-      if (leg.skip || !leg.needs.length) continue;
-      const covered = leg.needs.every((n) => filtered.some((o) => o !== leg && o.workflow === leg.workflow && o.job === n && !o.skip));
-      if (covered) {
-        leg.skip = `its needs (${leg.needs.join(", ")}) already run as legs here; act would repeat them. Run it alone with --job ${leg.job}`;
+    // The selected legs and, transitively, the legs they wait for.
+    const byId = new Map(wfLegs.map((l) => [l.id, l]));
+    const include = new Set(selected);
+    const queue = [...selected];
+    while (queue.length) {
+      const l = queue.pop()!;
+      if (l.skip) continue;
+      for (const id of l.waitsFor ?? []) {
+        const n = byId.get(id)!;
+        if (include.has(n)) continue;
+        include.add(n);
+        n.neededOnly = true;
+        queue.push(n);
       }
     }
+    for (const l of include) {
+      if (l.skip) continue;
+      for (const id of l.waitsFor ?? []) (byId.get(id)!.neededBy ??= []).push(l.id);
+    }
+    legs.push(...wfLegs.filter((l) => include.has(l)));
   }
-  return { repo, legs: filtered, warnings };
+  return { repo, legs, warnings };
 }
 
 /**

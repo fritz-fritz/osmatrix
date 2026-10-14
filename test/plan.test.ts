@@ -113,27 +113,49 @@ jobs:
   assert.ok(b.warnings.some((w) => w.includes("services")));
 });
 
-test("plan collects labels of transitive needs", () => {
+test("every dependent leg, host or VM, waits for the one run of its needs, also when planned with --job", () => {
   const repo = tmpRepo(`
 on: push
 jobs:
-  prep:
-    runs-on: ubuntu-22.04
-    steps: [{ run: echo }]
-  mid:
-    needs: prep
+  plan:
     runs-on: ubuntu-latest
     steps: [{ run: echo }]
-  win:
-    needs: [mid]
-    runs-on: windows-latest
+  gw:
+    needs: plan
+    strategy: { matrix: { os: [ubuntu-latest, macos-latest, windows-latest] } }
+    runs-on: \${{ matrix.os }}
     steps: [{ run: echo }]
 `);
-  const win = plan(repo, linuxCfg()).legs.find((l) => l.job === "win")!;
-  assert.deepEqual(win.needsLabels.sort(), ["ubuntu-22.04", "ubuntu-latest"]);
+  const legs = plan(repo, linuxCfg(), { job: "gw" }).legs;
+  // plan isn't selected, but runs once because gw needs it.
+  assert.deepEqual(
+    legs.map((l) => [l.id, l.neededOnly ?? false]),
+    [
+      ["plan", true],
+      ["gw-ubuntu-latest", false],
+      ["gw-macos-latest", false],
+      ["gw-windows-latest", false],
+    ],
+  );
+  assert.deepEqual(legs[0].neededBy, ["gw-ubuntu-latest", "gw-macos-latest", "gw-windows-latest"]);
+  for (const leg of legs.slice(1)) {
+    assert.deepEqual(leg.replayNeeds, ["plan"]);
+    assert.deepEqual(leg.waitsFor, ["plan"]);
+    assert.deepEqual(leg.inlineNeeds, []);
+    assert.deepEqual(leg.needsLabels, []);
+    assert.equal(leg.neededBy, undefined);
+  }
+  for (const os of ["windows", "macos"]) {
+    const leg = legs.find((l) => l.targetOs === os)!;
+    assert.deepEqual(leg.linuxNeeds, []);
+    assert.ok(leg.warnings.some((w) => w.includes(`needs "plan" runs on linux; it runs once, as its own leg, and osmatrix replays its result, outputs and artifacts`)));
+  }
+  const linux = legs.find((l) => l.id === "gw-ubuntu-latest")!;
+  assert.equal(linux.linuxNeeds, undefined);
+  assert.ok(!linux.warnings.some((w) => w.includes("needs")));
 });
 
-test("plan skips fan-in jobs whose needs already run as legs, unless asked for by name", () => {
+test("fan-in jobs run once after their needs; needed legs the filter leaves out still run", () => {
   const repo = tmpRepo(`
 on: push
 jobs:
@@ -149,77 +171,142 @@ jobs:
     if: always()
     runs-on: ubuntu-latest
     steps: [{ run: echo }]
-  deploy:
-    needs: [build]
-    runs-on: ubuntu-latest
-    steps: [{ run: echo }]
 `);
-  const legs = plan(repo, linuxCfg()).legs;
-  assert.match(legs.find((l) => l.job === "gate")!.skip ?? "", /already run as legs/);
-  // "build" is not a leg in this run (no such job), so deploy isn't treated as a fan-in.
-  assert.equal(legs.find((l) => l.job === "deploy")!.skip, undefined);
-  assert.equal(plan(repo, linuxCfg(), { job: "gate" }).legs[0].skip, undefined);
-  // With only Linux legs selected, unit's Windows leg is filtered out but unit still runs on Linux.
-  assert.match(plan(repo, linuxCfg(), { only: ["linux"] }).legs.find((l) => l.job === "gate")!.skip ?? "", /already run/);
+  const all = plan(repo, linuxCfg()).legs;
+  const gate = all.find((l) => l.job === "gate")!;
+  assert.equal(gate.skip, undefined);
+  assert.deepEqual(gate.waitsFor, ["unit-ubuntu-latest", "unit-windows-latest", "lint"]);
+  assert.ok(all.every((l) => !l.neededOnly));
+  assert.deepEqual(all.find((l) => l.id === "unit-windows-latest")!.neededBy, ["gate"]);
+  // Asked for by name, or with only Linux legs selected: the Windows unit leg still runs, once, in its guest.
+  for (const filter of [{ job: "gate" }, { only: ["linux"] }]) {
+    const legs = plan(repo, linuxCfg(), filter).legs;
+    const win = legs.find((l) => l.id === "unit-windows-latest")!;
+    assert.equal(win.neededOnly, true);
+    assert.equal(win.target, "windows");
+  }
+  assert.deepEqual(
+    plan(repo, linuxCfg(), { job: "gate" }).legs.map((l) => l.id),
+    ["unit-ubuntu-latest", "unit-windows-latest", "lint", "gate"],
+  );
 });
 
-test("VM legs replay their Linux needs from a host run, also when planned with --job", () => {
+test("a matrix filter selects legs, and leaves the legs of needed jobs without its key alone", () => {
+  const repo = tmpRepo(`
+on: push
+jobs:
+  prep:
+    runs-on: ubuntu-latest
+    strategy: { matrix: { tool: [a, b] } }
+    steps: [{ run: echo }]
+  build:
+    needs: prep
+    runs-on: \${{ matrix.os }}
+    strategy: { matrix: { os: [ubuntu-latest, windows-latest] } }
+    steps: [{ run: echo }]
+  test:
+    needs: build
+    runs-on: \${{ matrix.os }}
+    strategy: { matrix: { os: [ubuntu-latest, windows-latest] } }
+    steps: [{ run: echo }]
+`);
+  const legs = plan(repo, linuxCfg(), { job: "test", matrix: { os: "windows-latest" } }).legs;
+  // As act's --matrix: build's other OS is filtered out, prep (no os key) runs whole.
+  assert.deepEqual(
+    legs.map((l) => l.id),
+    ["prep-a", "prep-b", "build-windows-latest", "test-windows-latest"],
+  );
+  assert.deepEqual(legs.at(-1)!.waitsFor, ["build-windows-latest"]);
+  assert.deepEqual(legs.find((l) => l.job === "build")!.waitsFor, ["prep-a", "prep-b"]);
+});
+
+test("needs that can't run as their own legs run inside the leg, down to the needs that can", () => {
+  const repo = tmpRepo(`
+on: push
+jobs:
+  base:
+    runs-on: ubuntu-latest
+    steps: [{ run: echo }]
+  gpu:
+    needs: base
+    runs-on: [self-hosted, gpu-box]
+    steps: [{ run: echo }]
+  lin:
+    runs-on: ubuntu-latest
+    steps: [{ run: echo }]
+  called:
+    uses: ./.github/workflows/called.yml
+  ship:
+    needs: [gpu, called, lin]
+    runs-on: windows-latest
+    steps: [{ run: echo }]
+`);
+  const legs = plan(repo, linuxCfg(), { job: "ship" }).legs;
+  const ship = legs.find((l) => l.job === "ship")!;
+  // gpu has no local target: act runs it inside the leg, and base (which gpu needs) is replayed into it.
+  // A local reusable workflow call is a Linux leg of its own.
+  assert.deepEqual(ship.inlineNeeds, ["gpu"]);
+  assert.deepEqual(ship.replayNeeds, ["base", "called", "lin"]);
+  assert.deepEqual(ship.waitsFor, ["base", "lin", "called"]);
+  assert.deepEqual(ship.needsLabels, ["self-hosted", "gpu-box"]);
+  assert.deepEqual(ship.linuxNeeds, []);
+  assert.ok(ship.warnings.some((w) => w.includes(`needs "gpu" can't run as its own leg (no configured guest serves runs-on ["self-hosted","gpu-box"]); act runs it inside this leg's environment`)));
+  assert.deepEqual(
+    legs.map((l) => l.id),
+    ["base", "lin", "called", "ship"],
+  );
+});
+
+test("Linux needs without a local target run inside a Windows leg, with Git Bash", () => {
   const repo = tmpRepo(`
 on: push
 jobs:
   plan:
     runs-on: ubuntu-latest
     steps: [{ run: echo }]
-  gw:
+  ship:
     needs: plan
-    strategy: { matrix: { os: [ubuntu-latest, macos-latest, windows-latest] } }
-    runs-on: \${{ matrix.os }}
+    runs-on: windows-latest
     steps: [{ run: echo }]
 `);
-  const legs = plan(repo, linuxCfg(), { job: "gw" }).legs;
-  for (const os of ["windows", "macos"]) {
-    const leg = legs.find((l) => l.targetOs === os)!;
-    assert.deepEqual(leg.replayNeeds, ["plan"]);
-    assert.deepEqual(leg.linuxNeeds, []);
-    assert.ok(leg.warnings.some((w) => w.includes(`needs "plan" targets Linux; osmatrix runs it once on the host`) && w.includes("replays its outputs and artifacts")));
-  }
-  const linux = legs.find((l) => l.targetOs === "linux")!;
-  assert.equal(linux.linuxNeeds, undefined);
-  assert.equal(linux.replayNeeds, undefined);
-  assert.ok(!linux.warnings.some((w) => w.includes("needs")));
+  const cfg = mergeConfig(linuxCfg(), { guests: { ubuntu: { labels: ["my-linux"] } } });
+  const legs = plan(repo, cfg, { job: "ship" }).legs;
+  assert.deepEqual(
+    legs.map((l) => l.id),
+    ["ship"],
+  );
+  assert.deepEqual(legs[0].inlineNeeds, ["plan"]);
+  assert.deepEqual(legs[0].linuxNeeds, ["plan"]);
+  assert.deepEqual(legs[0].waitsFor, []);
+  assert.ok(legs[0].warnings.some((w) => w.includes(`needs "plan" targets Linux but can't run as its own leg`) && w.includes("Git Bash")));
 });
 
-test("Linux needs that can't be replayed keep running inside the VM leg", () => {
+test("a needed matrix job's legs that can't run are named; needs cycles are refused", () => {
   const repo = tmpRepo(`
 on: push
 jobs:
-  win-prep:
-    runs-on: windows-latest
+  build:
+    runs-on: \${{ matrix.os }}
+    strategy: { matrix: { os: [ubuntu-latest, freebsd-14] } }
     steps: [{ run: echo }]
-  lin-after-win:
-    needs: win-prep
+  test:
+    needs: build
     runs-on: ubuntu-latest
     steps: [{ run: echo }]
-  base:
+  a:
+    needs: b
     runs-on: ubuntu-latest
     steps: [{ run: echo }]
-  called:
-    uses: ./.github/workflows/called.yml
-  lin:
-    needs: base
+  b:
+    needs: a
     runs-on: ubuntu-latest
-    steps: [{ run: echo }]
-  ship:
-    needs: [lin-after-win, called, lin]
-    runs-on: windows-latest
     steps: [{ run: echo }]
 `);
-  const ship = plan(repo, linuxCfg(), { job: "ship" }).legs[0];
-  // lin and its own need base run on the host; a Linux job that needs a Windows job, and a reusable
-  // workflow call, still run inside the leg (with Git Bash for run: steps on Windows).
-  assert.deepEqual(ship.replayNeeds, ["base", "lin"]);
-  assert.deepEqual(ship.linuxNeeds, ["called", "lin-after-win"]);
-  assert.ok(ship.warnings.some((w) => w.includes(`needs "lin-after-win" targets Linux; act runs it inside this Windows leg`)));
+  const legs = plan(repo, linuxCfg()).legs;
+  const t = legs.find((l) => l.job === "test")!;
+  assert.deepEqual(t.waitsFor, ["build-ubuntu-latest"]);
+  assert.ok(t.warnings.some((w) => w.includes(`needs "build": its leg build-freebsd-14 can't run here`)));
+  for (const j of ["a", "b"]) assert.match(legs.find((l) => l.job === j)!.skip ?? "", /needs form a cycle/);
 });
 
 test("setDefaultRunShell gives jobs a run shell unless one is set", () => {
@@ -291,7 +378,7 @@ jobs:
   assert.equal(YAML.parse(flow.text).jobs.plan.defaults.run.shell, shell);
 });
 
-test("needed jobs with legs on Linux and other OSes are not given a bash default", () => {
+test("needed jobs with legs on Linux and other OSes run as their own legs, not inside the leg", () => {
   const repo = tmpRepo(`
 on: push
 jobs:
@@ -304,7 +391,8 @@ jobs:
     runs-on: windows-latest
     steps: [{ run: echo }]
 `);
-  const ship = plan(repo, linuxCfg(), { job: "ship" }).legs[0];
+  const ship = plan(repo, linuxCfg(), { job: "ship" }).legs.find((l) => l.job === "ship")!;
   assert.deepEqual(ship.linuxNeeds, []);
-  assert.ok(ship.warnings.some((w) => w.includes(`needs "build" runs on Linux and other OSes`)));
+  assert.deepEqual(ship.waitsFor, ["build-ubuntu-latest", "build-windows-latest"]);
+  assert.ok(ship.warnings.some((w) => w.includes(`needs "build" runs on linux/windows; it runs once, as its own legs`)));
 });

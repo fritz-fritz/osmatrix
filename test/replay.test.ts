@@ -4,18 +4,10 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
-import zlib from "node:zlib";
 import YAML from "yaml";
-import {
-  UPLOAD_ARTIFACT,
-  collectorWorkflow,
-  extractArtifacts,
-  githubOutputFile,
-  parseNeedsRecord,
-  readZip,
-  replayStubWorkflow,
-  uploadArtifactAction,
-} from "../src/ci/replay.ts";
+import type { Leg } from "../src/ci/plan.ts";
+import { collectorWorkflow, combineLegs, githubOutputFile, mergeArtifacts, parseNeedsRecord, replayStubWorkflow } from "../src/ci/replay.ts";
+import { ActJsonParser, legResult, scheduleOrder } from "../src/ci/run.ts";
 
 const WF = `name: CI
 on: push
@@ -62,18 +54,25 @@ function parseFileCommands(s: string): Record<string, string> {
   return out;
 }
 
-test("the collector needs the replayed jobs, always runs and gets a free id", () => {
-  const { text, job } = collectorWorkflow(WF, ["plan"]);
-  assert.equal(job, "osmatrix-replay");
+test("the collector needs the leg's job, always runs on the leg's runner and gets a free id", () => {
+  const { text, job } = collectorWorkflow(WF, "test", ["windows-latest"]);
+  assert.equal(job, "osmatrix-record");
   const jobs = YAML.parse(text).jobs;
-  assert.deepEqual(jobs[job].needs, ["plan"]);
+  assert.deepEqual(jobs[job].needs, ["test"]);
   assert.equal(jobs[job].if, "${{ always() }}");
-  assert.equal(jobs[job]["runs-on"], "ubuntu-latest");
-  assert.equal(jobs[job].steps[0].env.OSMATRIX_NEEDS, "${{ toJSON(needs) }}");
-  assert.match(jobs[job].steps[0].run, /osmatrix-needs:\$\(printf '%s' "\$OSMATRIX_NEEDS" \| base64 \| tr -d '\\n'\)/);
+  assert.deepEqual(jobs[job]["runs-on"], ["windows-latest"]);
+  const step = jobs[job].steps[0];
+  assert.equal(step.shell, 'node "{0}"');
+  assert.equal(step.env.OSMATRIX_NEEDS, "${{ toJSON(needs) }}");
   assert.deepEqual(Object.keys(jobs).slice(0, 3), ["plan", "lint", "test"]);
-  const taken = WF + "  osmatrix-replay:\n    runs-on: ubuntu-latest\n    steps: [{ run: echo }]\n";
-  assert.equal(collectorWorkflow(taken, ["plan"]).job, "osmatrix-replay-2");
+  // The step is a plain Node.js script; run it as act would, and read its record back.
+  const needs = { test: { result: "success", outputs: { v: "multi\nline ${{ x }}" } } };
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "osmatrix-record-"));
+  fs.writeFileSync(path.join(dir, "record"), step.run);
+  const out = execFileSync(process.execPath, [path.join(dir, "record")], { env: { ...process.env, OSMATRIX_NEEDS: JSON.stringify(needs, null, 2) } });
+  assert.deepEqual(parseNeedsRecord(`  | ${String(out).trim()}`), needs);
+  const taken = WF + "  osmatrix-record:\n    runs-on: ubuntu-latest\n    steps: [{ run: echo }]\n";
+  assert.equal(collectorWorkflow(taken, "test", ["x"]).job, "osmatrix-record-2");
 });
 
 test("the collector's record is read back from act's log", () => {
@@ -103,53 +102,26 @@ test("outputs use GITHUB_OUTPUT's heredoc form for multi-line values", () => {
   assert.deepEqual(parseFileCommands(githubOutputFile(values).replace(/\r/g, "")), { ...values, m: "line 1\nline 2" });
 });
 
-test("the upload action comes from the replayed jobs' steps, else the pinned default", () => {
-  assert.deepEqual(uploadArtifactAction(WF, ["plan"]), { ref: "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02", version: "v4.6.2" });
-  const wf = `jobs:
-  early:
-    runs-on: ubuntu-latest
-    steps:
-      - run: echo "uses: actions/upload-artifact@v1"
-      - uses: actions/upload-artifact@v7
-  plan:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: "actions/upload-artifact@v4"
-  other:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/upload-artifact@v5
-`;
-  // Another job's upload (or text in a run: script) doesn't count.
-  assert.deepEqual(uploadArtifactAction(wf, ["plan"]), { ref: "actions/upload-artifact@v4", version: undefined });
-  // No upload, or replayed jobs that disagree: the pinned default.
-  assert.deepEqual(uploadArtifactAction(wf, ["missing"]), UPLOAD_ARTIFACT);
-  assert.deepEqual(uploadArtifactAction(wf, ["plan", "other"]), UPLOAD_ARTIFACT);
-  assert.deepEqual(uploadArtifactAction("jobs: {}\n", ["plan"]), UPLOAD_ARTIFACT);
-  assert.match(UPLOAD_ARTIFACT.ref, /^actions\/upload-artifact@[0-9a-f]{40}$/);
-});
-
 test("replay stubs keep the job id and outputs, run on the leg's runner and replay the values", () => {
   const notes = "it's \"quoted\"\nand ${{ not.an.expression }}";
   const text = replayStubWorkflow(WF, {
-    needs: { plan: { result: "success", outputs: { mode: "full", notes } } },
+    needs: { plan: { result: "success", outputs: { mode: "full", notes }, legs: ["plan-1", "plan-2"] } },
     runsOn: ["windows-latest"],
-    artifacts: [{ name: "plan", dir: "C:\\Users\\u\\work\\.osmatrix\\r\\l\\replay\\1" }],
-    upload: { ref: "actions/upload-artifact@abc", version: "v9.9.9" },
   });
-  assert.match(text, /uses: actions\/upload-artifact@abc # v9\.9\.9/);
   const jobs = YAML.parse(text).jobs;
   const stub = jobs.plan;
-  assert.equal(stub.name, "Plan the run (replayed from host run)");
+  assert.equal(stub.name, "Plan the run (replayed)");
   assert.deepEqual(stub["runs-on"], ["windows-latest"]);
   assert.equal(stub.strategy, undefined);
   assert.equal(stub.if, undefined);
-  assert.deepEqual(stub.needs, ["osmatrix-replay-artifacts"]);
+  // What the replayed job needed ran in its own legs already.
+  assert.equal(stub.needs, undefined);
   // Declared keys are kept even when the run left them unset; recorded extras are kept too.
   assert.deepEqual(Object.keys(stub.outputs), ["mode", "my-key", "notes"]);
   assert.equal(stub.outputs["my-key"], "${{ steps.replay.outputs['my-key'] }}");
   assert.equal(stub.steps.length, 1);
   assert.equal(stub.steps[0].id, "replay");
+  assert.equal(stub.steps[0].name, "Replay the outputs of its legs plan-1, plan-2");
   assert.equal(stub.steps[0].shell, 'node "{0}"');
   assert.ok(!stub.steps[0].run.includes("${{"));
   // The step is a plain Node.js script; run it as act would and read GITHUB_OUTPUT back.
@@ -160,38 +132,27 @@ test("replay stubs keep the job id and outputs, run on the leg's runner and repl
   fs.writeFileSync(outFile, "earlier=1\n");
   execFileSync(process.execPath, [script], { env: { ...process.env, GITHUB_OUTPUT: outFile } });
   assert.deepEqual(parseFileCommands(fs.readFileSync(outFile, "utf8")), { earlier: "1", mode: "full", "my-key": "", notes });
-  // Artifacts are uploaded once, from absolute paths, before any stub finishes.
-  const up = jobs["osmatrix-replay-artifacts"];
-  assert.deepEqual(up["runs-on"], ["windows-latest"]);
-  assert.deepEqual(up.steps[0].with, {
-    name: "plan",
-    path: "C:\\Users\\u\\work\\.osmatrix\\r\\l\\replay\\1",
-    "include-hidden-files": true,
-    "if-no-files-found": "error",
-  });
   // Everything else is the original workflow.
   const orig = YAML.parse(WF).jobs;
   assert.deepEqual(jobs.lint, orig.lint);
   assert.deepEqual(jobs.test, orig.test);
+  assert.deepEqual(Object.keys(jobs), Object.keys(orig));
 });
 
-test("a job skipped on the host gets a stub that is skipped too; no artifacts, no upload job", () => {
-  const jobs = YAML.parse(
-    replayStubWorkflow(WF, { needs: { plan: { result: "skipped", outputs: {} } }, runsOn: ["macos-latest"], artifacts: [] }),
-  ).jobs;
+test("a skipped job gets a stub that is skipped too", () => {
+  const jobs = YAML.parse(replayStubWorkflow(WF, { needs: { plan: { result: "skipped", outputs: {} } }, runsOn: ["macos-latest"] })).jobs;
   assert.equal(jobs.plan.if, false);
   assert.equal(jobs.plan.needs, undefined);
-  assert.equal(jobs["osmatrix-replay-artifacts"], undefined);
   assert.deepEqual(Object.keys(jobs.plan.outputs), ["mode", "my-key"]);
 });
 
-test("a job that failed on the host gets a stub that replays its outputs, then fails", () => {
+test("a job that failed gets a stub that replays its outputs, then fails", () => {
   const jobs = YAML.parse(
-    replayStubWorkflow(WF, { needs: { plan: { result: "failure", outputs: { mode: "partial" } } }, runsOn: ["windows-latest"], artifacts: [] }),
+    replayStubWorkflow(WF, { needs: { plan: { result: "failure", outputs: { mode: "partial" }, legs: ["plan-2"] } }, runsOn: ["windows-latest"] }),
   ).jobs;
   const step = jobs.plan.steps[0];
   assert.equal(jobs.plan.if, undefined);
-  assert.equal(step.name, "Replay the host run: plan failed");
+  assert.equal(step.name, "Replay: plan failed in its leg plan-2");
   assert.deepEqual(Object.keys(jobs.plan.outputs), ["mode", "my-key"]);
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "osmatrix-replay-"));
   const script = path.join(dir, "replay");
@@ -200,111 +161,93 @@ test("a job that failed on the host gets a stub that replays its outputs, then f
   fs.writeFileSync(outFile, "");
   assert.throws(() => execFileSync(process.execPath, [script], { env: { ...process.env, GITHUB_OUTPUT: outFile }, stdio: "pipe" }), (e: { status?: number; stderr?: Buffer }) => {
     assert.equal(e.status, 1);
-    assert.match(String(e.stderr), /plan failed in osmatrix's host run/);
+    assert.match(String(e.stderr), /plan failed in its leg plan-2 of this osmatrix run/);
     return true;
   });
   assert.deepEqual(parseFileCommands(fs.readFileSync(outFile, "utf8")), { mode: "partial", "my-key": "" });
-  assert.equal(YAML.parse(replayStubWorkflow(WF, { needs: { plan: { result: "cancelled", outputs: {} } }, runsOn: ["x"], artifacts: [] })).jobs.plan.steps[0].name, "Replay the host run: plan ended as cancelled");
+  assert.equal(YAML.parse(replayStubWorkflow(WF, { needs: { plan: { result: "cancelled", outputs: {} } }, runsOn: ["x"] })).jobs.plan.steps[0].name, "Replay: plan ended as cancelled in its own leg");
 });
 
-/** A zip archive like upload-artifact's (deflated entries; optionally with data descriptors). */
-function makeZip(entries: { name: string; data: Buffer; store?: boolean; descriptor?: boolean }[]): Buffer {
-  const locals: Buffer[] = [];
-  const centrals: Buffer[] = [];
-  let offset = 0;
-  for (const e of entries) {
-    const raw = e.store ? e.data : zlib.deflateRawSync(e.data);
-    const crc = zlib.crc32(e.data);
-    const name = Buffer.from(e.name, "utf8");
-    const flags = 0x800 | (e.descriptor ? 8 : 0);
-    const method = e.store ? 0 : 8;
-    const lh = Buffer.alloc(30);
-    lh.writeUInt32LE(0x04034b50, 0);
-    lh.writeUInt16LE(20, 4);
-    lh.writeUInt16LE(flags, 6);
-    lh.writeUInt16LE(method, 8);
-    lh.writeUInt32LE(e.descriptor ? 0 : crc, 14);
-    lh.writeUInt32LE(e.descriptor ? 0 : raw.length, 18);
-    lh.writeUInt32LE(e.descriptor ? 0 : e.data.length, 22);
-    lh.writeUInt16LE(name.length, 26);
-    const dd = Buffer.alloc(e.descriptor ? 16 : 0);
-    if (e.descriptor) {
-      dd.writeUInt32LE(0x08074b50, 0);
-      dd.writeUInt32LE(crc, 4);
-      dd.writeUInt32LE(raw.length, 8);
-      dd.writeUInt32LE(e.data.length, 12);
-    }
-    const ch = Buffer.alloc(46);
-    ch.writeUInt32LE(0x02014b50, 0);
-    ch.writeUInt16LE(20, 4);
-    ch.writeUInt16LE(20, 6);
-    ch.writeUInt16LE(flags, 8);
-    ch.writeUInt16LE(method, 10);
-    ch.writeUInt32LE(crc, 16);
-    ch.writeUInt32LE(raw.length, 20);
-    ch.writeUInt32LE(e.data.length, 24);
-    ch.writeUInt16LE(name.length, 28);
-    ch.writeUInt32LE(offset, 42);
-    locals.push(lh, name, raw, dd);
-    centrals.push(ch, name);
-    offset += lh.length + name.length + raw.length + dd.length;
-  }
-  const cd = Buffer.concat(centrals);
-  const end = Buffer.alloc(22);
-  end.writeUInt32LE(0x06054b50, 0);
-  end.writeUInt16LE(entries.length, 8);
-  end.writeUInt16LE(entries.length, 10);
-  end.writeUInt32LE(cd.length, 12);
-  end.writeUInt32LE(offset, 16);
-  return Buffer.concat([...locals, cd, end]);
-}
-
-test("readZip reads stored and deflated entries, with or without data descriptors", () => {
-  const big = Buffer.from("x".repeat(10_000) + "ü");
-  const files = readZip(
-    makeZip([
-      { name: "run-id.txt", data: Buffer.from("42\n") },
-      { name: "sub/dir/big.txt", data: big, descriptor: true },
-      { name: ".hidden", data: Buffer.from("h"), store: true },
-    ]),
-  );
-  assert.deepEqual(
-    files.map((f) => [f.name, f.data.toString("utf8")]),
-    [
-      ["run-id.txt", "42\n"],
-      ["sub/dir/big.txt", big.toString("utf8")],
-      [".hidden", "h"],
-    ],
-  );
-  assert.throws(() => readZip(Buffer.from("not a zip at all, definitely not")), /not a zip/);
-  const bad = makeZip([{ name: "a", data: Buffer.from("abc"), store: true }]);
-  bad[30 + 1] = "X".charCodeAt(0); // corrupt the stored data
-  assert.throws(() => readZip(bad), /checksum/);
+test("a matrix job's legs combine as GitHub's needs context has them", () => {
+  const ok = (outputs: Record<string, string> = {}) => ({ result: "success", outputs });
+  assert.deepEqual(combineLegs([ok({ a: "1", b: "x" }), ok({ a: "2", b: "" })]), { result: "success", outputs: { a: "2", b: "x" } });
+  assert.equal(combineLegs([ok(), { result: "failure", outputs: {} }, { result: "cancelled", outputs: {} }]).result, "failure");
+  assert.equal(combineLegs([ok(), { result: "cancelled", outputs: {} }]).result, "cancelled");
+  assert.equal(combineLegs([{ result: "skipped", outputs: {} }, { result: "skipped", outputs: {} }]).result, "skipped");
+  assert.equal(combineLegs([{ result: "skipped", outputs: {} }, ok()]).result, "success");
 });
 
-test("artifacts are extracted from act's store: v4 zips and v3 files, per run id", () => {
+test("artifacts a leg uploaded join the run's store; the first one by a name stays", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "osmatrix-artifacts-"));
-  const store = path.join(root, "store");
-  const v4 = path.join(store, "123", "ci-plan");
-  fs.mkdirSync(v4, { recursive: true });
-  fs.writeFileSync(path.join(v4, "ci-plan.zip"), makeZip([{ name: "plan.json", data: Buffer.from("{}") }, { name: "deep/a.txt", data: Buffer.from("a") }]));
-  const v3 = path.join(store, "123", "old style", "nested");
-  fs.mkdirSync(v3, { recursive: true });
-  fs.writeFileSync(path.join(v3, "plain.txt"), "p");
-  fs.writeFileSync(path.join(v3, "packed.txt.gz__"), zlib.gzipSync("unpacked"));
-  fs.mkdirSync(path.join(store, "999", "other-run"), { recursive: true });
-  const out = path.join(root, "files");
-  const arts = extractArtifacts(store, "123", out);
-  assert.deepEqual(arts, [
-    { name: "ci-plan", dir: path.join(out, "1") },
-    { name: "old style", dir: path.join(out, "2") },
-  ]);
-  assert.equal(fs.readFileSync(path.join(out, "1", "plan.json"), "utf8"), "{}");
-  assert.equal(fs.readFileSync(path.join(out, "1", "deep", "a.txt"), "utf8"), "a");
-  assert.equal(fs.readFileSync(path.join(out, "2", "nested", "plain.txt"), "utf8"), "p");
-  assert.equal(fs.readFileSync(path.join(out, "2", "nested", "packed.txt"), "utf8"), "unpacked");
-  assert.deepEqual(extractArtifacts(store, "404", out), []);
-  // Entries that would land outside the artifact's directory are refused.
-  fs.writeFileSync(path.join(v4, "ci-plan.zip"), makeZip([{ name: "../escape.txt", data: Buffer.from("x") }]));
-  assert.throws(() => extractArtifacts(store, "123", out), /unsafe path/);
+  const from = path.join(root, "guest");
+  const to = path.join(root, "host");
+  const put = (store: string, rel: string, data: string) => {
+    fs.mkdirSync(path.dirname(path.join(store, rel)), { recursive: true });
+    fs.writeFileSync(path.join(store, rel), data);
+  };
+  put(from, "123/plan/plan.zip", "seeded copy");
+  put(from, "123/build-win/build-win.zip", "new");
+  put(from, "123/old style/nested/file.txt", "v3");
+  put(from, "999/other-run/x.zip", "not this run");
+  put(to, "123/plan/plan.zip", "original");
+  assert.deepEqual(mergeArtifacts(from, to, "123"), ["build-win", "old style"]);
+  assert.equal(fs.readFileSync(path.join(to, "123/plan/plan.zip"), "utf8"), "original");
+  assert.equal(fs.readFileSync(path.join(to, "123/build-win/build-win.zip"), "utf8"), "new");
+  assert.equal(fs.readFileSync(path.join(to, "123/old style/nested/file.txt"), "utf8"), "v3");
+  assert.ok(!fs.existsSync(path.join(to, "999")));
+  // Nothing left behind next to the store.
+  assert.deepEqual(fs.readdirSync(to), ["123"]);
+  assert.deepEqual(mergeArtifacts(from, to, "404"), []);
+});
+
+const leg = (id: string, target: string, waitsFor: string[] = []): Leg => ({
+  id,
+  workflow: ".github/workflows/ci.yml",
+  job: id.split("-")[0],
+  matrix: {},
+  runsOn: [],
+  needsLabels: [],
+  needs: [],
+  warnings: [],
+  target,
+  waitsFor,
+});
+
+test("legs start after the legs they wait for, in plan order otherwise", () => {
+  const legs = [
+    leg("gate", "host", ["test-win", "test-linux", "lint"]),
+    leg("test-win", "windows", ["plan"]),
+    leg("test-linux", "host", ["plan"]),
+    leg("lint", "host"),
+    leg("plan", "host"),
+  ];
+  assert.deepEqual(
+    scheduleOrder(legs).map((l) => l.id),
+    ["lint", "plan", "test-win", "test-linux", "gate"],
+  );
+});
+
+test("a leg's state comes from its own job; a replayed failure skips it", () => {
+  const feed = (events: object[]) => {
+    const p = new ActJsonParser(() => {}, "test");
+    for (const e of events) p.feed(JSON.stringify(e) + "\n");
+    p.flush();
+    return p;
+  };
+  const stubFailed = { jobID: "plan", jobResult: "failure" };
+  const ran = (result: string) => [
+    { jobID: "test", step: "Run", stepResult: result },
+    { jobID: "test", jobResult: result },
+  ];
+  assert.deepEqual(legResult(0, feed(ran("success")), ["plan"]), { state: "success" });
+  // A dependent with if: always() still runs after a failed need; its own result decides.
+  assert.deepEqual(legResult(1, feed([stubFailed, ...ran("success")]), ["plan"]), { state: "success" });
+  assert.deepEqual(legResult(1, feed(ran("failure")), []), { state: "failure" });
+  // act says nothing about a job it skips.
+  assert.deepEqual(legResult(1, feed([stubFailed]), ["plan"]), { state: "skipped", error: "act skipped the job: needed job plan failed" });
+  assert.equal(legResult(0, feed([]), ["plan"]).state, "skipped");
+  // A need act ran inside the leg failing is the leg's failure; so is act failing before the job.
+  assert.deepEqual(legResult(1, feed([{ jobID: "gpu", jobResult: "failure" }]), ["plan"]), { state: "failure" });
+  assert.deepEqual(legResult(1, feed([]), []), { state: "failure", error: "act exited with code 1 before the job started" });
+  assert.equal(legResult(124, feed([{ jobID: "test", step: "Run", stepResult: "success" }]), []).state, "failure");
 });
