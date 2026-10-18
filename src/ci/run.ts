@@ -1,8 +1,9 @@
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import YAML from "yaml";
+import { dockerBin } from "../backends/docker.ts";
 import { DockurBackend } from "../backends/dockur.ts";
 import { ensureLinuxImage } from "../backends/linux-image.ts";
 import { ensureAct, patchedActFor, targetFromArch, type GoTarget } from "../core/act.ts";
@@ -10,7 +11,7 @@ import { guestMsvc, guestWorkdir, loadConfig, type Config, type GuestConfig, typ
 import { acquireLocks } from "../core/locks.ts";
 import { dockerReach, selinuxEnforcing } from "../core/nesting.ts";
 import { cliEntry, ensureDir } from "../core/paths.ts";
-import { isAlive, spawnDetached } from "../core/proc.ts";
+import { isAlive, run, sleep, spawnDetached } from "../core/proc.ts";
 import {
   cloneWorktree,
   createBundle,
@@ -47,7 +48,7 @@ import { collectorWorkflow, combineLegs, mergeArtifacts, parseNeedsRecord, repla
 
 export { powershell };
 
-export type LegState = "pending" | "running" | "success" | "failure" | "skipped" | "error";
+export type LegState = "pending" | "running" | "success" | "failure" | "skipped" | "error" | "cancelled";
 
 export interface LegResult {
   id: string;
@@ -72,6 +73,8 @@ export interface LegResult {
   neededOnly?: boolean;
   /** Needed jobs replayed into this leg: the result it got for each, and the legs that produced it. */
   replayed?: { job: string; result: string; legs: string[] }[];
+  /** Host legs: act's job containers, recorded while they run, so ci_cancel can clean up after a crashed worker. */
+  containers?: string[];
 }
 
 export interface RunStatus {
@@ -87,6 +90,8 @@ export interface RunStatus {
   planWarnings: string[];
   /** GITHUB_RUN_ID of every act run in this run: on GitHub all jobs of a run share one. */
   githubRunId?: string;
+  /** Set when ci_cancel stopped the run; its unfinished legs are `cancelled`. */
+  cancelled?: boolean;
 }
 
 export interface RunOptions extends PlanFilter {
@@ -97,6 +102,8 @@ export interface RunOptions extends PlanFilter {
   secretFile?: string;
   /** Per-leg timeout in minutes (default 60). */
   timeoutMin?: number;
+  /** Cancel runs of this repo still running any of the same workflows first (GitHub's `concurrency: cancel-in-progress`). */
+  cancelPrevious?: boolean;
 }
 
 // ---------- run directory helpers ----------
@@ -137,7 +144,7 @@ function latestRun(repo: string): string {
 }
 
 function emptyCounts(): Record<LegState, number> {
-  return { pending: 0, running: 0, success: 0, failure: 0, skipped: 0, error: 0 };
+  return { pending: 0, running: 0, success: 0, failure: 0, skipped: 0, error: 0, cancelled: 0 };
 }
 
 class StatusFile {
@@ -167,6 +174,14 @@ export async function ciRun(repoIn: string, opts: RunOptions = {}, wait = false)
   const repo = path.resolve(repoIn);
   const p = makePlan(repo, loadConfig(), opts);
   if (!p.legs.length) throw new Error(`nothing to run: ${p.warnings.join("; ") || "no matching legs"}`);
+  if (opts.cancelPrevious) {
+    const workflows = new Set(p.legs.map((l) => l.workflow));
+    for (const other of activeRuns(repo)) {
+      if (!runWorkflows(repo, other).some((w) => workflows.has(w))) continue;
+      const c = await ciCancel(repo, other);
+      p.warnings.push(`cancelled run ${other}${c.state === "done" ? "" : ` (${c.state})`}, which was running the same workflows`);
+    }
+  }
   for (const other of activeRuns(repo)) {
     p.warnings.push(`run ${other} is still running in this repo; legs that need the same act containers or guests wait for it`);
   }
@@ -240,6 +255,212 @@ export function ciLogs(repoIn: string, legId: string, opts: { run?: string; tail
   return lines.slice(-n).join("\n");
 }
 
+/** The workflows a run's legs come from. */
+function runWorkflows(repo: string, id: string): string[] {
+  try {
+    const p = JSON.parse(fs.readFileSync(path.join(runDir(repo, id), "plan.json"), "utf8")) as Plan;
+    return [...new Set(p.legs.map((l) => l.workflow))];
+  } catch {
+    return [];
+  }
+}
+
+/** The file whose existence asks a run's worker to cancel it: a file, so it works the same on every host OS. */
+const CANCEL_FILE = "cancel";
+/** How long a cancelled worker gives its legs to stop (act removing its containers, say) before it exits anyway. */
+const CANCEL_GRACE_MS = 60_000;
+/** The label on a run's act job containers, which finds its containers, networks and volumes. */
+export const RUN_LABEL = "osmatrix.run";
+
+/**
+ * Cancel a run (default: the latest one still running in repo). Its worker stops each running leg: act
+ * on the host gets SIGINT, as from Ctrl-C, and removes its job and service containers, networks and
+ * volumes; act in a guest is stopped with its process tree and the leg's per-run files are removed.
+ * Pending legs don't start. Unfinished legs end `cancelled` and the run `done` with `cancelled: true`.
+ * Guests stay up. When the worker is gone (it crashed or was killed) or doesn't stop in time, this
+ * kills it and cleans up what it left: the run's containers on the host and act in the guests.
+ */
+export async function ciCancel(repoIn: string, idIn?: string): Promise<RunStatus> {
+  const repo = path.resolve(repoIn);
+  const id = idIn ?? activeRuns(repo).at(-1);
+  if (!id) throw new Error(`no run is running in ${repo}`);
+  const before = ciStatus(repo, id);
+  if (before.state === "done") throw new Error(`run ${id} already finished${before.cancelled ? " (cancelled)" : ""}`);
+  const dir = runDir(repo, id);
+  if (before.state === "running") {
+    fs.writeFileSync(path.join(dir, CANCEL_FILE), new Date().toISOString() + "\n");
+    const deadline = Date.now() + CANCEL_GRACE_MS + 30_000;
+    while (Date.now() < deadline) {
+      const s = ciStatus(repo, id);
+      if (s.state === "done") return s;
+      if (s.state === "aborted") break;
+      await sleep(1000);
+    }
+  }
+  // The worker is gone or stuck: stop what it may have left running, then record the cancellation.
+  const raw = JSON.parse(fs.readFileSync(path.join(dir, "status.json"), "utf8")) as RunStatus;
+  if (raw.pid && raw.pid !== process.pid) await killTree(raw.pid, id);
+  const notes: string[] = [];
+  notes.push(...(await removeRunContainers(id, raw.legs.flatMap((l) => l.containers ?? []))));
+  new HostCheckout(repo, dir).dispose();
+  const guests = new Set(raw.legs.filter((l) => l.state === "running" && l.target && l.target !== "host").map((l) => l.target!));
+  for (const guest of guests) {
+    try {
+      const g = getGuest(guest);
+      const ep = await readyEndpoint(guest);
+      await sshExec(ep, guestCancelCmd(ep, id), { timeoutMs: 60_000 });
+      await sshExec(ep, removeCmd(ep, guestLegDir(guestWorkdir(g.cfg), id, "").run), { timeoutMs: 120_000 });
+      notes.push(`stopped act in guest ${guest}`);
+    } catch (e) {
+      notes.push(`couldn't stop act in guest ${guest}: ${(e as Error).message}`);
+    }
+  }
+  const sf = new StatusFile(path.join(dir, "status.json"), raw);
+  finishCancelled(sf, "cancelled (the run's worker had stopped responding, so ci_cancel cleaned up)");
+  for (const l of raw.legs) {
+    if (l.state === "cancelled" && notes.length) fs.appendFileSync(path.join(repo, l.log), notes.map((n) => `[osmatrix] ${n}\n`).join(""));
+  }
+  sf.save();
+  return ciStatus(repo, id);
+}
+
+/** Mark a cancelled run's unfinished legs and the run itself. */
+function finishCancelled(sf: StatusFile, why = "cancelled") {
+  const now = new Date().toISOString();
+  for (const l of sf.s.legs) {
+    if (l.state !== "pending" && l.state !== "running") continue;
+    l.state = "cancelled";
+    l.error = why;
+    l.waitingFor = undefined;
+    l.finishedAt = now;
+    if (l.startedAt) l.durationSec = Math.round((Date.parse(now) - Date.parse(l.startedAt)) / 1000);
+  }
+  sf.s.state = "done";
+  sf.s.cancelled = true;
+  sf.s.finishedAt ??= now;
+}
+
+/**
+ * Kill a run's worker and everything it started. On POSIX the worker leads its own process group, which
+ * outlives it: when it crashed, act may still run there. A group whose leader is gone counts only when a
+ * process in it has the run's id on its command line (act's artifact store path), so a reused pid is safe.
+ */
+async function killTree(pid: number, runId: string) {
+  if (process.platform === "win32") {
+    if (isAlive(pid)) await run("taskkill", ["/PID", String(pid), "/T", "/F"]);
+    return;
+  }
+  const ours = async () => isAlive(pid) || (await run("pgrep", ["-g", String(pid), "-f", runId])).code === 0;
+  if (!(await ours())) return;
+  for (const sig of ["SIGINT", "SIGKILL"] as const) {
+    try {
+      process.kill(-pid, sig);
+    } catch {
+      try {
+        process.kill(pid, sig);
+      } catch {
+        return;
+      }
+    }
+    for (let i = 0; i < 20 && (await ours()); i++) await sleep(500);
+    if (!(await ours())) return;
+  }
+}
+
+/** The names of a run's act job containers on the host's Docker (labelled in hostActArgs). */
+async function runContainers(runId: string): Promise<string[]> {
+  const r = await run(dockerBin(), ["ps", "-a", "--filter", `label=${RUN_LABEL}=${runId}`, "--format", "{{.Names}}"]);
+  return r.code === 0 ? r.stdout.split(/\s+/).filter(Boolean) : [];
+}
+
+/**
+ * Remove what act left on the host's Docker for a run: its job containers (labelled, or `known` from the
+ * run's status) and everything act names after one (pkg/runner createContainerName): service containers
+ * start with the job container's name cut to 63 characters, and the job's network and volumes (-env,
+ * -filecmds) with its whole name, which ends in a sha256, so nothing else matches. act removes all of it
+ * itself on SIGINT; this is for an act that died first (one whose worker died gets SIGPIPE as soon as it
+ * logs). Returns what it removed, for the log.
+ */
+export async function removeRunContainers(runId: string, known: string[] = []): Promise<string[]> {
+  const docker = dockerBin();
+  const jobs = [...new Set([...known, ...(await runContainers(runId))])];
+  if (!jobs.length) return [];
+  const list = async (args: string[]) => {
+    const r = await run(docker, args);
+    return r.code === 0 ? r.stdout.split(/\s+/).filter(Boolean) : [];
+  };
+  const containers = new Set<string>();
+  const networks = new Set<string>();
+  const volumes = new Set<string>();
+  for (const job of jobs) {
+    const prefix = job.slice(0, 63).replace(/-+$/, "");
+    for (const c of await list(["ps", "-a", "--filter", `name=${prefix}`, "--format", "{{.Names}}"])) if (c.startsWith(prefix)) containers.add(c);
+    for (const n of await list(["network", "ls", "--filter", `name=${job}`, "--format", "{{.Name}}"])) if (n.startsWith(job)) networks.add(n);
+    for (const v of await list(["volume", "ls", "--filter", `name=${job}`, "--format", "{{.Name}}"])) if (v.startsWith(job)) volumes.add(v);
+  }
+  if (containers.size) await run(docker, ["rm", "-f", "-v", ...containers], { timeoutMs: 120_000 });
+  if (networks.size) await run(docker, ["network", "rm", ...networks], { timeoutMs: 60_000 });
+  if (volumes.size) await run(docker, ["volume", "rm", ...volumes], { timeoutMs: 60_000 });
+  const what = [
+    containers.size ? `container${containers.size > 1 ? "s" : ""} ${[...containers].join(", ")}` : "",
+    networks.size ? `network${networks.size > 1 ? "s" : ""} ${[...networks].join(", ")}` : "",
+    volumes.size ? `volume${volumes.size > 1 ? "s" : ""} ${[...volumes].join(", ")}` : "",
+  ].filter(Boolean);
+  return what.length ? [`removed what act left: ${what.join("; ")}`] : [];
+}
+
+/**
+ * A guest command that stops the act processes of a run, with everything they started: the processes
+ * whose command line has the run's per-run directory (`.osmatrix/<run>/`, see guestLegDir) in it, which
+ * act's --artifact-server-path always does. The pattern is split in the command itself, so the shell
+ * running it doesn't match.
+ */
+export function guestCancelCmd(ep: Pick<Endpoint, "shell">, runId: string): string {
+  if (ep.shell === "posix") {
+    const k = `k() { for c in $(pgrep -P "$1"); do k "$c" "$2"; done; kill -"$2" "$1" 2>/dev/null; }`;
+    const each = (sig: string) => `for p in $(pgrep -f -- "$pat"); do [ "$p" = "$$" ] || k "$p" ${sig}; done`;
+    // The empty "" splits the pattern: quoteFor leaves safe words unquoted.
+    return `pat=.osmatrix/""${quoteFor("posix", `${runId}/`)}; ${k}; ${each("TERM")}; sleep 3; ${each("KILL")}; true`;
+  }
+  return powershell(
+    ep,
+    `$pat = '*.osmatrix/' + '${runId}' + '/*'; Get-CimInstance Win32_Process | Where-Object { $_.ProcessId -ne $PID -and $_.CommandLine -like $pat } | ForEach-Object { & taskkill.exe /PID $_.ProcessId /T /F *> $null }; exit 0`,
+  );
+}
+
+/** A worker's view of its run's cancellation: whether it was asked for, and how to stop each running leg. */
+class Cancellation {
+  requested = false;
+  private readonly stops = new Set<() => Promise<void>>();
+  /** Register how to stop a running leg; returns the unregister function. */
+  onCancel(stop: () => Promise<void>): () => void {
+    this.stops.add(stop);
+    return () => this.stops.delete(stop);
+  }
+  async cancel() {
+    this.requested = true;
+    await Promise.all([...this.stops].map((s) => s().catch(() => undefined)));
+  }
+}
+
+class Cancelled extends Error {
+  constructor() {
+    super("cancelled");
+  }
+}
+
+/** Wait for a child to exit, up to ms; whether it did. */
+function exited(child: ChildProcess, ms: number): Promise<boolean> {
+  if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve(true);
+  return new Promise((res) => {
+    const t = setTimeout(() => res(false), ms);
+    child.once("close", () => {
+      clearTimeout(t);
+      res(true);
+    });
+  });
+}
+
 // ---------- worker ----------
 
 export async function worker(repo: string, id: string): Promise<void> {
@@ -249,6 +470,20 @@ export async function worker(repo: string, id: string): Promise<void> {
   sf.s.pid = process.pid;
   sf.save();
   const cfg = loadConfig();
+  const cancel = new Cancellation();
+  const checkout = new HostCheckout(repo, dir);
+  const watch = setInterval(() => {
+    if (cancel.requested || !fs.existsSync(path.join(dir, CANCEL_FILE))) return;
+    for (const l of sf.s.legs) if (l.state === "running") fs.appendFileSync(path.join(dir, `${l.id}.log`), "[osmatrix] cancelling: stopping this leg\n");
+    void cancel.cancel();
+    // A leg stuck where it can't be stopped (booting a guest, say) doesn't keep the run going.
+    setTimeout(() => {
+      finishCancelled(sf);
+      sf.save();
+      checkout.dispose();
+      process.exit(0);
+    }, CANCEL_GRACE_MS).unref();
+  }, 1000);
 
   // Each target runs its legs one at a time, in an order where a leg comes after every leg it waits for,
   // so no target waits for a leg queued behind one of its own.
@@ -257,7 +492,6 @@ export async function worker(repo: string, id: string): Promise<void> {
   const groups = new Map<string, Leg[]>();
   for (const leg of runnable) groups.set(leg.target!, [...(groups.get(leg.target!) ?? []), leg]);
   const vmSlots = new Semaphore(cfg.max_vms);
-  const checkout = new HostCheckout(repo, dir);
   try {
     await Promise.all(
       [...groups.entries()].map(async ([target, legs]) => {
@@ -275,11 +509,19 @@ export async function worker(repo: string, id: string): Promise<void> {
             const replay = await neededResults(dir, leg, p.legs, outcomes, sf).catch(
               (e: Error): Replay => ({ needs: {}, error: `couldn't collect the results of the legs it needs: ${e.message}` }),
             );
+            if (cancel.requested) {
+              const r = sf.s.legs.find((l) => l.id === leg.id)!;
+              r.state = "cancelled";
+              r.error = "cancelled";
+              sf.save();
+              outcomes.get(leg.id)!.resolve({ state: "cancelled", error: "cancelled", finished: Date.now() });
+              continue;
+            }
             if (isVm && !slot && !replay?.error) {
               await vmSlots.acquire();
               slot = true;
             }
-            const outcome = await runLeg(repo, dir, cfg, leg, sf, checkout, replay).catch((e: Error): LegOutcome => ({ state: "error", error: e.message, finished: Date.now() }));
+            const outcome = await runLeg(repo, dir, cfg, leg, sf, checkout, cancel, replay).catch((e: Error): LegOutcome => ({ state: "error", error: e.message, finished: Date.now() }));
             outcomes.get(leg.id)!.resolve(outcome);
           }
         } finally {
@@ -290,6 +532,8 @@ export async function worker(repo: string, id: string): Promise<void> {
   } finally {
     checkout.dispose();
   }
+  clearInterval(watch);
+  if (cancel.requested) finishCancelled(sf);
   sf.s.state = "done";
   sf.s.finishedAt = new Date().toISOString();
   sf.save();
@@ -402,7 +646,16 @@ async function neededResults(dir: string, leg: Leg, legs: Leg[], outcomes: Map<s
  * Run one leg. `replay` holds the results of the legs it waits for, which act gets as stubs. When other
  * legs need this one, a collector job records its result and outputs, returned for them.
  */
-async function runLeg(repo: string, dir: string, cfg: Config, leg: Leg, sf: StatusFile, checkout: HostCheckout, replay?: Replay): Promise<LegOutcome> {
+async function runLeg(
+  repo: string,
+  dir: string,
+  cfg: Config,
+  leg: Leg,
+  sf: StatusFile,
+  checkout: HostCheckout,
+  cancel: Cancellation,
+  replay?: Replay,
+): Promise<LegOutcome> {
   const r = sf.s.legs.find((l) => l.id === leg.id)!;
   const logFile = path.join(dir, `${leg.id}.log`);
   const log = fs.createWriteStream(logFile, { flags: "a" });
@@ -439,6 +692,7 @@ async function runLeg(repo: string, dir: string, cfg: Config, leg: Leg, sf: Stat
       sf.save();
     });
     if (waited) log.write(`[osmatrix] ${waited} is free; starting\n`);
+    if (cancel.requested) throw new Cancelled();
     r.waitingFor = undefined;
     r.state = "running";
     r.startedAt ??= new Date().toISOString();
@@ -481,7 +735,27 @@ async function runLeg(repo: string, dir: string, cfg: Config, leg: Leg, sf: Stat
       }
       const cwd = await checkout.dir((l) => log.write(l + "\n"));
       log.write(`$ act ${args.join(" ")}\n`);
-      code = await streamProcess(act.path, args, cwd, parser, timeoutMs);
+      if (cancel.requested) throw new Cancelled();
+      code = await streamProcess(act.path, args, cwd, parser, timeoutMs, (child) => {
+        // Record act's job containers while they run: a cancel after this worker died has only the status.
+        const track = setInterval(async () => {
+          const names = (await runContainers(sf.s.id)).filter((n) => !r.containers?.includes(n));
+          if (!names.length) return;
+          r.containers = [...(r.containers ?? []), ...names];
+          sf.save();
+        }, 5000);
+        const unregister = cancel.onCancel(async () => {
+          // act stops the job and removes its containers, services, networks and volumes on SIGINT.
+          child.kill("SIGINT");
+          if (!(await exited(child, 30_000))) child.kill("SIGKILL");
+          await exited(child, 10_000);
+          for (const n of await removeRunContainers(sf.s.id, r.containers)) log.write(`[osmatrix] ${n}\n`);
+        });
+        return () => {
+          clearInterval(track);
+          unregister();
+        };
+      });
     } else {
       const g = getGuest(leg.target!);
       if (g.backend instanceof DockurBackend && g.cfg.os === "macos" && !g.backend.everReady()) {
@@ -527,7 +801,15 @@ async function runLeg(repo: string, dir: string, cfg: Config, leg: Leg, sf: Stat
         }
         log.write(`$ act ${args.join(" ")}\n`);
         const command = withCwd(ep.shell, remote, commandLine(ep.shell, [act.command, ...args]));
-        code = await streamProcess(sshBin(), sshArgs(ep, ["-T"]).concat([command]), undefined, parser, timeoutMs);
+        if (cancel.requested) throw new Cancelled();
+        code = await streamProcess(sshBin(), sshArgs(ep, ["-T"]).concat([command]), undefined, parser, timeoutMs, (child) =>
+          cancel.onCancel(async () => {
+            // Closing ssh leaves act running in the guest: stop it there, which ends the session.
+            const r = await sshExec(ep, guestCancelCmd(ep, sf.s.id), { timeoutMs: 60_000 }).catch((e: Error) => ({ code: -1, stderr: e.message }));
+            if (r.code !== 0) log.write(`[osmatrix] warning: couldn't stop act in guest ${g.cfg.name}: ${r.stderr.trim() || `exit code ${r.code}`}\n`);
+            if (!(await exited(child, 15_000))) child.kill();
+          }),
+        );
         // The legs that need this one find what it uploaded in the run's store on the host.
         if (leg.neededBy?.length) {
           try {
@@ -571,9 +853,15 @@ async function runLeg(repo: string, dir: string, cfg: Config, leg: Leg, sf: Stat
   } catch (e) {
     r.state = "error";
     r.error = (e as Error).message;
-    log.write(`[osmatrix] error: ${r.error}\n`);
+    if (!(e instanceof Cancelled)) log.write(`[osmatrix] error: ${r.error}\n`);
   } finally {
     release?.();
+    if (cancel.requested && r.state !== "success" && r.state !== "skipped") {
+      r.state = "cancelled";
+      r.error = "cancelled";
+      r.failedStep = undefined;
+      log.write("[osmatrix] cancelled\n");
+    }
     await new Promise((res) => log.end(res));
     r.startedAt ??= new Date().toISOString();
     r.finishedAt = new Date().toISOString();
@@ -691,9 +979,12 @@ async function guestAct(ep: Endpoint, os: OsFamily, note: (m: string) => void): 
 async function hostActArgs(image: string, dir: string, sf: StatusFile, labels: string[], artifactPath: string, secretFile?: string): Promise<string[]> {
   const args = ["--pull=false", "--rm", "--artifact-server-path", artifactPath];
   for (const l of new Set(labels)) args.push("-P", `${l}=${image}`);
+  // The label finds the run's containers if act is killed before it removes them (see removeRunContainers).
+  const options = [`--label ${RUN_LABEL}=${sf.s.id}`];
   // act mounts the Docker socket into job containers; SELinux (Fedora, openSUSE, RHEL) denies
   // that unless the container runs unconfined, which matches GitHub's runners.
-  if (selinuxEnforcing()) args.push("--container-options", "--security-opt label=disable");
+  if (selinuxEnforcing()) options.push("--security-opt label=disable");
+  args.push("--container-options", options.join(" "));
   // act's artifact server defaults to a fixed port (34567); concurrent or nested runs would collide.
   args.push("--artifact-server-port", String(await freePort()));
   if (secretFile) args.push("--secret-file", secretFile);
@@ -1056,9 +1347,19 @@ export function removeCmd(ep: Pick<Endpoint, "shell">, target: string): string {
     : powershell(ep, `$p = ${pwshHomePath(target)}; if (Test-Path -LiteralPath $p) { Remove-Item -Recurse -Force -ErrorAction Stop -LiteralPath $p }`);
 }
 
-function streamProcess(cmd: string, args: string[], cwd: string | undefined, parser: ActJsonParser, timeoutMs: number): Promise<number> {
+/** `onStart` gets the child and returns a cleanup to run when it exits. */
+function streamProcess(
+  cmd: string,
+  args: string[],
+  cwd: string | undefined,
+  parser: ActJsonParser,
+  timeoutMs: number,
+  onStart?: (child: ChildProcess) => () => void,
+): Promise<number> {
   return new Promise((resolve) => {
     const child = spawn(cmd, args, { cwd, stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
+    const done = onStart?.(child);
+    child.once("close", () => done?.());
     const timer = setTimeout(() => {
       parser.raw(`[osmatrix] timeout after ${Math.round(timeoutMs / 60000)} min; killing`);
       child.kill();
