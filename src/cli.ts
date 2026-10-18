@@ -279,7 +279,7 @@ program
 
 program
   .command("screenshot <guest>")
-  .description("Save a PNG of the guest display (dockur guests)")
+  .description("Save a PNG of the guest display (dockur and qemu guests)")
   .option("-o, --output <file>", "output file", "screenshot.png")
   .action(
     action(async (g: string, o: { output: string }) => {

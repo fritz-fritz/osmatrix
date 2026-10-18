@@ -2,8 +2,9 @@ import fs from "node:fs";
 import path from "node:path";
 import { dockerBin } from "./backends/docker.ts";
 import { DockurBackend } from "./backends/dockur.ts";
+import { QemuMacBackend } from "./backends/qemu-macos.ts";
 import { TartBackend } from "./backends/tart.ts";
-import type { GuestStatus } from "./backends/types.ts";
+import type { GuestStatus, MacInstallVm } from "./backends/types.ts";
 import { loadConfig, readRawConfig, writeConfig } from "./core/config.ts";
 import { assetsDir, cliEntry, ensureDir, paths } from "./core/paths.ts";
 import { isAlive, run, sleep, spawnDetached } from "./core/proc.ts";
@@ -91,7 +92,8 @@ export async function setup(name: string, opts: SetupOptions = {}): Promise<Gues
     writeState(name, { phase: p });
   };
   try {
-    if (g.backend instanceof DockurBackend && g.cfg.os === "macos") await setupDockurMac(g, g.backend, opts, phase, log);
+    const mac = g.cfg.os === "macos" ? macInstallVm(g) : undefined;
+    if (mac) await setupIntelMac(g, mac, opts, phase, log);
     else await setupGeneric(g, phase);
     const st = await g.backend.status();
     if (st.state !== "ready") throw new Error(`guest not ready after setup: ${st.state} ${st.detail ?? ""}`);
@@ -122,15 +124,60 @@ async function setupGeneric(g: Guest, phase: (p: string) => void) {
 }
 
 // ---------------------------------------------------------------------------------------------
-// macOS on dockur: Recovery -> startosinstall -> Recovery (offline configure) -> ssh -> provision
+// Intel macOS (dockur, or the host's QEMU): Recovery -> startosinstall -> Recovery (offline
+// configure) -> ssh -> provision
 // ---------------------------------------------------------------------------------------------
 
 const BRIDGE_PORT = 8099;
 const BRIDGE = "/tmp/osmatrix-bridge.py";
+/** The guest's default gateway: dockur's container, or the host under QEMU user networking. */
+const GATEWAY = "$(route -n get default | awk '/gateway/{print $2}')";
 
-async function setupDockurMac(g: Guest, b: DockurBackend, opts: SetupOptions, phase: (p: string) => void, log: (l: string) => void) {
+/** The Intel macOS VM behind a guest, for the unattended install; undefined for tart and ssh guests. */
+function macInstallVm(g: Guest): MacInstallVm | undefined {
+  if (g.backend instanceof QemuMacBackend) return g.backend;
+  if (g.backend instanceof DockurBackend) return dockurMacVm(g.backend);
+  return undefined;
+}
+
+/** dockur's macOS container: the bridge (assets/macos/bridge.py) runs inside it, next to QEMU. */
+function dockurMacVm(b: DockurBackend): MacInstallVm {
+  const exec = (args: string[], timeoutMs?: number) => run(dockerBin(), ["exec", ...args], timeoutMs ? { timeoutMs } : {});
+  return {
+    credentials: () => b.credentials(),
+    everReady: () => b.everReady(),
+    boot: (o) => b.recreate(o),
+    console: async () => {
+      const r = await run(dockerBin(), ["logs", "--tail", "50", b.containerName]);
+      return r.stdout + r.stderr;
+    },
+    bootCount: () => b.bootCount(),
+    ioBytes: () => b.ioBytes(),
+    powerCycle: async () => {
+      await run(dockerBin(), ["restart", "-t", "10", b.containerName]);
+    },
+    bridgeStart: async () => {
+      await run(dockerBin(), ["cp", path.join(assetsDir, "macos", "bridge.py"), `${b.containerName}:${BRIDGE}`]);
+      await exec([b.containerName, "pkill", "-f", BRIDGE]);
+      await exec(["-d", "-e", `OSMATRIX_BRIDGE_PORT=${BRIDGE_PORT}`, b.containerName, "python3", BRIDGE, "serve"]);
+    },
+    bridgeUrl: () => `http://${GATEWAY}:${BRIDGE_PORT}`,
+    bridgeAlive: async () => (await exec([b.containerName, "python3", BRIDGE, "alive"])).code === 0,
+    bridgeRun: async (cmd, timeoutSec) => {
+      const r = await exec([b.containerName, "python3", BRIDGE, "run", cmd, String(timeoutSec)], (timeoutSec + 30) * 1000);
+      if (r.code !== 0) throw new Error(`bridge: ${r.stderr.trim() || "no response from guest"}`);
+      return r.stdout;
+    },
+    bridgeFile: async (name, localPath) => {
+      await exec([b.containerName, "mkdir", "-p", "/tmp/osmatrix-bridge/files"]);
+      await run(dockerBin(), ["cp", localPath, `${b.containerName}:/tmp/osmatrix-bridge/files/${name}`]);
+    },
+  };
+}
+
+async function setupIntelMac(g: Guest, b: MacInstallVm, opts: SetupOptions, phase: (p: string) => void, log: (l: string) => void) {
   const name = g.cfg.name;
-  const s0 = await b.status();
+  const s0 = await g.backend.status();
   if (s0.state === "ready" && !opts.force) {
     phase("already installed; provisioning");
     await provisionMac(g);
@@ -138,7 +185,7 @@ async function setupDockurMac(g: Guest, b: DockurBackend, opts: SetupOptions, ph
   }
   if (b.everReady() && !opts.force) {
     phase("starting existing guest");
-    await b.up();
+    await g.backend.up();
     const s = await waitReady(g, 900);
     if (s.state !== "ready") throw new Error(`${name} was set up before but is not reachable: ${s.state}`);
     await provisionMac(g);
@@ -147,12 +194,11 @@ async function setupDockurMac(g: Guest, b: DockurBackend, opts: SetupOptions, ph
 
   // Phase 1: Recovery, erase the disk, start the unattended install.
   phase("booting macOS Recovery (downloads the recovery image on first run)");
-  await b.recreate({ picker: false });
+  await b.boot({ picker: false });
   await waitForRecovery(name, b, 45 * 60);
   await startBridge(name, b);
   phase("erasing disk and starting the macOS installer (license accepted via --agreetolicense)");
-  const out = await bridgeRun(
-    b,
+  const out = await b.bridgeRun(
     [
       // First physical disk larger than 20 GB (skips dockur's recovery image and the EFI disk).
       `disk=$(diskutil list physical | awk '/^\\/dev\\/disk/ {d=$1} /\\*[0-9.]+ [GT]B/ {match($0, /\\*[0-9.]+/); sz=substr($0, RSTART+1, RLENGTH-1)+0; if ($0 ~ / TB/) sz*=1000; if (sz > 20) {print d; exit}}')`,
@@ -172,7 +218,7 @@ async function setupDockurMac(g: Guest, b: DockurBackend, opts: SetupOptions, ph
   const prepDeadline = Date.now() + 60 * 60_000;
   while ((await b.bootCount()) === boots0) {
     if (Date.now() > prepDeadline) throw new Error("installer did not reboot within 60 min");
-    const tail = await bridgeRun(b, "tail -c 200 /tmp/startosinstall.log", 20).catch(() => "");
+    const tail = await b.bridgeRun("tail -c 200 /tmp/startosinstall.log", 20).catch(() => "");
     const pct = /Preparing:\s*([\d.]+)%/.exec(tail.split("\r").pop() ?? "")?.[1];
     if (pct) writeState(name, { phase: `preparing installation (${pct}%)` });
     if (/error|failed/i.test(tail)) throw new Error(`startosinstall: ${tail}`);
@@ -198,7 +244,7 @@ async function setupDockurMac(g: Guest, b: DockurBackend, opts: SetupOptions, ph
     } else if (Date.now() - lastIoChange > 10 * 60_000) {
       if (++restarts > 3) throw new Error("installer stalled repeatedly (no disk activity); see `osmatrix screenshot " + name + "`");
       phase(`installer stalled (no disk activity for 10 min); power-cycling the VM (attempt ${restarts}/3)`);
-      await run(dockerBin(), ["restart", "-t", "10", b.containerName]);
+      await b.powerCycle();
       for (let i = 0; i < 8; i++) {
         await sleep(25_000);
         await input(name, [{ keys: ["enter"] }]).catch(() => undefined);
@@ -212,7 +258,7 @@ async function setupDockurMac(g: Guest, b: DockurBackend, opts: SetupOptions, ph
 
   // Phase 3: back to Recovery to configure the new system before its first login.
   phase("rebooting into Recovery to configure the installed system");
-  await b.recreate({ picker: true });
+  await b.boot({ picker: true });
   await waitForPicker(b);
   await input(name, [{ keys: ["1"] }]); // "macOS Base System" (dockur's recovery image) is the first entry
   await waitForRecovery(name, b, 15 * 60);
@@ -220,23 +266,21 @@ async function setupDockurMac(g: Guest, b: DockurBackend, opts: SetupOptions, ph
   phase("creating user, enabling ssh, passwordless sudo, auto-login");
   const creds = b.credentials();
   const { publicKey } = await ensureKey();
-  await run(dockerBin(), ["exec", b.containerName, "mkdir", "-p", "/tmp/osmatrix-bridge/files"]);
-  await run(dockerBin(), ["cp", path.join(assetsDir, "macos", "configure.sh"), `${b.containerName}:/tmp/osmatrix-bridge/files/configure.sh`]);
+  await b.bridgeFile("configure.sh", path.join(assetsDir, "macos", "configure.sh"));
   const q = (v: string) => `'${v.replace(/'/g, `'\\''`)}'`;
-  const conf = await bridgeRun(
-    b,
-    `curl -sf "http://$(route -n get default | awk '/gateway/{print $2}'):${BRIDGE_PORT}/file/configure.sh" -o /tmp/configure.sh && ` +
+  const conf = await b.bridgeRun(
+    `curl -sf "${b.bridgeUrl()}/file/configure.sh" -o /tmp/configure.sh && ` +
       `DV_USER=${q(creds.username)} DV_PASS=${q(creds.password)} DV_KEY=${q(publicKey)} DV_NAME=${q(creds.username)} DV_HOST=${q(`osmatrix-${name}`)} sh /tmp/configure.sh`,
     300,
   );
   log(conf.trim());
   if (!conf.includes("[configure] done")) throw new Error(`configure failed:\n${conf}`);
-  await bridgeRun(b, "sync; (sleep 2; shutdown -h now) >/dev/null 2>&1 &", 30).catch(() => "");
+  await b.bridgeRun("sync; (sleep 2; shutdown -h now) >/dev/null 2>&1 &", 30).catch(() => "");
   await sleep(15_000);
 
   // Phase 4: first boot of the configured system.
   phase("booting the installed system");
-  await b.recreate({ picker: false });
+  await b.boot({ picker: false });
   // First boot of a freshly installed system: an earlier install's boot history does not apply.
   const s = await waitReady(g, 30 * 60, { detectHang: false });
   if (s.state !== "ready") throw new Error(`ssh did not come up after configuration: ${s.state}`);
@@ -254,12 +298,11 @@ async function provisionMac(g: Guest) {
 }
 
 /** Wait for the Recovery app: dark grey screen, stable for two samples, after the firmware handed off to macOS. */
-async function waitForRecovery(name: string, b: DockurBackend, timeoutSec: number) {
+async function waitForRecovery(name: string, b: MacInstallVm, timeoutSec: number) {
   const deadline = Date.now() + timeoutSec * 1000;
   let prev = -1;
   while (Date.now() < deadline) {
-    const logs = await run(dockerBin(), ["logs", "--tail", "50", b.containerName]);
-    if (/HANDOFF TO XNU/.test(logs.stdout + logs.stderr)) {
+    if (/HANDOFF TO XNU/.test(await b.console())) {
       const br = await screenBrightness(name).catch(() => -1);
       if (br > 10 && br < 80 && prev > 10 && Math.abs(br - prev) < 2) {
         await sleep(5000);
@@ -272,7 +315,7 @@ async function waitForRecovery(name: string, b: DockurBackend, timeoutSec: numbe
   throw new Error(`macOS Recovery did not appear within ${timeoutSec}s; check \`osmatrix screenshot ${name}\``);
 }
 
-async function waitForPicker(b: DockurBackend) {
+async function waitForPicker(b: MacInstallVm) {
   for (let i = 0; i < 60; i++) {
     if ((await b.bootCount()) > 0) {
       await sleep(8000);
@@ -283,13 +326,11 @@ async function waitForPicker(b: DockurBackend) {
   throw new Error("OpenCore boot menu did not appear");
 }
 
-/** Run the bridge server in the container and start the polling loop inside the guest's Terminal. */
-async function startBridge(name: string, b: DockurBackend) {
-  await run(dockerBin(), ["cp", path.join(assetsDir, "macos", "bridge.py"), `${b.containerName}:${BRIDGE}`]);
-  await run(dockerBin(), ["exec", b.containerName, "pkill", "-f", BRIDGE]);
-  await run(dockerBin(), ["exec", "-d", "-e", `OSMATRIX_BRIDGE_PORT=${BRIDGE_PORT}`, b.containerName, "python3", BRIDGE, "serve"]);
+/** Start the bridge's server side and the polling loop inside the guest's Terminal. */
+async function startBridge(name: string, b: MacInstallVm) {
+  await b.bridgeStart();
   const loop =
-    `G=$(route -n get default | awk '/gateway/{print $2}'):${BRIDGE_PORT}; ` +
+    `G=${b.bridgeUrl()}; ` +
     `while :; do c=$(curl -sf $G/next); if [ -n "$c" ]; then (sh -c "$c") >/tmp/o 2>&1; echo "[rc=$?]" >>/tmp/o; ` +
     `curl -s --data-binary @/tmp/o $G/result; else sleep 1; fi; done`;
   for (let attempt = 0; attempt < 3; attempt++) {
@@ -299,16 +340,8 @@ async function startBridge(name: string, b: DockurBackend) {
     await input(name, [{ text: loop }, { keys: ["enter"] }]);
     for (let i = 0; i < 15; i++) {
       await sleep(2000);
-      if ((await run(dockerBin(), ["exec", b.containerName, "python3", BRIDGE, "alive"])).code === 0) return;
+      if (await b.bridgeAlive()) return;
     }
   }
   throw new Error("could not start the command bridge in Recovery (Terminal did not open?)");
-}
-
-async function bridgeRun(b: DockurBackend, cmd: string, timeoutSec: number): Promise<string> {
-  const r = await run(dockerBin(), ["exec", b.containerName, "python3", BRIDGE, "run", cmd, String(timeoutSec)], {
-    timeoutMs: (timeoutSec + 30) * 1000,
-  });
-  if (r.code !== 0) throw new Error(`bridge: ${r.stderr.trim() || "no response from guest"}`);
-  return r.stdout;
 }

@@ -25,7 +25,7 @@ Check `env_status` (CLI: `osmatrix status`) for what this host has:
 |---|---|---|
 | `ubuntu` | container from the same image act uses for `ubuntu-*` jobs | bash |
 | `windows` | Windows Server VM (dockur on Linux and Windows x64, the host's QEMU on Intel Macs); Windows 11 on ARM on Apple Silicon and arm64 hosts | PowerShell 7 (`pwsh`) |
-| `macos` | macOS VM (dockur on Linux, tart on Apple Silicon) | zsh/bash |
+| `macos` | macOS VM (dockur on Linux, the host's QEMU on Intel Macs, tart on Apple Silicon) | zsh/bash |
 
 A guest must be `ready`. `stopped` → `env_up` (VMs take 1–3 min to boot; leave them running while you iterate). `absent`, `needs-ssh-setup`, or a `detail` saying "not set up" → follow `osmatrix-setup`. **Don't start VMs you don't need.**
 

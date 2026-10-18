@@ -134,7 +134,7 @@ export function defaultGuests(platform = process.platform, arch = process.arch):
     ...(qemu ? {} : { web_port: 8006 }),
     vnc_port: 5901,
   };
-  if (platform === "darwin") {
+  if (platform === "darwin" && arch === "arm64") {
     g.macos = {
       name: "macos",
       os: "macos",
@@ -146,18 +146,20 @@ export function defaultGuests(platform = process.platform, arch = process.arch):
     };
     return g;
   }
+  // Intel macOS: dockur's image, run by dockur's container where Docker has KVM and by the host's QEMU
+  // (Hypervisor.framework) on Intel Macs.
   if (arch !== "arm64") {
     g.macos = {
       name: "macos",
       os: "macos",
-      backend: "dockur",
+      backend: platform === "darwin" ? "qemu" : "dockur",
       image: "dockurr/macos",
       version: "15",
       cpus: 4,
       memory: "8G",
       disk: "64G",
       ssh_port: 2223,
-      web_port: 8007,
+      ...(platform === "darwin" ? {} : { web_port: 8007 }),
       vnc_port: 5902,
       homebrew: { ...DEFAULT_HOMEBREW },
     };

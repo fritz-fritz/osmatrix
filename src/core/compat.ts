@@ -30,7 +30,7 @@ export const HOSTS: HostKind[] = [
   },
   { label: "Windows 11 arm64", platform: "win32", arch: "arm64", guests: { linux: "untested", windows: "untested", macos: "unsupported" } },
   { label: "macOS Apple Silicon", platform: "darwin", arch: "arm64", guests: { linux: "untested", windows: "untested", macos: "untested" } },
-  { label: "macOS Intel", platform: "darwin", arch: "x64", guests: { linux: "untested", windows: "untested", macos: "unsupported" } },
+  { label: "macOS Intel", platform: "darwin", arch: "x64", guests: { linux: "untested", windows: "untested", macos: "untested" } },
 ];
 
 /** The matrix row for this host; undefined ("Other") when the host lacks what its row requires. */

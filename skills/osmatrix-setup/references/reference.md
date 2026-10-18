@@ -38,7 +38,7 @@ CLI-only: `osmatrix init` (config + ssh key + host check), `config`, `install-ac
 | Windows 11 x86_64 + Docker Desktop (WSL2 with nested virtualization) | 🧪 container | 🧪 dockur: Windows Server 2025 | 🧪\* dockur: macOS 15 (Intel), best effort |
 | Windows 11 arm64 | 🧪 container | 🧪 QEMU + Windows Hypervisor Platform: Windows 11 on ARM | ❌ |
 | macOS Apple Silicon | 🧪 container | 🧪 QEMU + Hypervisor.framework: Windows 11 on ARM | 🧪\* tart |
-| macOS Intel | 🧪 container | 🧪 QEMU + Hypervisor.framework: Windows Server 2025 | ❌ |
+| macOS Intel | 🧪 container | 🧪 QEMU + Hypervisor.framework: Windows Server 2025 | 🧪\* QEMU + Hypervisor.framework: macOS 15 (Intel) |
 
 ✅ tested · 🧪 supported, not yet tested on that kind of host (`host_doctor`: `untested`) · ❌ not possible (`unsupported`; use an `ssh` guest). \* macOS guests are licensed only on Apple hardware (Apple's macOS SLA); on other hosts they need the user's explicit consent (`accept_license`). The same matrix is in the README.
 
@@ -49,7 +49,7 @@ CLI-only: `osmatrix init` (config + ssh key + host check), `config`, `install-ac
 | `container` | ubuntu | docker | act runner image (with osmatrix's Rust layer when it's the default) + sshd; ssh port preferably 2221 (actual port in `env_status`) |
 | `dockur` | windows, macos on Linux/Windows hosts | docker compose, disks in docker volumes `osmatrix-<guest>-storage` / `-golden` | needs KVM in containers; web viewer preferably 127.0.0.1:8006 (windows) / 8007 (macos); actual ports in `env_status` |
 | `tart` | macos on Apple Silicon | tart clone/run | key installed automatically via tart guest agent |
-| `qemu` | windows on Macs (Windows 11 on ARM on Apple Silicon, Windows Server 2025 on Intel) and Windows on ARM hosts | host `qemu-system-aarch64` for `dockurr/windows-arm`, `qemu-system-x86_64` for `dockurr/windows` (HVF on Macs, WHPX on Windows, KVM on Linux, TCG emulation when guest and host CPU differ; `accel` overrides); install media prepared once with the dockur image in Docker; disk under the osmatrix data dir `guests/<guest>/disk`, golden snapshot cloned (APFS `cp -c`, reflinks, ReFS block clone) | needs `brew install qemu` on macOS, QEMU 11+ and the "Windows Hypervisor Platform" feature on Windows; ssh forwarded to 127.0.0.1 (port in `env_status`); VNC display for `env_screenshot`/`env_input` |
+| `qemu` | windows on Macs (Windows 11 on ARM on Apple Silicon, Windows Server 2025 on Intel) and Windows on ARM hosts; macos on Intel Macs | host `qemu-system-aarch64` for `dockurr/windows-arm`, `qemu-system-x86_64` for `dockurr/windows` and `dockurr/macos` (HVF on Macs, WHPX on Windows, KVM on Linux, TCG emulation when guest and host CPU differ; `accel` overrides); install media (macOS: recovery image and OpenCore) prepared once with the dockur image in Docker; macOS installs through Recovery like dockur's (`env_setup`); disk under the osmatrix data dir `guests/<guest>/disk`, golden snapshot cloned (APFS `cp -c`, reflinks, ReFS block clone) | needs `brew install qemu` on macOS, QEMU 11+ and the "Windows Hypervisor Platform" feature on Windows; ssh forwarded to 127.0.0.1 (port in `env_status`); VNC display for `env_screenshot`/`env_input` |
 | `ssh` | any existing machine | none (up/down are no-ops; reset/snapshot unsupported) | host keys checked (trust on first use) |
 
 ## Devcontainers and remote Docker
