@@ -35,6 +35,14 @@ sudo chmod u+rwx /Users/runner /Users/runner/hostedtoolcache
 log "disabling sleep"
 sudo pmset -a sleep 0 displaysleep 0 disksleep 0 >/dev/null 2>&1 || true
 
+# A dev VM has nothing to keep behind a lock screen, and Windows guests don't lock either. With the
+# display never sleeping, the screen saver is what locks the screen (and then asks for the password):
+# turn it off for this user and at the login window. askForPassword only matters on older macOS.
+log "disabling the screen saver and screen lock"
+defaults -currentHost write com.apple.screensaver idleTime -int 0
+defaults write com.apple.screensaver askForPassword -int 0
+sudo defaults write /Library/Preferences/com.apple.screensaver loginWindowIdleTime -int 0
+
 if ! xcode-select -p >/dev/null 2>&1; then
   log "installing Xcode Command Line Tools"
   touch /tmp/.com.apple.dt.CommandLineTools.installondemand.in-progress
