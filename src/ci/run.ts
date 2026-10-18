@@ -12,7 +12,9 @@ import { dockerReach, selinuxEnforcing } from "../core/nesting.ts";
 import { cliEntry, ensureDir } from "../core/paths.ts";
 import { isAlive, spawnDetached } from "../core/proc.ts";
 import {
+  cloneWorktree,
   createBundle,
+  gitDirOutsideWorkTree,
   guestCachePath,
   guestCacheSteps,
   guestCheckoutSteps,
@@ -255,34 +257,39 @@ export async function worker(repo: string, id: string): Promise<void> {
   const groups = new Map<string, Leg[]>();
   for (const leg of runnable) groups.set(leg.target!, [...(groups.get(leg.target!) ?? []), leg]);
   const vmSlots = new Semaphore(cfg.max_vms);
-  await Promise.all(
-    [...groups.entries()].map(async ([target, legs]) => {
-      const isVm = target !== "host";
-      let slot = false;
-      try {
-        for (const leg of legs) {
-          const waits = (leg.waitsFor ?? []).map((id) => outcomes.get(id));
-          // Never hold a VM slot while waiting for other legs: they may need it.
-          if (slot && waits.some((w) => !w?.settled)) {
-            vmSlots.release();
-            slot = false;
+  const checkout = new HostCheckout(repo, dir);
+  try {
+    await Promise.all(
+      [...groups.entries()].map(async ([target, legs]) => {
+        const isVm = target !== "host";
+        let slot = false;
+        try {
+          for (const leg of legs) {
+            const waits = (leg.waitsFor ?? []).map((id) => outcomes.get(id));
+            // Never hold a VM slot while waiting for other legs: they may need it.
+            if (slot && waits.some((w) => !w?.settled)) {
+              vmSlots.release();
+              slot = false;
+            }
+            // Every leg must settle its outcome, or the legs waiting for it on other targets never start.
+            const replay = await neededResults(dir, leg, p.legs, outcomes, sf).catch(
+              (e: Error): Replay => ({ needs: {}, error: `couldn't collect the results of the legs it needs: ${e.message}` }),
+            );
+            if (isVm && !slot && !replay?.error) {
+              await vmSlots.acquire();
+              slot = true;
+            }
+            const outcome = await runLeg(repo, dir, cfg, leg, sf, checkout, replay).catch((e: Error): LegOutcome => ({ state: "error", error: e.message, finished: Date.now() }));
+            outcomes.get(leg.id)!.resolve(outcome);
           }
-          // Every leg must settle its outcome, or the legs waiting for it on other targets never start.
-          const replay = await neededResults(dir, leg, p.legs, outcomes, sf).catch(
-            (e: Error): Replay => ({ needs: {}, error: `couldn't collect the results of the legs it needs: ${e.message}` }),
-          );
-          if (isVm && !slot && !replay?.error) {
-            await vmSlots.acquire();
-            slot = true;
-          }
-          const outcome = await runLeg(repo, dir, cfg, leg, sf, replay).catch((e: Error): LegOutcome => ({ state: "error", error: e.message, finished: Date.now() }));
-          outcomes.get(leg.id)!.resolve(outcome);
+        } finally {
+          if (slot) vmSlots.release();
         }
-      } finally {
-        if (slot) vmSlots.release();
-      }
-    }),
-  );
+      }),
+    );
+  } finally {
+    checkout.dispose();
+  }
   sf.s.state = "done";
   sf.s.finishedAt = new Date().toISOString();
   sf.save();
@@ -395,7 +402,7 @@ async function neededResults(dir: string, leg: Leg, legs: Leg[], outcomes: Map<s
  * Run one leg. `replay` holds the results of the legs it waits for, which act gets as stubs. When other
  * legs need this one, a collector job records its result and outputs, returned for them.
  */
-async function runLeg(repo: string, dir: string, cfg: Config, leg: Leg, sf: StatusFile, replay?: Replay): Promise<LegOutcome> {
+async function runLeg(repo: string, dir: string, cfg: Config, leg: Leg, sf: StatusFile, checkout: HostCheckout, replay?: Replay): Promise<LegOutcome> {
   const r = sf.s.legs.find((l) => l.id === leg.id)!;
   const logFile = path.join(dir, `${leg.id}.log`);
   const log = fs.createWriteStream(logFile, { flags: "a" });
@@ -472,8 +479,9 @@ async function runLeg(repo: string, dir: string, cfg: Config, leg: Leg, sf: Stat
             "and steps that bind-mount host paths see the daemon host's filesystem.\n",
         );
       }
+      const cwd = await checkout.dir((l) => log.write(l + "\n"));
       log.write(`$ act ${args.join(" ")}\n`);
-      code = await streamProcess(act.path, args, repo, parser, timeoutMs);
+      code = await streamProcess(act.path, args, cwd, parser, timeoutMs);
     } else {
       const g = getGuest(leg.target!);
       if (g.backend instanceof DockurBackend && g.cfg.os === "macos" && !g.backend.everReady()) {
@@ -695,6 +703,42 @@ async function hostActArgs(image: string, dir: string, sf: StatusFile, labels: s
     args.push("-e", eventFile);
   }
   return args;
+}
+
+/**
+ * Where a run's host legs run act. act copies the work tree into job containers but not a git directory
+ * kept outside it, so in a linked worktree (as agent sessions use), a submodule or a --separate-git-dir
+ * checkout, git in the job finds no repository. There host legs run in a clone of the work tree made
+ * once per run (see cloneWorktree), the ordinary repository actions/checkout gives on GitHub; elsewhere
+ * in the checkout itself.
+ */
+class HostCheckout {
+  private readonly repo: string;
+  private readonly clone: string;
+  private ready?: Promise<string>;
+  constructor(repo: string, runDir: string) {
+    this.repo = repo;
+    this.clone = path.join(runDir, "checkout");
+  }
+  dir(log: (line: string) => void): Promise<string> {
+    this.ready ??= this.make(log);
+    return this.ready;
+  }
+  private async make(log: (line: string) => void): Promise<string> {
+    if (!(await gitDirOutsideWorkTree(this.repo))) return this.repo;
+    log(`[osmatrix] ${this.repo} keeps its git directory outside the work tree (a linked worktree, say), which act doesn't copy into job containers; host legs run in a clone of it at ${this.clone}, with its uncommitted changes`);
+    try {
+      await cloneWorktree(this.repo, this.clone);
+      return this.clone;
+    } catch (e) {
+      fs.rmSync(this.clone, { recursive: true, force: true });
+      log(`[osmatrix] warning: couldn't clone the work tree (${(e as Error).message}); running in the checkout itself, where steps that run git can fail`);
+      return this.repo;
+    }
+  }
+  dispose() {
+    fs.rmSync(this.clone, { recursive: true, force: true });
+  }
 }
 
 // ---------- replayed needs (see replay.ts) ----------
