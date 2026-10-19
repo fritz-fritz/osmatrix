@@ -346,20 +346,22 @@ export function guestCheckoutSteps(snap: Snapshot, symlinks: boolean): ChainStep
  * into a host leg's job container, so git finds no repository there. False outside a git work tree.
  */
 export async function gitDirOutsideWorkTree(dir: string): Promise<boolean> {
-  const r = await gitRun(dir, ["rev-parse", "--show-toplevel", "--absolute-git-dir", "--git-common-dir"]);
+  // All three from git, absolute and in one form: on Windows, dir may be an 8.3 short path (RUNNER~1)
+  // where git prints the long one, and only the native realpath expands those.
+  const r = await gitRun(dir, ["rev-parse", "--path-format=absolute", "--show-toplevel", "--git-dir", "--git-common-dir"]);
   if (r.code !== 0) return false;
   const [top, gitDir, common] = r.stdout.split("\n").map((l) => l.trim());
   if (!top || !gitDir || !common) return false;
   const real = (p: string) => {
     try {
-      return fs.realpathSync(p);
+      return fs.realpathSync.native(p);
     } catch {
       return path.resolve(p);
     }
   };
   const root = real(top);
   const inside = (p: string) => {
-    const rel = path.relative(root, real(path.resolve(dir, p)));
+    const rel = path.relative(root, real(p));
     return !!rel && !rel.startsWith("..") && !path.isAbsolute(rel);
   };
   return !inside(gitDir) || !inside(common);
