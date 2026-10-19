@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import path from "node:path";
 import { test } from "node:test";
 import { defaultGuests, windowsArch } from "../src/core/config.ts";
 import { guestTarget } from "../src/core/act.ts";
@@ -121,9 +122,11 @@ test("macQemuArgs: dockur's macOS machine on the host's QEMU, OpenCore with or w
   assert.ok(opt(a, "-cpu")[0].startsWith("host,vendor=GenuineIntel,"));
   assert.deepEqual(opt(a, "-vga"), ["vmware"]);
   assert.ok(opt(a, "-device").includes("isa-applesmc,osk=key"));
-  assert.ok(opt(a, "-drive").some((d) => d.startsWith("file=/s/15/base.dmg,") && d.includes("format=dmg")));
-  assert.ok(opt(a, "-drive").some((d) => d.startsWith("file=/s/15/boot.img,")));
-  assert.ok(opt(macQemuArgs({ ...mac, picker: true }), "-drive").some((d) => d.startsWith("file=/s/15/boot-picker.img,")));
+  // path.join: the storage path uses the host's separators.
+  const file = (n: string) => `file=${path.join("/s/15", n)},`;
+  assert.ok(opt(a, "-drive").some((d) => d.startsWith(file("base.dmg")) && d.includes("format=dmg")));
+  assert.ok(opt(a, "-drive").some((d) => d.startsWith(file("boot.img"))));
+  assert.ok(opt(macQemuArgs({ ...mac, picker: true }), "-drive").some((d) => d.startsWith(file("boot-picker.img"))));
   assert.deepEqual(opt(a, "-netdev"), ["user,id=hostnet0,hostfwd=tcp:127.0.0.1:2223-:22"]);
   assert.deepEqual(opt(a, "-uuid"), [mac.uuid]);
 });
