@@ -16,7 +16,7 @@
  * the objects stay. HEAD is moved back to the user's commit, and the index to the user's index, with the
  * snapshot's files in the work tree (see guestCheckoutSteps).
  */
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { ensureDir, paths } from "./paths.ts";
@@ -222,11 +222,15 @@ async function snapshotInto(dir: string, cache: string, tmp: string, prefix: str
   await git(cache, ["--git-dir", cache, "update-ref", SNAPSHOT_REF, commit]);
   const synced = async () => {
     await git(cache, ["--git-dir", cache, "update-ref", SENT_REF, commit]);
-    // Each snapshot leaves its changed blobs behind; drop the unreachable ones once they add up.
-    const kib = Number(/^size: (\d+)$/m.exec(await git(cache, ["--git-dir", cache, "count-objects", "-v"]))?.[1] ?? 0);
-    if (kib > CACHE_PRUNE_KIB) await git(cache, ["--git-dir", cache, "prune", "--expire=now"]);
+    await pruneCache(cache, "now");
   };
   return { dir: cache, commit, index: indexCommit, head, branch, tags, origin, synced, dispose };
+}
+
+/** Each snapshot leaves its changed blobs behind; drop the unreachable ones older than `expire` once they add up. */
+async function pruneCache(cache: string, expire: string) {
+  const kib = Number(/^size: (\d+)$/m.exec(await git(cache, ["--git-dir", cache, "count-objects", "-v"]))?.[1] ?? 0);
+  if (kib > CACHE_PRUNE_KIB) await git(cache, ["--git-dir", cache, "prune", `--expire=${expire}`]);
 }
 
 /**
@@ -380,9 +384,17 @@ export async function cloneWorktree(dir: string, dest: string): Promise<void> {
     const format = (await git(snap.dir, ["--git-dir", snap.dir, "rev-parse", "--show-object-format"])).trim();
     ensureDir(path.dirname(dest));
     await git(path.dirname(dest), ["init", "-q", `--object-format=${format}`, dest]);
-    // A fetch from the cache packs what it borrows from the user's object store, so the clone has no
-    // alternates pointing back at it.
-    await git(dest, ["fetch", "-q", "--no-tags", snap.dir, `+${SNAPSHOT_REF}:${SNAPSHOT_REF}`]);
+    // Host legs of different workflows (and runs) share this cache and may snapshot at the same time,
+    // moving SNAPSHOT_REF: fetch this snapshot through a ref of its own, which also keeps it from being
+    // pruned meanwhile. A fetch from the cache packs what it borrows from the user's object store, so the
+    // clone has no alternates pointing back at it.
+    const own = `refs/osmatrix/clone-${process.pid}-${randomBytes(4).toString("hex")}`;
+    await git(snap.dir, ["--git-dir", snap.dir, "update-ref", own, snap.commit]);
+    try {
+      await git(dest, ["fetch", "-q", "--no-tags", snap.dir, `+${own}:${SNAPSHOT_REF}`]);
+    } finally {
+      await gitRun(snap.dir, ["--git-dir", snap.dir, "update-ref", "-d", own]);
+    }
     const symlinks = symlinksAllowed((await gitRun(dest, ["config", "--local", "--get", "core.symlinks"])).stdout);
     // A new repository has no origin to remove.
     const steps = guestCheckoutSteps(snap, symlinks).filter((s) => s.argv.join(" ") !== "git remote remove origin");
@@ -391,6 +403,9 @@ export async function cloneWorktree(dir: string, dest: string): Promise<void> {
       if (r.code !== 0 && !s.optional) throw new Error(`git ${s.argv.slice(1).join(" ")} failed (exit ${r.code}): ${(r.stderr || r.stdout).trim().slice(-2000)}`);
     }
     await git(dest, ["update-ref", "-d", SNAPSHOT_REF]);
+    // Nothing records what a clone got, so nothing is left out next time; only keep the cache from growing.
+    // Another run may be writing a snapshot right now, whose objects nothing refers to yet: keep recent ones.
+    await pruneCache(snap.dir, "1.hour.ago");
   } finally {
     snap.dispose();
   }

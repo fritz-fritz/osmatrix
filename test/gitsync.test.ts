@@ -322,6 +322,14 @@ test("a linked worktree becomes a self-contained clone for host legs", async () 
   git(clone, ["fsck", "--no-progress"]);
   assert.equal(git(main, ["status", "--porcelain"]), "");
 
+  // Concurrent host legs share the cache; each clone gets its own snapshot and leaves no ref behind.
+  fs.writeFileSync(path.join(wt, "b.txt"), "b2\n");
+  const clones = ["linked-c1", "linked-c2", "linked-c3"].map((n) => path.join(root, n));
+  await Promise.all(clones.map((c) => gs.cloneWorktree(wt, c)));
+  for (const c of clones) assert.equal(fs.readFileSync(path.join(c, "b.txt"), "utf8"), "b2\n");
+  const cache = snapshotCache(wt, "host");
+  assert.equal(git(cache, ["--git-dir", cache, "for-each-ref", "--format=%(refname)", "refs/osmatrix/"]).trim(), SNAPSHOT_REF);
+
   // A repository without an origin stays without one.
   git(main, ["remote", "remove", "origin"]);
   const bare = path.join(root, "linked-clone-noorigin");
