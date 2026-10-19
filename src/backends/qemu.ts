@@ -243,8 +243,7 @@ export class QemuBackend implements Backend {
     const { publicKey } = await ensureKey();
     fs.writeFileSync(path.join(oem, "authorized_keys"), publicKey + "\r\n");
     fs.writeFileSync(path.join(oem, "options.json"), JSON.stringify(windowsOemOptions(this.cfg)));
-    const prep = path.join(this.dir, "prep.sh");
-    fs.copyFileSync(path.join(assetsDir, "qemu", "prep.sh"), prep);
+    const prep = writePrepScript(this.dir);
     const c = this.credentials();
     const r = await run(
       dockerBin(),
@@ -443,8 +442,18 @@ export async function stopProcess(pid: number): Promise<void> {
   if (isAlive(pid)) throw new Error(`qemu (pid ${pid}) did not exit`);
 }
 
+/**
+ * Copy prep.sh next to a guest for the dockur container, with LF line endings: a Windows checkout with
+ * core.autocrlf gives it CRLF, which bash in the Linux container fails on.
+ */
+export function writePrepScript(dir: string): string {
+  const prep = path.join(dir, "prep.sh");
+  fs.writeFileSync(prep, fs.readFileSync(path.join(assetsDir, "qemu", "prep.sh"), "utf8").replace(/\r\n/g, "\n"));
+  return prep;
+}
+
 /** QEMU on PATH, or in the QEMU for Windows installer's default folder. */
-function qemuBinary(name: string): string | undefined {
+export function qemuBinary(name: string): string | undefined {
   const found = which(name);
   if (found || process.platform !== "win32") return found;
   const p = path.join(process.env.ProgramFiles ?? "C:\\Program Files", "qemu", `${name}.exe`);
