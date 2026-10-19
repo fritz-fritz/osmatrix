@@ -8,7 +8,7 @@ import { assetsDir, ensureDir, paths } from "../core/paths.ts";
 import { isAlive, run, sleep, spawnDetached } from "../core/proc.ts";
 import { ensureKey, freePort, sshExec, sshProbe, type Endpoint } from "../core/ssh.ts";
 import { dockerBin } from "./docker.ts";
-import { cloneFile, defaultAccel, dockerOk, freeVncPort, monitorCommand, monitorQuery, qemuBinary, stopProcess, type Accel } from "./qemu.ts";
+import { cloneFile, defaultAccel, dockerOk, freeVncPort, monitorCommand, monitorQuery, qemuBinary, stopProcess, writePrepScript, type Accel } from "./qemu.ts";
 import type { Backend, GuestStatus, MacInstallVm, Support } from "./types.ts";
 
 export interface MacQemuArgsInput {
@@ -243,8 +243,7 @@ export class QemuMacBackend implements Backend, MacInstallVm {
   /** Download the recovery image and build OpenCore and the firmware with dockur's scripts, in a throwaway container. */
   private async prepare(): Promise<void> {
     ensureDir(this.storageRoot);
-    const prep = path.join(this.dir, "prep.sh");
-    fs.copyFileSync(path.join(assetsDir, "qemu", "prep.sh"), prep);
+    const prep = writePrepScript(this.dir);
     const r = await run(
       dockerBin(),
       [
