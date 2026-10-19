@@ -137,6 +137,17 @@ function activeRuns(repo: string): string[] {
   });
 }
 
+/** Runs that ci_cancel can stop or clean up after: running, or aborted (their worker died mid-run). */
+function unfinishedRuns(repo: string): string[] {
+  return listRuns(repo).filter((id) => {
+    try {
+      return ciStatus(repo, id).state !== "done";
+    } catch {
+      return false;
+    }
+  });
+}
+
 function latestRun(repo: string): string {
   const runs = listRuns(repo);
   if (!runs.length) throw new Error(`no runs in ${repo}/.osmatrix/runs`);
@@ -176,9 +187,16 @@ export async function ciRun(repoIn: string, opts: RunOptions = {}, wait = false)
   if (!p.legs.length) throw new Error(`nothing to run: ${p.warnings.join("; ") || "no matching legs"}`);
   if (opts.cancelPrevious) {
     const workflows = new Set(p.legs.map((l) => l.workflow));
-    for (const other of activeRuns(repo)) {
+    for (const other of unfinishedRuns(repo)) {
       if (!runWorkflows(repo, other).some((w) => workflows.has(w))) continue;
-      const c = await ciCancel(repo, other);
+      let c: RunStatus;
+      try {
+        c = await ciCancel(repo, other);
+      } catch (e) {
+        // It ended meanwhile: nothing left to cancel.
+        if (ciStatus(repo, other).state === "done") continue;
+        throw e;
+      }
       p.warnings.push(`cancelled run ${other}${c.state === "done" ? "" : ` (${c.state})`}, which was running the same workflows`);
     }
   }
@@ -282,7 +300,7 @@ export const RUN_LABEL = "osmatrix.run";
  */
 export async function ciCancel(repoIn: string, idIn?: string): Promise<RunStatus> {
   const repo = path.resolve(repoIn);
-  const id = idIn ?? activeRuns(repo).at(-1);
+  const id = idIn ?? unfinishedRuns(repo).at(-1);
   if (!id) throw new Error(`no run is running in ${repo}`);
   const before = ciStatus(repo, id);
   if (before.state === "done") throw new Error(`run ${id} already finished${before.cancelled ? " (cancelled)" : ""}`);
@@ -303,7 +321,9 @@ export async function ciCancel(repoIn: string, idIn?: string): Promise<RunStatus
   const notes: string[] = [];
   notes.push(...(await removeRunContainers(id, raw.legs.flatMap((l) => l.containers ?? []))));
   new HostCheckout(repo, dir).dispose();
-  const guests = new Set(raw.legs.filter((l) => l.state === "running" && l.target && l.target !== "host").map((l) => l.target!));
+  // Legs the worker already marked cancelled may still have act running in their guest.
+  const started = raw.legs.filter((l) => l.startedAt && (l.state === "running" || l.state === "cancelled"));
+  const guests = new Set(started.filter((l) => l.target && l.target !== "host").map((l) => l.target!));
   for (const guest of guests) {
     try {
       const g = getGuest(guest);
@@ -348,6 +368,10 @@ function finishCancelled(sf: StatusFile, why = "cancelled") {
 async function killTree(pid: number, runId: string) {
   if (process.platform === "win32") {
     if (isAlive(pid)) await run("taskkill", ["/PID", String(pid), "/T", "/F"]);
+    // act outlives a dead worker; find it by the run's directory in its arguments (split, so this
+    // script's own command line doesn't match).
+    const script = `$pat = '*' + '${runId}' + '*'; Get-CimInstance Win32_Process -Filter "Name = 'act.exe'" | Where-Object { $_.CommandLine -like $pat } | ForEach-Object { & taskkill.exe /PID $_.ProcessId /T /F *> $null }; exit 0`;
+    await run("powershell", ["-NoProfile", "-NonInteractive", "-Command", script], { timeoutMs: 60_000 });
     return;
   }
   const ours = async () => isAlive(pid) || (await run("pgrep", ["-g", String(pid), "-f", runId])).code === 0;
@@ -476,13 +500,9 @@ export async function worker(repo: string, id: string): Promise<void> {
     if (cancel.requested || !fs.existsSync(path.join(dir, CANCEL_FILE))) return;
     for (const l of sf.s.legs) if (l.state === "running") fs.appendFileSync(path.join(dir, `${l.id}.log`), "[osmatrix] cancelling: stopping this leg\n");
     void cancel.cancel();
-    // A leg stuck where it can't be stopped (booting a guest, say) doesn't keep the run going.
-    setTimeout(() => {
-      finishCancelled(sf);
-      sf.save();
-      checkout.dispose();
-      process.exit(0);
-    }, CANCEL_GRACE_MS).unref();
+    // A leg stuck where it can't be stopped (booting a guest, say) doesn't keep the run going. The run
+    // isn't marked done here: with this worker gone it reads as aborted, so ci_cancel cleans up after it.
+    setTimeout(() => process.exit(1), CANCEL_GRACE_MS).unref();
   }, 1000);
 
   // Each target runs its legs one at a time, in an order where a leg comes after every leg it waits for,
@@ -1027,8 +1047,13 @@ class HostCheckout {
       return this.repo;
     }
   }
+  /** Never throws: a clone Windows still holds open stays behind rather than stopping a cleanup. */
   dispose() {
-    fs.rmSync(this.clone, { recursive: true, force: true });
+    try {
+      fs.rmSync(this.clone, { recursive: true, force: true, maxRetries: 3 });
+    } catch {
+      /* left for the next cleanup of the run directory */
+    }
   }
 }
 
