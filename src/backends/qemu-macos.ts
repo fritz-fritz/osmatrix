@@ -128,8 +128,12 @@ export class QemuMacBackend implements Backend, MacInstallVm {
   private get version() {
     return this.cfg.version ?? "15";
   }
+  /**
+   * Where prep.sh's files land: dockur's macOS install.sh moves STORAGE to /storage/<version, lowercased>
+   * before anything is written (prep.sh's $STORAGE is that folder too).
+   */
   private get storage() {
-    return path.join(this.storageRoot, this.version);
+    return path.join(this.storageRoot, this.version.toLowerCase());
   }
   private get golden() {
     return path.join(this.dir, "golden");
