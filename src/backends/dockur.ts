@@ -6,7 +6,7 @@ import { guestShell, loadConfig, windowsOemOptions, type GuestConfig } from "../
 import { assertLocalGuestsReachable, dockerReach, localGuestBlockReason } from "../core/nesting.ts";
 import { assetsDir, ensureDir, paths, resourcePrefix } from "../core/paths.ts";
 import { run } from "../core/proc.ts";
-import { ensureKey, sshExec, sshProbe, type Endpoint } from "../core/ssh.ts";
+import { ensureKey, shutdownMacOverSsh, sshExec, sshProbe, type Endpoint } from "../core/ssh.ts";
 import { containerState, copyVolume, docker, dockerBin, dockerHasKvm, isPortConflict, portBinding, publishedPort, volumeExists } from "./docker.ts";
 import type { Backend, GuestStatus, Support } from "./types.ts";
 
@@ -258,7 +258,19 @@ export class DockurBackend implements Backend {
 
   async down(): Promise<void> {
     if (!fs.existsSync(this.composeFile)) return;
+    if (this.cfg.os === "macos") await this.shutdownMac();
     await this.compose(["stop", "-t", "120"], 5 * 60_000);
+  }
+
+  /**
+   * dockur stops the VM with the ACPI power button, which macOS ignores, so it kills QEMU after its
+   * timeout: every stop took ~100 s and was an unclean power-off (after which OpenCore can wait at its
+   * boot menu). A reachable guest is shut down over ssh instead; QEMU then exits and the container
+   * stops by itself. Anything else falls through to dockur's stop.
+   */
+  private async shutdownMac(): Promise<void> {
+    const running = async () => (await containerState(this.container)) === "running";
+    if (await running()) await shutdownMacOverSsh(await this.endpoint(), running);
   }
 
   async snapshot(): Promise<void> {
