@@ -82,25 +82,56 @@ function setCodexToml(file: string, cmd: { command: string; args: string[] } | u
 }
 
 /**
- * True if `dir` is something an earlier osmatrix install created: a symlink/junction into a package's
- * `skills/osmatrix`, or a copy whose SKILL.md carries our frontmatter. Anything else with that name is left alone.
+ * True if `dir` is a skill osmatrix installed under `name`: a symlink/junction into a package's
+ * `skills/<name>`, or a copy whose SKILL.md carries that name. Anything else with the name (a user's own
+ * skill, say) is left alone.
  */
-function isOurLegacySkill(dir: string): boolean {
+function isOurs(dir: string, name: string): boolean {
+  const esc = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   try {
-    if (fs.lstatSync(dir).isSymbolicLink() && /[\\/]skills[\\/]osmatrix[\\/]?$/.test(fs.readlinkSync(dir))) return true;
-    return /^name:\s*osmatrix\s*$/m.test(fs.readFileSync(path.join(dir, "SKILL.md"), "utf8"));
+    if (fs.lstatSync(dir).isSymbolicLink() && new RegExp(`[\\\\/]skills[\\\\/]${esc}[\\\\/]?$`).test(fs.readlinkSync(dir))) return true;
+    return new RegExp(`^name:\\s*${esc}\\s*$`, "m").test(fs.readFileSync(path.join(dir, "SKILL.md"), "utf8"));
   } catch {
     return false;
   }
 }
 
-export function installSkills(dest: string, copy: boolean, uninstall: boolean, dry: boolean): { installed: string[]; removedLegacy: string[] } {
-  const installed = skillNames().map((name) => path.join(dest, name));
-  // Skills from before the split would keep triggering next to the new ones; only touch what we created.
-  const removedLegacy = LEGACY_SKILL_NAMES.map((name) => path.join(dest, name)).filter(isOurLegacySkill);
-  if (dry) return { installed: uninstall ? [] : installed, removedLegacy };
+/** Whether anything is at `p`, a dangling symlink included. */
+function present(p: string): boolean {
+  try {
+    fs.lstatSync(p);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export interface InstalledSkills {
+  /** The shipped skills put in place (empty on uninstall, which removes them instead). */
+  installed: string[];
+  /** Skills of earlier versions that aren't shipped any more, and that we created: removed. */
+  removedLegacy: string[];
+  /** Directories with a shipped skill's name that we didn't create: left alone, that skill not installed. */
+  skipped: string[];
+}
+
+export function installSkills(dest: string, copy: boolean, uninstall: boolean, dry: boolean, legacyNames = LEGACY_SKILL_NAMES): InstalledSkills {
+  const current = skillNames();
+  const installed: string[] = [];
+  const skipped: string[] = [];
+  // Only touch what we created: our earlier copies (and dangling links) are replaced, anyone else's kept.
+  for (const name of current) {
+    const target = path.join(dest, name);
+    (present(target) && !isOurs(target, name) ? skipped : installed).push(target);
+  }
+  // Skills from before a split would keep triggering next to the current ones.
+  const removedLegacy = legacyNames
+    .filter((name) => !current.includes(name))
+    .map((name) => path.join(dest, name))
+    .filter((dir) => isOurs(dir, path.basename(dir)));
+  if (dry) return { installed: uninstall ? [] : installed, removedLegacy, skipped };
   for (const target of [...removedLegacy, ...installed]) fs.rmSync(target, { recursive: true, force: true });
-  if (uninstall) return { installed: [], removedLegacy };
+  if (uninstall) return { installed: [], removedLegacy, skipped };
   fs.mkdirSync(dest, { recursive: true });
   for (const target of installed) {
     const source = path.join(skillsDir, path.basename(target));
@@ -114,7 +145,7 @@ export function installSkills(dest: string, copy: boolean, uninstall: boolean, d
     }
     fs.cpSync(source, target, { recursive: true });
   }
-  return { installed, removedLegacy };
+  return { installed, removedLegacy, skipped };
 }
 
 export async function installAgents(opts: InstallOptions = {}) {

@@ -18,7 +18,7 @@ Local **Ubuntu, Windows and macOS** environments plus **local GitHub Actions mat
 
 ```
 Claude Code / Cursor / Codex
-  ├─ skills (SKILL.md ×3): when and how
+  ├─ skills (SKILL.md ×4: osmatrix, the map; -setup, -guests, -ci, the work): when and how
   └─ MCP server (osmatrix mcp, stdio) ─┐
 human / scripts ── osmatrix CLI ───────┴─ core ─┬─ ubuntu  : act runner image + sshd (container)
                                                ├─ windows : dockur/windows VM (KVM) | host QEMU (Macs, Windows on ARM)
@@ -37,7 +37,8 @@ The repository is a plugin marketplace for each client, and its root is the plug
 | Claude Code | `/plugin marketplace add fritz-fritz/osmatrix`, then `/plugin install osmatrix@fritztech` |
 | Codex / ChatGPT | `codex plugin marketplace add fritz-fritz/osmatrix`, then enable **osmatrix** under Plugins |
 | Cursor | **Dashboard → Plugins → Team Marketplaces → Add Marketplace → Import from Repo** |
-| Skills only, any agent (via [skills.sh](https://skills.sh)) | `npx skills add fritz-fritz/osmatrix` |
+| Skills only, any agent (via [skills.sh](https://skills.sh)) | `npx skills add fritz-fritz/osmatrix -s '*'` (all four skills; without `-s '*'` it asks which) |
+| Skills only, pinned to a project's dependency | `npm i -D osmatrix` then `npx skills experimental_sync -y`: links all four skills from the installed package, so they follow its version |
 
 Requirements:
 
@@ -265,7 +266,7 @@ osmatrix is developed with AI coding agents under human review. [AI_POLICY.md](A
 ```
 osmatrix/                              # the repository root is the plugin, for every client
 ├── src/, assets/                      # the CLI + MCP server (npm package "osmatrix"); assets/logo.* is the plugin artwork, assets/act/ the act patch
-├── skills/osmatrix-{ci,guests,setup}/ # the skills, each self-contained (SKILL.md + references/)
+├── skills/osmatrix*/                  # the skills, each self-contained (SKILL.md + references/): osmatrix maps to osmatrix-{setup,guests,ci}
 ├── .claude-plugin/                    # Claude Code: marketplace.json → ./, plugin.json
 ├── .cursor-plugin/                    # Cursor:      marketplace.json → ./, plugin.json
 ├── .agents/plugins/marketplace.json   # Codex:       marketplace    → ./

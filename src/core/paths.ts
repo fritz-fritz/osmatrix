@@ -45,7 +45,11 @@ export function skillNames(): string[] {
     .map((e) => e.name)
     .sort();
 }
-/** Skill names earlier versions installed; removed on install/uninstall so they don't trigger next to the new ones. */
+/**
+ * Skill names earlier versions installed; the ones no longer shipped are removed on install/uninstall so
+ * they don't trigger next to the current ones. A name that is shipped again (`osmatrix`, the map to the
+ * other skills, since 0.3) is just a current skill: install replaces our old copy of it.
+ */
 export const LEGACY_SKILL_NAMES = ["osmatrix"];
 
 export function ensureDir(dir: string): string {
