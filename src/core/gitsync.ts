@@ -110,8 +110,9 @@ export function snapshotCache(dir: string, guest: string): string {
  * checkout (host legs of different workflows, say) write the same objects and refs into one cache, since
  * an unchanged tree gives the same snapshot commit. On Windows, git's rename of a new loose object (or
  * ref, or packed-refs) onto a path another git process has open fails with "Permission denied", and a run
- * starting the cache over would delete it under the others. Reading the cache (fetch, bundle) needs no
- * lock. Returns the release function.
+ * starting the cache over would delete it under the others. A read that must not see the cache start over
+ * holds it too (cloneWorktree, through its fetch); a guest bundle is read under the guest's lock instead.
+ * Returns the release function.
  */
 export function lockSnapshotCache(cache: string): Promise<() => void> {
   const owner = { pid: process.pid, run: `snapshot-${randomBytes(4).toString("hex")}`, repo: cache, leg: "snapshot" };
@@ -410,15 +411,18 @@ export async function gitDirOutsideWorkTree(dir: string): Promise<boolean> {
 export async function cloneWorktree(dir: string, dest: string): Promise<void> {
   const cache = snapshotCache(dir, "host");
   // Host legs of different workflows (and runs) share this cache and may snapshot at the same time,
-  // moving SNAPSHOT_REF: fetch this snapshot through a ref of its own, which also keeps it from being
-  // pruned meanwhile. The fetch only reads the cache, so it runs without the lock.
-  const own = `refs/osmatrix/clone-${process.pid}-${randomBytes(4).toString("hex")}`;
-  let release = await lockSnapshotCache(cache);
+  // moving SNAPSHOT_REF, or start the cache over: hold its lock until this snapshot is in dest.
+  const release = await lockSnapshotCache(cache);
   let snap: Snapshot;
   try {
     snap = await snapshotUnlocked(dir, "host");
     try {
-      await git(snap.dir, ["--git-dir", snap.dir, "update-ref", own, snap.commit]);
+      const format = (await git(snap.dir, ["--git-dir", snap.dir, "rev-parse", "--show-object-format"])).trim();
+      ensureDir(path.dirname(dest));
+      await git(path.dirname(dest), ["init", "-q", `--object-format=${format}`, dest]);
+      // A fetch from the cache packs what it borrows from the user's object store, so the clone has no
+      // alternates pointing back at it.
+      await git(dest, ["fetch", "-q", "--no-tags", snap.dir, `+${SNAPSHOT_REF}:${SNAPSHOT_REF}`]);
     } catch (e) {
       snap.dispose();
       throw e;
@@ -427,24 +431,6 @@ export async function cloneWorktree(dir: string, dest: string): Promise<void> {
     release();
   }
   try {
-    // The private ref is deleted whatever fails before the snapshot is in dest, so it doesn't keep the
-    // snapshot's objects from being pruned.
-    try {
-      const format = (await git(snap.dir, ["--git-dir", snap.dir, "rev-parse", "--show-object-format"])).trim();
-      ensureDir(path.dirname(dest));
-      await git(path.dirname(dest), ["init", "-q", `--object-format=${format}`, dest]);
-      // A fetch from the cache packs what it borrows from the user's object store, so the clone has no
-      // alternates pointing back at it.
-      await git(dest, ["fetch", "-q", "--no-tags", snap.dir, `+${own}:${SNAPSHOT_REF}`]);
-    } finally {
-      // Deleting a ref rewrites packed-refs: a write, under the lock.
-      release = await lockSnapshotCache(cache);
-      try {
-        await gitRun(snap.dir, ["--git-dir", snap.dir, "update-ref", "-d", own]);
-      } finally {
-        release();
-      }
-    }
     const symlinks = symlinksAllowed((await gitRun(dest, ["config", "--local", "--get", "core.symlinks"])).stdout);
     // A new repository has no origin to remove.
     const steps = guestCheckoutSteps(snap, symlinks).filter((s) => s.argv.join(" ") !== "git remote remove origin");
@@ -455,11 +441,11 @@ export async function cloneWorktree(dir: string, dest: string): Promise<void> {
     await git(dest, ["update-ref", "-d", SNAPSHOT_REF]);
     // Nothing records what a clone got, so nothing is left out next time; only keep the cache from growing.
     // Keep recent objects anyway: an older osmatrix, which takes no lock, may be writing a snapshot.
-    release = await lockSnapshotCache(cache);
+    const releasePrune = await lockSnapshotCache(cache);
     try {
       await pruneCache(snap.dir, "1.hour.ago");
     } finally {
-      release();
+      releasePrune();
     }
   } finally {
     snap.dispose();
