@@ -9,16 +9,18 @@ import { cancelLeg, copyActCwdFiles, isRunWorker, type LegResult } from "../src/
 import type { GuestConfig } from "../src/core/config.ts";
 import { parseEtime, processStartedAt } from "../src/core/proc.ts";
 
-test("isRunWorker: a process that started after the run was created has a reused pid", () => {
-  const created = "2026-10-20T12:00:00.000Z";
-  const t = Date.parse(created);
-  // A background worker starts right after ciRun creates the run; a --wait run's worker before it.
-  assert.equal(isRunWorker(t + 2_000, created), true);
-  assert.equal(isRunWorker(t - 5_000, created), true);
-  assert.equal(isRunWorker(t + 3_600_000, created), false);
-  assert.equal(isRunWorker(undefined, created), false);
-  assert.equal(isRunWorker(t, "not a date"), false);
+test("isRunWorker: only a process that started when the worker did is the worker", () => {
+  const t = Date.parse("2026-10-20T10:00:00Z");
+  assert.equal(isRunWorker(t + 900, t), true, "ps reports start times to the second");
+  assert.equal(isRunWorker(t - 1_500, t), true);
+  // The worker exited 5 s in and its pid went to another process 30 s in: not the worker, whenever asked.
+  assert.equal(isRunWorker(t + 30_000, t), false);
+  assert.equal(isRunWorker(t - 3_600_000, t), false);
+  // Unknown on either side (a status from before this was recorded, or ps couldn't tell): not the worker.
+  assert.equal(isRunWorker(undefined, t), false);
+  assert.equal(isRunWorker(t, undefined), false);
 });
+
 
 test("parseEtime reads ps's etime column", () => {
   assert.equal(parseEtime("00:07"), 7);

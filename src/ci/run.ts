@@ -74,6 +74,11 @@ export interface LegResult {
   neededOnly?: boolean;
   /** Needed jobs replayed into this leg: the result it got for each, and the legs that produced it. */
   replayed?: { job: string; result: string; legs: string[] }[];
+  /**
+   * Host legs: act's job container, recorded once it exists. Everything else act creates for the job is
+   * named after it, so a cancel after act died mid-teardown (job container already gone) still finds the rest.
+   */
+  containers?: string[];
 }
 
 export interface RunStatus {
@@ -81,6 +86,8 @@ export interface RunStatus {
   repo: string;
   state: "running" | "done" | "aborted";
   pid?: number;
+  /** When the worker process (pid) started, ms since the epoch: tells it from a later process given its pid. */
+  workerStartedAt?: number;
   startedAt: string;
   finishedAt?: string;
   options: RunOptions;
@@ -316,9 +323,9 @@ export async function ciCancel(repoIn: string, idIn?: string): Promise<RunStatus
   }
   // The worker is gone or stuck: stop what it may have left running, then record the cancellation.
   const raw = JSON.parse(fs.readFileSync(path.join(dir, "status.json"), "utf8")) as RunStatus;
-  if (raw.pid && raw.pid !== process.pid) await killTree(raw.pid, id, raw.startedAt);
+  if (raw.pid && raw.pid !== process.pid) await killTree(raw.pid, id, raw.workerStartedAt);
   const notes: string[] = [];
-  notes.push(...(await removeRunContainers(id)));
+  notes.push(...(await removeRunContainers(id, raw.legs.flatMap((l) => l.containers ?? []))));
   new HostCheckout(repo, dir).dispose();
   // Legs the worker already marked cancelled may still have act running in their guest.
   const started = raw.legs.filter((l) => l.startedAt && (l.state === "running" || l.state === "cancelled"));
@@ -361,27 +368,27 @@ function finishCancelled(sf: StatusFile, why = "cancelled") {
   sf.s.finishedAt ??= now;
 }
 
-/** How long after a run was created its worker may have started (ciRun spawns it right after). */
-const WORKER_START_SLACK_MS = 60_000;
+/** How far apart two readings of one process's start time may be (ps reports it to the second). */
+const START_TIME_TOLERANCE_MS = 2_000;
 
 /**
- * Whether a live process with a run's recorded worker pid is that worker: one that started after the run
- * was created (plus a margin) has the pid reused, after the worker died. A foreground (--wait) run's
- * worker started before the run. Unknown start times count as not the worker.
+ * Whether a live process with a run's recorded worker pid is that worker: it must have started when the
+ * worker recorded it did. Any other start time is a later process given the pid after the worker died.
+ * Unknown on either side (a status from before osmatrix recorded it, or ps can't tell) counts as not the
+ * worker.
  */
-export function isRunWorker(processStartedMs: number | undefined, runStartedAt: string): boolean {
-  const created = Date.parse(runStartedAt);
-  return processStartedMs !== undefined && !Number.isNaN(created) && processStartedMs <= created + WORKER_START_SLACK_MS;
+export function isRunWorker(processStartedMs: number | undefined, workerStartedMs: number | undefined): boolean {
+  return processStartedMs !== undefined && workerStartedMs !== undefined && Math.abs(processStartedMs - workerStartedMs) <= START_TIME_TOLERANCE_MS;
 }
 
 /**
  * Kill a run's worker and everything it started. On POSIX the worker leads its own process group, which
  * outlives it: when it crashed, act may still run there. A live process with the worker's pid counts only
- * when it started with the run (isRunWorker), and a group whose leader is gone only when a process in it
+ * when it started when the worker did (isRunWorker), and a group whose leader is gone only when a process in it
  * has the run's id on its command line (act's artifact store path), so a reused pid is safe.
  */
-async function killTree(pid: number, runId: string, runStartedAt: string) {
-  const worker = async () => isAlive(pid) && isRunWorker(await processStartedAt(pid), runStartedAt);
+async function killTree(pid: number, runId: string, workerStartedAt: number | undefined) {
+  const worker = async () => isAlive(pid) && isRunWorker(await processStartedAt(pid), workerStartedAt);
   if (process.platform === "win32") {
     if (await worker()) await run("taskkill", ["/PID", String(pid), "/T", "/F"]);
     // act outlives a dead worker; find it by the run's directory in its arguments (split, so this
@@ -415,15 +422,15 @@ async function runContainers(runId: string): Promise<string[]> {
 
 /**
  * Remove what act left on the host's Docker for a run: its job containers (labelled in hostActArgs, so
- * found without the worker) and everything act names after one (pkg/runner createContainerName): service
+ * found without the worker, or `known` from the run's status once act removed them) and everything act names after one (pkg/runner createContainerName): service
  * containers start with the job container's name cut to 63 characters, and the job's network and volumes
  * (-env, -filecmds) with its whole name, which ends in a sha256, so nothing else matches. act removes all of it
  * itself on SIGINT; this is for an act that died first (one whose worker died gets SIGPIPE as soon as it
  * logs). Returns what it removed, for the log.
  */
-export async function removeRunContainers(runId: string): Promise<string[]> {
+export async function removeRunContainers(runId: string, known: string[] = []): Promise<string[]> {
   const docker = dockerBin();
-  const jobs = await runContainers(runId);
+  const jobs = [...new Set([...known, ...(await runContainers(runId))])];
   if (!jobs.length) return [];
   const list = async (args: string[]) => {
     const r = await run(docker, args);
@@ -508,6 +515,7 @@ export async function worker(repo: string, id: string): Promise<void> {
   const p = JSON.parse(fs.readFileSync(path.join(dir, "plan.json"), "utf8")) as Plan;
   const sf = new StatusFile(path.join(dir, "status.json"), JSON.parse(fs.readFileSync(path.join(dir, "status.json"), "utf8")));
   sf.s.pid = process.pid;
+  sf.s.workerStartedAt = Math.round(Date.now() - process.uptime() * 1000);
   sf.save();
   const cfg = loadConfig();
   const cancel = new Cancellation();
@@ -774,15 +782,28 @@ async function runLeg(
       const cwd = await checkout.dir((l) => log.write(l + "\n"));
       log.write(`$ act ${args.join(" ")}\n`);
       if (cancel.requested) throw new Cancelled();
-      code = await streamProcess(act.path, args, cwd, parser, timeoutMs, (child) =>
-        cancel.onCancel(async () => {
+      code = await streamProcess(act.path, args, cwd, parser, timeoutMs, (child) => {
+        // Record act's job container once it exists (then stop looking): if act dies mid-teardown after
+        // removing it, its name still finds the job's network, volumes and services.
+        const track = setInterval(async () => {
+          const names = await runContainers(sf.s.id);
+          if (!names.length) return;
+          clearInterval(track);
+          r.containers = [...new Set([...(r.containers ?? []), ...names])];
+          sf.save();
+        }, 5000);
+        const unregister = cancel.onCancel(async () => {
           // act stops the job and removes its containers, services, networks and volumes on SIGINT.
           child.kill("SIGINT");
           if (!(await exited(child, 30_000))) child.kill("SIGKILL");
           await exited(child, 10_000);
-          for (const n of await removeRunContainers(sf.s.id)) lateNote(n);
-        }),
-      );
+          for (const n of await removeRunContainers(sf.s.id, r.containers)) lateNote(n);
+        });
+        return () => {
+          clearInterval(track);
+          unregister();
+        };
+      });
     } else {
       const g = getGuest(leg.target!);
       if ((g.backend instanceof DockurBackend || g.backend instanceof QemuMacBackend) && g.cfg.os === "macos" && !g.backend.everReady()) {
