@@ -198,6 +198,7 @@ osmatrix ci plan                          # legs, targets, warnings; runs nothin
 osmatrix ci run --only windows -m node=22 # background run; poll with:
 osmatrix ci status
 osmatrix ci logs test-windows --tail 100
+osmatrix ci cancel                        # stop the latest running run and remove its act containers
 osmatrix ci run --wait                    # foreground, exit code reflects the result
 ```
 
