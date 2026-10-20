@@ -6,7 +6,7 @@ import { HostBridge } from "../core/bridge.ts";
 import { guestShell, loadConfig, type GuestConfig } from "../core/config.ts";
 import { assetsDir, ensureDir, paths } from "../core/paths.ts";
 import { isAlive, run, sleep, spawnDetached } from "../core/proc.ts";
-import { ensureKey, freePort, sshExec, sshProbe, type Endpoint } from "../core/ssh.ts";
+import { ensureKey, freePort, shutdownMacOverSsh, sshProbe, type Endpoint } from "../core/ssh.ts";
 import { dockerBin } from "./docker.ts";
 import { cloneFile, defaultAccel, dockerOk, freeVncPort, monitorCommand, monitorQuery, qemuBinary, stopProcess, writePrepScript, type Accel } from "./qemu.ts";
 import type { Backend, GuestStatus, MacInstallVm, Support } from "./types.ts";
@@ -319,10 +319,17 @@ export class QemuMacBackend implements Backend, MacInstallVm {
   async down(): Promise<void> {
     const pid = this.pid();
     if (!pid) return;
-    const ep = await this.endpoint();
-    if ((await sshProbe(ep)) === "ok") await sshExec(ep, "sudo -n shutdown -h now", { timeoutMs: 30_000 }).catch(() => undefined);
-    else await monitorCommand(this.monitor, "system_powerdown").catch(() => undefined);
     const deadline = Date.now() + 120_000;
+    let clean = false;
+    try {
+      // endpoint() can fail too (ensureKey runs ssh-keygen); this step is optional, the stop below isn't.
+      // 80 s of the 120: the power button below still gets at least 40 s if this doesn't work.
+      clean = await shutdownMacOverSsh(await this.endpoint(), async () => isAlive(pid), { timeoutMs: 80_000 });
+    } catch {
+      /* fall through to the power button */
+    }
+    // No ssh, or no passwordless sudo: press the power button; QEMU is stopped after the grace period anyway.
+    if (!clean && isAlive(pid)) await monitorCommand(this.monitor, "system_powerdown").catch(() => undefined);
     while (isAlive(pid) && Date.now() < deadline) await sleep(1000);
     await stopProcess(pid);
     fs.rmSync(this.runtimeFile, { force: true });
@@ -431,6 +438,11 @@ export class QemuMacBackend implements Backend, MacInstallVm {
   async bridgeStart(): Promise<void> {
     this.bridge ??= new HostBridge();
     await this.bridge.start();
+  }
+
+  async bridgeStop(): Promise<void> {
+    this.bridge?.stop();
+    this.bridge = undefined;
   }
 
   bridgeUrl(): string {

@@ -56,3 +56,25 @@ test("shutdownMacOverSsh: gives up at the deadline, and never throws", async () 
   const broken = harness({});
   assert.equal(await shutdownMacOverSsh(ep, async () => Promise.reject(new Error("docker gone")), broken.deps), false);
 });
+
+test("shutdownMacOverSsh: slow ssh and a guest that never stops stay within the caller's budget", async () => {
+  let t = 0;
+  const timeouts: number[] = [];
+  const deps: Partial<ShutdownDeps> = {
+    // The probe takes 10 s and the shutdown command runs until its timeout.
+    probe: async () => ((t += 10_000), "ok"),
+    exec: async (_ep, _cmd, o) => ((timeouts.push(o?.timeoutMs ?? 0), (t += o?.timeoutMs ?? 0)), { code: 255, stdout: "", stderr: "timed out" }),
+    sleep: async (ms) => void (t += ms),
+    now: () => t,
+    timeoutMs: 80_000,
+  };
+  assert.equal(await shutdownMacOverSsh(ep, async () => true, deps), false);
+  assert.ok(t <= 81_000, `took ${t} ms of an 80 s budget`);
+  assert.deepEqual(timeouts, [30_000]);
+  // With less budget than the command's usual 30 s, the command gets only what's left.
+  t = 0;
+  timeouts.length = 0;
+  assert.equal(await shutdownMacOverSsh(ep, async () => true, { ...deps, timeoutMs: 25_000 }), false);
+  assert.deepEqual(timeouts, [15_000]);
+  assert.ok(t <= 26_000, `took ${t} ms of a 25 s budget`);
+});

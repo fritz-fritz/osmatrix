@@ -90,6 +90,8 @@ export interface MacInstallVm {
   powerCycle(): Promise<void>;
   /** Start the command bridge's server side (see assets/macos/bridge.py). */
   bridgeStart(): Promise<void>;
+  /** Stop a bridge server that runs in this process, which would otherwise keep it from exiting. */
+  bridgeStop?(): Promise<void>;
   /** The bridge's base URL as the guest reaches it, as a shell expression for the guest to evaluate. */
   bridgeUrl(): string;
   bridgeAlive(): Promise<boolean>;
