@@ -26,9 +26,11 @@ export const CLIENTS = {
 };
 
 /** Files every client's bundled plugin carries (plus that client's manifest): what a client reads from the repository. */
-// assets/social-preview.svg (the README's banner on GitHub) stays out: no client reads it, and the bundled
-// README points at the tagged copy instead (bundleReadme).
-export const BUNDLE_FILES = ["skills", "assets/logo.svg", "assets/logo.png", "README.md", "LICENSE", "PRIVACY.md", "TERMS.md", "mcp.json"];
+// The artwork is the one SVG (4 KB): every manifest's icon, and the README's logo. Codex documents SVG icons
+// (square viewBox), Cursor's own example is an SVG, and Claude Code doesn't read `icon` (Anthropic's directory
+// does, from the repository). assets/social-preview.svg (the README's banner on GitHub) stays out: no client
+// reads it, and the bundled README points at the tagged copy instead (bundleReadme).
+export const BUNDLE_FILES = ["skills", "assets/logo.svg", "README.md", "LICENSE", "PRIVACY.md", "TERMS.md", "mcp.json"];
 
 /**
  * A bundle's README: the bundle carries only part of the repository, so Markdown links and HTML `src`

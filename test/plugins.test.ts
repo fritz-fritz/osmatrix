@@ -84,10 +84,10 @@ test("workflow actions must be pinned to commit SHAs with a version comment", ()
 });
 
 test("a bundle's README points links and images it doesn't carry at the tagged source", () => {
-  const text = 'See [the act patch](assets/act/README.md#notes) and [a skill](skills/osmatrix-ci/SKILL.md).\n<img src="assets/social-preview.svg" alt="card"> <img src="assets/logo.png"> [site](https://example.com)';
-  const has = (t: string) => t === "skills/osmatrix-ci/SKILL.md" || t === "assets/logo.png";
+  const text = 'See [the act patch](assets/act/README.md#notes) and [a skill](skills/osmatrix-ci/SKILL.md).\n<img src="assets/social-preview.svg" alt="card"> <img src="assets/logo.svg"> [site](https://example.com)';
+  const has = (t: string) => t === "skills/osmatrix-ci/SKILL.md" || t === "assets/logo.svg";
   assert.equal(
     bundleReadme(text, has, "https://github.com/fritz-fritz/osmatrix", "1.2.3"),
-    'See [the act patch](https://github.com/fritz-fritz/osmatrix/blob/v1.2.3/assets/act/README.md#notes) and [a skill](skills/osmatrix-ci/SKILL.md).\n<img src="https://github.com/fritz-fritz/osmatrix/raw/v1.2.3/assets/social-preview.svg" alt="card"> <img src="assets/logo.png"> [site](https://example.com)',
+    'See [the act patch](https://github.com/fritz-fritz/osmatrix/blob/v1.2.3/assets/act/README.md#notes) and [a skill](skills/osmatrix-ci/SKILL.md).\n<img src="https://github.com/fritz-fritz/osmatrix/raw/v1.2.3/assets/social-preview.svg" alt="card"> <img src="assets/logo.svg"> [site](https://example.com)',
   );
 });
