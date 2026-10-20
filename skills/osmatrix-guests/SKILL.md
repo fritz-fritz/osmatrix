@@ -56,7 +56,7 @@ Everything binds to 127.0.0.1 only; nothing is exposed to the network. Forwards 
 
 ## GUI (VM guests)
 
-**When the user wants to see a guest** (watch a setup, click around in a GUI, check a login screen), call `env_viewer` and give them its `url` and `how`. They land on the desktop without signing in, so don't look up or share the guest's credentials. It's always a browser page (`http://127.0.0.1:<port>`): dockur's own, or one osmatrix serves for qemu and tart guests. Don't look for the port in Docker logs: the `8006` there is the container's side, and the host port can differ.
+**When the user wants to see a guest** (watch a setup, click around in a GUI, check a login screen), call `env_viewer` and give them its `url` and `how`. They land on the desktop without signing in, so don't look up or share the guest's credentials. It's always a browser page (`http://127.0.0.1:<port>`): dockur's own, or one osmatrix serves for qemu and tart guests, whose URL ends in a `#t=` token that lets only this page drive the guest; give the URL whole, and don't paste it anywhere else. Don't look for the port in Docker logs: the `8006` there is the container's side, and the host port can differ.
 
 `env_screenshot` returns a PNG of the VM display; `env_input` sends keys (`"enter"`, `"tab"`, `"cmd+space"`), text, clicks and scrolls in screenshot pixel coordinates. Use for GUI apps or to inspect a VM stuck during boot. Take a screenshot after input to confirm the effect. Prefer `env_exec` whenever a command-line route exists.
 

@@ -1,3 +1,4 @@
+import { timingSafeEqual } from "node:crypto";
 import fs from "node:fs";
 import http from "node:http";
 import net from "node:net";
@@ -11,9 +12,24 @@ import { clientHandshake, SocketReader } from "./core/rfb.ts";
  * the desktop the way dockur's noVNC page does. One small HTTP server per guest on 127.0.0.1 serves a noVNC
  * page; its WebSocket is bridged to the guest's VNC server. The bridge does the guest's security handshake
  * itself (with tart's per-run password) and offers the browser no authentication, so no credential is shown.
+ * The bridge only opens for a random token the server is started with, which reaches the page in its URL's
+ * fragment (never sent in a request): other local processes and users can't drive the guest through it.
  */
 
 export type VncTarget = () => Promise<{ host: string; port: number; password?: string } | undefined>;
+
+export interface ViewerOptions {
+  /** Answered in a header, so osmatrix can tell its own server from another program on the port. */
+  id?: string;
+  /** Required to open the bridge; the page reads it from its URL's fragment (`#t=<token>`). */
+  token: string;
+}
+
+/** Above this many bytes queued for the browser, stop reading from the guest until the browser catches up. */
+const HIGH_WATER = 8 * 1024 * 1024;
+const LOW_WATER = 1024 * 1024;
+/** How long the guest's VNC server gets to finish its handshake. */
+const HANDSHAKE_MS = 10_000;
 
 /** The noVNC package's root; it exports only core/rfb.js. */
 const novncDir = () => path.dirname(path.dirname(createRequire(import.meta.url).resolve("@novnc/novnc")));
@@ -32,9 +48,12 @@ padding:4px 10px;border-radius:4px;background:#000a;z-index:1}#status:empty{disp
 <script type="module">
 import RFB from "./core/rfb.js";
 const status = document.getElementById("status");
+const token = new URLSearchParams(location.hash.slice(1)).get("t") ?? "";
+// A new URL for the same server (a fresh token) only changes the fragment: reload to use it.
+addEventListener("hashchange", () => location.reload());
 let retry = 1000;
 function connect() {
-  const rfb = new RFB(document.getElementById("screen"), (location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/websockify");
+  const rfb = new RFB(document.getElementById("screen"), (location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/websockify?t=" + encodeURIComponent(token));
   rfb.scaleViewport = true;
   rfb.addEventListener("connect", () => { status.textContent = ""; retry = 1000; });
   rfb.addEventListener("disconnect", () => {
@@ -47,13 +66,19 @@ connect();
 </script></body></html>`;
 }
 
-/** The request's path, or undefined for a target `new URL` can't parse. */
-function pathname(req: http.IncomingMessage): string | undefined {
+/** The request's URL, or undefined for a target `new URL` can't parse. */
+function requestUrl(req: http.IncomingMessage): URL | undefined {
   try {
-    return new URL(req.url ?? "/", "http://x").pathname;
+    return new URL(req.url ?? "/", "http://x");
   } catch {
     return undefined;
   }
+}
+
+function tokenMatches(given: string | null, token: string): boolean {
+  const a = Buffer.from(given ?? "");
+  const b = Buffer.from(token);
+  return token.length > 0 && a.length === b.length && timingSafeEqual(a, b);
 }
 
 /** Only this page may open the bridge: other sites in the user's browser must not reach the guest's screen. */
@@ -69,14 +94,14 @@ function sameOrigin(req: http.IncomingMessage, port: number): boolean {
   }
 }
 
-export function viewerServer(title: string, target: VncTarget, id = ""): http.Server {
+export function viewerServer(title: string, target: VncTarget, opts: ViewerOptions): http.Server {
   const server = http.createServer((req, res) => {
     const port = (server.address() as net.AddressInfo).port;
     if (!sameOrigin(req, port) || req.method !== "GET") {
       res.writeHead(403).end();
       return;
     }
-    const p = pathname(req);
+    const p = requestUrl(req)?.pathname;
     if (p === undefined) {
       res.writeHead(400).end();
       return;
@@ -90,7 +115,7 @@ export function viewerServer(title: string, target: VncTarget, id = ""): http.Se
           "content-security-policy": "frame-ancestors 'none'",
           "x-frame-options": "DENY",
           // Lets osmatrix tell its own server from another program that took the port.
-          "x-osmatrix-viewer": id,
+          "x-osmatrix-viewer": opts.id ?? "",
         })
         .end(page(title));
       return;
@@ -110,7 +135,8 @@ export function viewerServer(title: string, target: VncTarget, id = ""): http.Se
   const wss = new WebSocketServer({ noServer: true });
   server.on("upgrade", (req, socket, head) => {
     const port = (server.address() as net.AddressInfo).port;
-    if (!sameOrigin(req, port) || pathname(req) !== "/websockify") {
+    const url = requestUrl(req);
+    if (!sameOrigin(req, port) || url?.pathname !== "/websockify" || !tokenMatches(url.searchParams.get("t"), opts.token)) {
       socket.end("HTTP/1.1 403 Forbidden\r\n\r\n");
       return;
     }
@@ -141,8 +167,11 @@ export async function bridge(ws: WebSocket, target: VncTarget): Promise<void> {
     vnc = net.connect({ host: t.host, port: t.port });
     vnc.on("error", fail);
     const sock = vnc;
+    // A server that accepts and then says nothing (a guest still starting) must not hold the page forever.
+    sock.setTimeout(HANDSHAKE_MS, () => sock.destroy(new Error("the guest's VNC server didn't answer")));
     const reader = new SocketReader(sock);
     await clientHandshake((n) => reader.read(n), (b) => sock.write(b), t.password);
+    sock.setTimeout(0);
     if (closed) return void sock.destroy();
     sock.pause();
 
@@ -169,7 +198,19 @@ export async function bridge(ws: WebSocket, target: VncTarget): Promise<void> {
           step = "relay";
           const rest = reader.detach();
           if (rest.length) ws.send(rest);
-          sock.on("data", (d: Buffer) => ws.send(d));
+          sock.on("data", (d: Buffer) => {
+            ws.send(d);
+            // A slow browser: hold the guest's output back rather than queue it without limit.
+            if (ws.bufferedAmount > HIGH_WATER && !sock.isPaused()) {
+              sock.pause();
+              const poll = setInterval(() => {
+                if (closed || ws.bufferedAmount < LOW_WATER) {
+                  clearInterval(poll);
+                  if (!closed) sock.resume();
+                }
+              }, 50);
+            }
+          });
           sock.resume();
         }
       }
@@ -196,12 +237,24 @@ export function closeReason(msg: string): string {
   return out;
 }
 
-/** The `osmatrix _viewer` process: serve until killed. */
-export async function serveViewer(title: string, port: number, id: string, target: VncTarget): Promise<void> {
-  const server = viewerServer(title, target, id);
+/**
+ * The `osmatrix _viewer` process: serve until killed, or until `keepAlive` says the server is no longer
+ * wanted (checked every few seconds; e.g. osmatrix dropped its record, or the guest stopped).
+ */
+export async function serveViewer(title: string, port: number, opts: ViewerOptions, target: VncTarget, keepAlive: () => Promise<boolean>): Promise<void> {
+  const server = viewerServer(title, target, opts);
   await new Promise<void>((resolve, reject) => {
     server.once("error", reject);
     server.listen(port, "127.0.0.1", resolve);
   });
-  await new Promise(() => {});
+  for (;;) {
+    await new Promise((r) => setTimeout(r, 5000));
+    let keep = true;
+    try {
+      keep = await keepAlive();
+    } catch {
+      /* keep serving */
+    }
+    if (!keep) process.exit(0);
+  }
 }

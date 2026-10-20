@@ -64,8 +64,8 @@ export async function runOk(cmd: string, args: string[], opts: RunOptions = {}):
 }
 
 /** Start a process that outlives us. Returns its pid. */
-export function spawnDetached(cmd: string, args: string[], opts: { cwd?: string; logFile?: string } = {}): number {
-  const so: SpawnOptions = { cwd: opts.cwd, detached: true, windowsHide: true, stdio: "ignore" };
+export function spawnDetached(cmd: string, args: string[], opts: { cwd?: string; logFile?: string; env?: NodeJS.ProcessEnv } = {}): number {
+  const so: SpawnOptions = { cwd: opts.cwd, env: opts.env, detached: true, windowsHide: true, stdio: "ignore" };
   if (opts.logFile) {
     const fd = fs.openSync(opts.logFile, "a");
     so.stdio = ["ignore", fd, fd];

@@ -147,7 +147,7 @@ export async function startMcp(): Promise<void> {
     "env_viewer",
     {
       description:
-        "The URL where the user can watch and use a running VM guest's screen: a browser page (http://127.0.0.1:<port>) showing the guest's desktop: dockur's own noVNC page, or for qemu and tart guests one osmatrix serves. No login is needed: guests sign in automatically and don't lock their screen, and the page never asks for a password. Give the user the URL and the `how` text whenever they want to see, watch or click around in a guest, or a setup or GUI step needs a human look. Ports change across restarts; call this again rather than reusing an old URL.",
+        "The URL where the user can watch and use a running VM guest's screen: a browser page (http://127.0.0.1:<port>) showing the guest's desktop: dockur's own noVNC page, or for qemu and tart guests one osmatrix serves. No login is needed: guests sign in automatically and don't lock their screen, and the page never asks for a password. Give the user the URL and the `how` text whenever they want to see, watch or click around in a guest, or a setup or GUI step needs a human look. For qemu and tart guests the URL ends in a `#t=` token that opens the viewer: pass the URL on whole, and don't post it anywhere else. Ports change across restarts; call this again rather than reusing an old URL.",
       inputSchema: { guest },
     },
     safe(async ({ guest }) => text(await env.viewer(guest))),

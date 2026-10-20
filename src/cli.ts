@@ -126,7 +126,17 @@ program
   .requiredOption("--id <id>", "identifies this server to the osmatrix process that started it")
   .action(action(async (g: string, o: { port: number; id: string }) => {
     const guest = env.getGuest(g);
-    await serveViewer(`osmatrix: ${g}`, o.port, o.id, async () => (guest.backend.vnc ? guest.backend.vnc() : undefined));
+    const target = async () => (guest.backend.vnc ? guest.backend.vnc() : undefined);
+    const started = Date.now();
+    let lastDisplay = started;
+    await serveViewer(`osmatrix: ${g}`, o.port, { id: o.id, token: process.env.OSMATRIX_VIEWER_TOKEN ?? "" }, target, async () => {
+      // Exit once osmatrix no longer records this server (stopped, or replaced), or once the guest has had
+      // no display for a while (stopped outside osmatrix, crashed).
+      const rec = env.viewerRecord(g);
+      if (rec ? rec.id !== o.id : Date.now() - started > 30_000) return false;
+      if (await target().catch(() => undefined)) lastDisplay = Date.now();
+      return Date.now() - lastDisplay < 120_000;
+    });
   }));
 
 program

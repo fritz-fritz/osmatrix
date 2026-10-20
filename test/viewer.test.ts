@@ -13,7 +13,7 @@ function guest(cfg: Partial<GuestConfig>, status: Partial<GuestStatus>, extra: P
   const backend = { cfg: full, status: async () => ({ name: "g", os: full.os, backend: full.backend, state: "ready", ...status }), ...extra } as unknown as Backend;
   return { cfg: full, backend };
 }
-const noServer = async (): Promise<number> => assert.fail("no viewer server expected");
+const noServer = async (): Promise<string> => assert.fail("no viewer server expected");
 
 test("viewer: dockur's web viewer at the port Docker published, not the configured one", async () => {
   const v = await viewerFor(guest({ web_port: 8006 }, { ports: { web: 8011, vnc: 5901 } }), noServer);
@@ -23,11 +23,11 @@ test("viewer: dockur's web viewer at the port Docker published, not the configur
 
 test("viewer: qemu and tart guests get osmatrix's browser viewer, not a VNC address", async () => {
   const started: string[] = [];
-  const serve = async (name: string) => (started.push(name), 7123);
+  const serve = async (name: string) => (started.push(name), "http://127.0.0.1:7123/#t=tok");
   const v = await viewerFor(guest({ backend: "qemu" }, { ports: { ssh: 2222, vnc: 5912 } }, { vnc: async () => ({ host: "127.0.0.1", port: 5912 }) }), serve);
-  assert.deepEqual(v, { guest: "g", kind: "web", url: "http://127.0.0.1:7123", how: v.how });
+  assert.deepEqual(v, { guest: "g", kind: "web", url: "http://127.0.0.1:7123/#t=tok", how: v.how });
   const t = await viewerFor(guest({ backend: "tart", os: "macos" }, {}, { vnc: async () => ({ host: "127.0.0.1", port: 5999, password: "a-b-c-d" }) }), serve);
-  assert.equal(t.url, "http://127.0.0.1:7123");
+  assert.equal(t.url, "http://127.0.0.1:7123/#t=tok");
   assert.deepEqual(started, ["g", "g"]);
 });
 
@@ -41,7 +41,7 @@ test("viewer: stopped, absent, container and ssh guests, and guests without a di
 });
 
 test("viewer: no login, user or password in what the user is shown", async () => {
-  const v = await viewerFor(guest({ backend: "tart", os: "macos", user: "admin" }, {}, { vnc: async () => ({ host: "127.0.0.1", port: 5999, password: "s3cret-pw" }) }), async () => 7000);
+  const v = await viewerFor(guest({ backend: "tart", os: "macos", user: "admin" }, {}, { vnc: async () => ({ host: "127.0.0.1", port: 5999, password: "s3cret-pw" }) }), async () => "http://127.0.0.1:7000/#t=tok");
   assert.deepEqual(Object.keys(v).sort(), ["guest", "how", "kind", "url"]);
   assert.doesNotMatch(JSON.stringify(v), /admin|s3cret|password|credentials/i);
 });
@@ -101,16 +101,18 @@ async function fakeVnc(password: string): Promise<{ port: number; close: () => v
   return { port: (server.address() as net.AddressInfo).port, close: () => server.close(), authed: () => authed };
 }
 
+const TOKEN = "test-token";
+
 async function listen(target: VncTarget) {
-  const server = viewerServer("test", target);
+  const server = viewerServer("test", target, { token: TOKEN });
   await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
   return { server, port: (server.address() as net.AddressInfo).port };
 }
 
 /** Speak RFB as a browser would; resolves with the bytes received after ServerInit for "ping". */
-function browser(port: number, origin = `http://127.0.0.1:${port}`): Promise<{ security: number[]; name: string; echo: string }> {
+function browser(port: number, origin = `http://127.0.0.1:${port}`, token = TOKEN): Promise<{ security: number[]; name: string; echo: string }> {
   return new Promise((resolve, reject) => {
-    const ws = new WebSocket(`ws://127.0.0.1:${port}/websockify`, { origin });
+    const ws = new WebSocket(`ws://127.0.0.1:${port}/websockify?t=${encodeURIComponent(token)}`, { origin });
     let buf = Buffer.alloc(0);
     let stage = 0;
     const out: { security: number[]; name: string; echo: string } = { security: [], name: "", echo: "" };
@@ -245,7 +247,7 @@ test("viewer bridge: a browser leaving mid-handshake closes the guest connection
   await new Promise<void>((r) => silent.listen(0, "127.0.0.1", r));
   const { server, port } = await listen(async () => ({ host: "127.0.0.1", port: (silent.address() as net.AddressInfo).port }));
   try {
-    const ws = new WebSocket(`ws://127.0.0.1:${port}/websockify`, { origin: `http://127.0.0.1:${port}` });
+    const ws = new WebSocket(`ws://127.0.0.1:${port}/websockify?t=${TOKEN}`, { origin: `http://127.0.0.1:${port}` });
     await new Promise((r) => ws.once("open", r));
     await new Promise((r) => setTimeout(r, 100));
     ws.terminate();
@@ -261,4 +263,72 @@ test("viewer bridge: close reasons fit WebSocket's 123 bytes without splitting a
   assert.ok(Buffer.byteLength(r) <= 123);
   assert.equal(r, "认证失败".repeat(20).slice(0, 41));
   assert.equal(closeReason("short"), "short");
+});
+
+test("viewer server: the bridge only opens with the server's token", async () => {
+  const vnc = await fakeVnc("pw");
+  const { server, port } = await listen(async () => ({ host: "127.0.0.1", port: vnc.port, password: "pw" }));
+  try {
+    // Another local process: no Origin, right Host, but no token.
+    await assert.rejects(browser(port, undefined as unknown as string, ""), /403|Unexpected server response/);
+    await assert.rejects(browser(port, `http://127.0.0.1:${port}`, "wrong-token"), /403|Unexpected server response/);
+    assert.equal((await browser(port)).echo, "ping");
+    assert.equal(vnc.authed(), 1, "only the request with the token reached the guest");
+  } finally {
+    server.close();
+    vnc.close();
+  }
+});
+
+test("viewer bridge: a slow browser pauses the guest's output instead of queueing it without limit", async () => {
+  // A guest that floods 64 MiB right after ServerInit, as fast as the bridge reads it.
+  let sent = 0;
+  const flood = net.createServer((sock) => {
+    let stage = 0;
+    sock.write("RFB 003.008\n");
+    sock.on("data", () => {
+      if (stage === 0) sock.write(Buffer.from([1, 1]));
+      else if (stage === 1) sock.write(Buffer.alloc(4));
+      else if (stage === 2) {
+        const init = Buffer.alloc(28);
+        init.writeUInt32BE(4, 20);
+        sock.write(init);
+        const chunk = Buffer.alloc(1024 * 1024);
+        const pump = () => {
+          while (sent < 64 && sock.write(chunk)) sent++;
+          if (sent < 64) sock.once("drain", () => (sent++, pump()));
+        };
+        pump();
+      }
+      stage++;
+    });
+    sock.on("error", () => {});
+  });
+  await new Promise<void>((r) => flood.listen(0, "127.0.0.1", r));
+  const { server, port } = await listen(async () => ({ host: "127.0.0.1", port: (flood.address() as net.AddressInfo).port }));
+  try {
+    const ws = new WebSocket(`ws://127.0.0.1:${port}/websockify?t=${TOKEN}`, { origin: `http://127.0.0.1:${port}` });
+    let got = 0;
+    let stage = 0;
+    ws.on("message", (d: Buffer) => {
+      got += d.length;
+      if (stage === 0) ws.send(Buffer.from("RFB 003.008\n"));
+      else if (stage === 1) ws.send(Buffer.from([1]));
+      else if (stage === 2) {
+        ws.send(Buffer.from([1]));
+        // Stop reading, like a backgrounded tab.
+        (ws as unknown as { _socket: net.Socket })._socket.pause();
+      }
+      stage++;
+    });
+    await new Promise((r) => setTimeout(r, 1500));
+    assert.ok(got < 64 * 1024 * 1024, "the browser hasn't drained everything");
+    // Without backpressure the bridge would read all 64 MiB into its queue; with it, the guest is held
+    // back at about the high-water mark plus socket buffers.
+    assert.ok(sent < 40, `the guest got to send ${sent} MiB`);
+    ws.terminate();
+  } finally {
+    server.close();
+    flood.close();
+  }
 });
