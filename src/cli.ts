@@ -11,7 +11,7 @@ import { paths, pkgRoot } from "./core/paths.ts";
 import { ensureKey } from "./core/ssh.ts";
 import * as env from "./env.ts";
 import { input, screenshot, type InputAction } from "./gui.ts";
-import { installAgents, type Agent } from "./install.ts";
+import { installAgents, type Agent, type Scope } from "./install.ts";
 import { serveViewer } from "./viewer.ts";
 
 const program = new Command();
@@ -21,7 +21,18 @@ program
   .name("osmatrix")
   .description("Local Ubuntu/Windows/macOS guests and GitHub Actions matrix runs (act) for coding agents")
   .version(version)
-  .option("--json", "machine-readable output");
+  .option("--json", "machine-readable output")
+  .addHelpText(
+    "after",
+    `
+Getting started after \`npm install\`:
+  osmatrix init             write the config, generate the ssh key, check the host
+  osmatrix install-agents   register the MCP server and the skills with Claude Code, Cursor and Codex:
+                            in your home after \`npm i -g osmatrix\`, in the project when osmatrix is
+                            one of its dependencies (--scope user|project overrides; --dry-run shows)
+The plugin (Claude Code, Codex and Cursor marketplaces) needs neither: it brings the skills and the server.
+`,
+  );
 
 function out(v: unknown) {
   if (program.opts().json) process.stdout.write(JSON.stringify(v, null, 2) + "\n");
@@ -97,14 +108,16 @@ program
   .option("--claude", "only Claude Code")
   .option("--cursor", "only Cursor")
   .option("--codex", "only Codex")
+  .option("--scope <scope>", "where to register: user (your home) or project (this project); detected from where osmatrix is installed")
   .option("--npx", "register `npx -y osmatrix@<major> mcp` instead of this install's path")
   .option("--copy-skill", "copy the skills instead of symlinking them")
   .option("--uninstall", "remove the registrations")
   .option("--dry-run", "show what would change")
   .action(
-    action((o: { claude?: boolean; cursor?: boolean; codex?: boolean; npx?: boolean; copySkill?: boolean; uninstall?: boolean; dryRun?: boolean }) => {
+    action((o: { claude?: boolean; cursor?: boolean; codex?: boolean; scope?: string; npx?: boolean; copySkill?: boolean; uninstall?: boolean; dryRun?: boolean }) => {
       const agents = (["claude", "cursor", "codex"] as Agent[]).filter((a) => o[a]);
-      return installAgents({ agents, npx: o.npx, copySkill: o.copySkill, uninstall: o.uninstall, dryRun: o.dryRun });
+      if (o.scope !== undefined && o.scope !== "user" && o.scope !== "project") throw new Error(`--scope must be user or project, not "${o.scope}"`);
+      return installAgents({ agents, scope: o.scope as Scope | undefined, npx: o.npx, copySkill: o.copySkill, uninstall: o.uninstall, dryRun: o.dryRun });
     }),
   );
 

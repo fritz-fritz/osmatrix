@@ -6,8 +6,19 @@ import { run, which } from "./core/proc.ts";
 
 export type Agent = "claude" | "cursor" | "codex";
 
+export type Scope = "user" | "project";
+
 export interface InstallOptions {
   agents?: Agent[];
+  /**
+   * Where to register: the user's home (a global install), or a project that has osmatrix among its
+   * dependencies. Detected from where osmatrix runs when unset (see detectScope).
+   */
+  scope?: Scope;
+  /** The project for scope "project"; detected when unset. */
+  projectRoot?: string;
+  /** Where detection starts; the current directory when unset. */
+  cwd?: string;
   /** Register `npx -y osmatrix mcp` instead of this checkout's absolute path. */
   npx?: boolean;
   /** Copy the skills instead of symlinking them. */
@@ -17,6 +28,29 @@ export interface InstallOptions {
 }
 
 const home = os.homedir();
+
+/**
+ * Where install-agents should register. In the project when the osmatrix that runs is that project's
+ * `node_modules/osmatrix` (a dependency: `npm i -D osmatrix`, or `npm link`; compared by real path), else
+ * in the user's home (`npm i -g`, an npx cache, a checkout). `pkgDir` is this package's root.
+ */
+export function detectScope(cwd = process.cwd(), pkgDir = pkgRoot): { scope: Scope; projectRoot?: string; reason: string } {
+  const real = (p: string) => {
+    try {
+      return fs.realpathSync(p);
+    } catch {
+      return undefined;
+    }
+  };
+  const pkg = real(pkgDir);
+  for (let dir = real(cwd) ?? path.resolve(cwd); ; dir = path.dirname(dir)) {
+    if (pkg && real(path.join(dir, "node_modules", "osmatrix")) === pkg) {
+      return { scope: "project", projectRoot: dir, reason: `osmatrix is a dependency of ${dir}` };
+    }
+    if (path.dirname(dir) === dir) break;
+  }
+  return { scope: "user", reason: `osmatrix runs from ${pkgDir}, not from a project's node_modules` };
+}
 
 function serverCommand(npx: boolean): { command: string; args: string[] } {
   if (npx) {
@@ -115,7 +149,7 @@ export interface InstalledSkills {
   skipped: string[];
 }
 
-export function installSkills(dest: string, copy: boolean, uninstall: boolean, dry: boolean, legacyNames = LEGACY_SKILL_NAMES): InstalledSkills {
+export function installSkills(dest: string, copy: boolean, uninstall: boolean, dry: boolean, legacyNames = LEGACY_SKILL_NAMES, relative = false): InstalledSkills {
   const current = skillNames();
   const installed: string[] = [];
   const skipped: string[] = [];
@@ -137,7 +171,9 @@ export function installSkills(dest: string, copy: boolean, uninstall: boolean, d
     const source = path.join(skillsDir, path.basename(target));
     if (!copy) {
       try {
-        fs.symlinkSync(source, target, process.platform === "win32" ? "junction" : "dir");
+        // Relative links (a project's, into its node_modules) survive the project moving or being cloned.
+        const to = relative ? path.relative(path.dirname(target), source) : source;
+        fs.symlinkSync(to, target, process.platform === "win32" ? "junction" : "dir");
         continue;
       } catch {
         /* fall back to copy (e.g. Windows without symlink rights) */
@@ -150,13 +186,25 @@ export function installSkills(dest: string, copy: boolean, uninstall: boolean, d
 
 export async function installAgents(opts: InstallOptions = {}) {
   const agents = opts.agents?.length ? opts.agents : (["claude", "cursor", "codex"] as Agent[]);
-  const cmd = serverCommand(!!opts.npx);
+  const detected = detectScope(opts.cwd);
+  const scope: Scope = opts.scope ?? detected.scope;
+  const root = scope === "project" ? (opts.projectRoot ?? detected.projectRoot ?? path.resolve(opts.cwd ?? process.cwd())) : home;
+  // A project's config is shared and may be committed: it runs the npm package (the project's own copy,
+  // when that satisfies the major), never a path on this machine, and its skills link into node_modules.
+  const npx = scope === "project" || !!opts.npx;
+  const cmd = serverCommand(npx);
   const dry = !!opts.dryRun;
-  const copy = opts.copySkill ?? !!opts.npx; // an npx cache path is not a stable symlink target
-  const done: Record<string, unknown> = { server: opts.uninstall ? null : cmd };
+  const copy = opts.copySkill ?? (scope === "user" && !!opts.npx); // an npx cache path is not a stable symlink target
+  const skills = (dest: string) => installSkills(dest, copy, !!opts.uninstall, dry, LEGACY_SKILL_NAMES, scope === "project");
+  const done: Record<string, unknown> = {
+    scope,
+    reason: opts.scope ? `--scope ${opts.scope}` : detected.reason,
+    root,
+    server: opts.uninstall ? null : cmd,
+  };
 
   if (agents.includes("claude")) {
-    const claude = which("claude");
+    const claude = scope === "user" ? which("claude") : undefined;
     if (claude && !dry) {
       await run(claude, ["mcp", "remove", "--scope", "user", "osmatrix"]);
       if (!opts.uninstall) {
@@ -165,21 +213,26 @@ export async function installAgents(opts: InstallOptions = {}) {
       }
       done.claudeMcp = "claude mcp add --scope user";
     } else {
-      // No CLI on PATH (e.g. desktop app only): user-scope servers live in ~/.claude.json.
-      done.claudeMcp = setMcpJson(path.join(home, ".claude.json"), opts.uninstall ? undefined : { type: "stdio", ...cmd, env: {} }, dry);
+      // User scope without the CLI on PATH (desktop app only): user servers live in ~/.claude.json. A
+      // project's live in .mcp.json at its root, which Claude Code asks to approve once.
+      const file = scope === "user" ? path.join(home, ".claude.json") : path.join(root, ".mcp.json");
+      done.claudeMcp = setMcpJson(file, opts.uninstall ? undefined : { type: "stdio", ...cmd, env: {} }, dry);
     }
-    done.claudeSkills = installSkills(path.join(home, ".claude", "skills"), copy, !!opts.uninstall, dry);
+    done.claudeSkills = skills(path.join(root, ".claude", "skills"));
   }
   if (agents.includes("cursor")) {
-    done.cursorMcp = setMcpJson(path.join(home, ".cursor", "mcp.json"), opts.uninstall ? undefined : { type: "stdio", ...cmd }, dry);
+    done.cursorMcp = setMcpJson(path.join(root, ".cursor", "mcp.json"), opts.uninstall ? undefined : { type: "stdio", ...cmd }, dry);
   }
   if (agents.includes("codex")) {
-    const codexHome = process.env.CODEX_HOME ?? path.join(home, ".codex");
-    done.codexMcp = setCodexToml(path.join(codexHome, "config.toml"), opts.uninstall ? undefined : cmd, dry);
+    const codexDir = scope === "user" ? (process.env.CODEX_HOME ?? path.join(home, ".codex")) : path.join(root, ".codex");
+    done.codexMcp = setCodexToml(path.join(codexDir, "config.toml"), opts.uninstall ? undefined : cmd, dry);
   }
   if (agents.includes("cursor") || agents.includes("codex")) {
     // Shared Agent Skills location read by Codex and Cursor.
-    done.sharedSkills = installSkills(path.join(home, ".agents", "skills"), copy, !!opts.uninstall, dry);
+    done.sharedSkills = skills(path.join(root, ".agents", "skills"));
+  }
+  if (scope === "project" && !opts.uninstall) {
+    done.notes = ["Claude Code asks once to approve the servers in .mcp.json; Codex reads .codex/config.toml in trusted projects only."];
   }
   return { dryRun: dry, uninstall: !!opts.uninstall, ...done };
 }
