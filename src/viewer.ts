@@ -31,8 +31,9 @@ const LOW_WATER = 1024 * 1024;
 /** How long the guest's VNC server gets to finish its handshake. */
 const HANDSHAKE_MS = 10_000;
 
-/** The noVNC package's root; it exports only core/rfb.js. */
-const novncDir = () => path.dirname(path.dirname(createRequire(import.meta.url).resolve("@novnc/novnc")));
+/** The noVNC package's root (it exports only core/rfb.js), looked up on first use. */
+let novncRoot: string | undefined;
+const novncDir = () => (novncRoot ??= path.dirname(path.dirname(createRequire(import.meta.url).resolve("@novnc/novnc"))));
 
 const TYPES: Record<string, string> = { ".js": "text/javascript", ".json": "application/json", ".svg": "image/svg+xml" };
 
@@ -179,9 +180,16 @@ export async function bridge(ws: WebSocket, target: VncTarget): Promise<void> {
     const fromBrowser: Buffer[] = [];
     let need = 12;
     let step: "version" | "security" | "relay" = "version";
+    // A guest that stops reading: hold the browser's input back rather than queue it without limit.
+    const toGuest = (data: Buffer) => {
+      if (!sock.write(data)) {
+        ws.pause();
+        sock.once("drain", () => ws.resume());
+      }
+    };
     const onMessage = (data: Buffer) => {
       if (step === "relay") {
-        sock.write(data);
+        toGuest(data);
         return;
       }
       fromBrowser.push(data);
@@ -215,7 +223,7 @@ export async function bridge(ws: WebSocket, target: VncTarget): Promise<void> {
         }
       }
       if (buf.length) {
-        if (step === "relay") sock.write(buf);
+        if (step === "relay") toGuest(buf);
         else fromBrowser.push(buf);
       }
     };

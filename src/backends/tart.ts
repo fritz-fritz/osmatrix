@@ -85,6 +85,8 @@ export class TartBackend implements Backend {
     // the screen from boot, with no macOS account involved; vnc() reads its address from the log.
     // The log carries tart's VNC password for this run: readable by this user only.
     fs.writeFileSync(log, "", { mode: 0o600 });
+    // Marked before the VM shows as running, so vnc() never takes this run for one without a VNC server.
+    fs.writeFileSync(this.vncRunFile, "starting");
     fs.chmodSync(log, 0o600);
     const pid = spawnDetached(this.tart(), ["run", "--no-graphics", "--vnc-experimental", this.vm], { logFile: log });
     updateState((s) => {
@@ -152,6 +154,7 @@ export class TartBackend implements Backend {
     } catch {
       /* none */
     }
+    if (vncPid === "starting") return undefined; // up() is starting it
     if (!pid || vncPid !== String(pid)) {
       // Running, but not from an `up` that started tart's VNC server (an older osmatrix, or `tart run` by hand).
       if ((await this.list()).some((v) => v.Name === this.vm && v.State === "running")) throw new Error(RESTART_FOR_VNC(this.cfg.name));

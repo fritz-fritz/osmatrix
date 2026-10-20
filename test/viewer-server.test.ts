@@ -75,7 +75,7 @@ test("viewer server: stopping with a stale record leaves the recorded pid alone"
 });
 
 test("viewer server: a guest that isn't running gets no server", async () => {
-  await assert.rejects(env.ensureViewerServer("mac", async () => false), /isn't running/);
+  await assert.rejects(env.ensureViewerServer("mac", async () => false), /display isn't up yet/);
   assert.equal(env.viewerRecord("mac"), undefined);
 });
 
@@ -93,6 +93,9 @@ test("tart: the VNC address comes from the live run started with it, the latest 
   // A run osmatrix didn't start with the VNC server: asks tart whether the VM runs (no tart here, so it throws).
   fs.writeFileSync(path.join(dir, "tart-run.vnc"), "1");
   await assert.rejects(tart.vnc());
+  // While up() is starting the run, there's simply no address yet.
+  fs.writeFileSync(path.join(dir, "tart-run.vnc"), "starting");
+  assert.equal(await tart.vnc(), undefined);
   updateState((s) => {
     delete s.pids.mac;
   });

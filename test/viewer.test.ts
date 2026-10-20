@@ -37,7 +37,6 @@ test("viewer: stopped, absent, container and ssh guests, and guests without a di
   await assert.rejects(viewerFor(guest({ backend: "container", os: "linux" }, {}), noServer), /container guest/);
   await assert.rejects(viewerFor(guest({ backend: "ssh" }, {}), noServer), /ssh guest/);
   await assert.rejects(viewerFor(guest({ backend: "qemu" }, { ports: { ssh: 2222 } }), noServer), /no display/);
-  await assert.rejects(viewerFor(guest({ backend: "tart", os: "macos" }, {}, { vnc: async () => undefined }), noServer), /no display/);
 });
 
 test("viewer: no login, user or password in what the user is shown", async () => {

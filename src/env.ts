@@ -25,7 +25,7 @@ import {
   startForward,
   type Endpoint,
 } from "./core/ssh.ts";
-import { acquireLocks } from "./core/locks.ts";
+import { acquireLocks, tryLock, unlock } from "./core/locks.ts";
 import { loadState, updateState, type ForwardRecord } from "./core/state.ts";
 
 export interface Guest {
@@ -75,8 +75,8 @@ export async function status(name?: string): Promise<(GuestStatus & { forwards?:
  */
 export async function viewer(name: string): Promise<GuestViewer> {
   const g = getGuest(name);
-  // viewerFor has just checked the guest's status; under the lock, the cheap VNC lookup is enough.
-  return viewerFor(g, (n) => ensureViewerServer(n, async () => !!(await g.backend.vnc?.().catch(() => undefined))));
+  // viewerFor checks the guest's status; under the lock, its VNC address is rechecked (once).
+  return viewerFor(g, (n) => ensureViewerServer(n, async () => !!(await g.backend.vnc?.())));
 }
 
 export type GuestViewer = Viewer & { guest: string };
@@ -92,7 +92,7 @@ export async function viewerFor(g: Guest, serve: (name: string) => Promise<strin
   const st = await g.backend.status();
   if (st.state === "absent" || st.state === "stopped") throw new Error(`${name} is ${st.state}; start it first (env_up / \`osmatrix up ${name}\`)`);
   if (st.ports?.web) return { guest: name, kind: "web", url: `http://127.0.0.1:${st.ports.web}`, how: HOW };
-  if (!g.backend.vnc || !(await g.backend.vnc())) throw new Error(`${name} has no display osmatrix can show`);
+  if (!g.backend.vnc) throw new Error(`${name} has no display osmatrix can show`);
   return { guest: name, kind: "web", url: await serve(name), how: HOW };
 }
 
@@ -101,7 +101,7 @@ export async function viewerFor(g: Guest, serve: (name: string) => Promise<strin
  * callers share one server and none is left running untracked.
  */
 async function withViewerLock<T>(name: string, fn: () => Promise<T>): Promise<T> {
-  const release = await acquireLocks([`viewer:${name}`], { pid: process.pid, run: "viewer", repo: "", leg: name }, () => {}, 100);
+  const release = await acquireLocks([`viewer:${name}`], viewerLockOwner(name), () => {}, 100);
   try {
     return await fn();
   } finally {
@@ -109,20 +109,38 @@ async function withViewerLock<T>(name: string, fn: () => Promise<T>): Promise<T>
   }
 }
 
+const viewerLockOwner = (name: string) => ({ pid: process.pid, run: "viewer", repo: "", leg: name });
+
+/** How long env_viewer waits for a stop, snapshot or reset of the guest before saying it's busy. */
+const VIEWER_LOCK_WAIT_MS = 10_000;
+
+/** withViewerLock for env_viewer: rather than wait out a long stop, snapshot or reset, say the guest is busy. */
+async function withViewerLockOrBusy<T>(name: string, fn: () => Promise<T>): Promise<T> {
+  const key = `viewer:${name}`;
+  const owner = viewerLockOwner(name);
+  const deadline = Date.now() + VIEWER_LOCK_WAIT_MS;
+  while (!tryLock(key, owner).ok) {
+    if (Date.now() > deadline) throw new Error(`${name} is being stopped, snapshotted or reset; ask for its viewer again once that finishes`);
+    await sleep(100);
+  }
+  try {
+    return await fn();
+  } finally {
+    unlock(key, owner);
+  }
+}
+
 /**
  * The URL of the guest's viewer server, started in the background unless it is already running.
  * `running` is rechecked under the lock: a guest being stopped meanwhile must not get a fresh server.
  */
-export function ensureViewerServer(name: string, running: () => Promise<boolean> = () => guestRunning(name)): Promise<string> {
-  return withViewerLock(name, async () => {
-    if (!(await running())) throw new Error(`${name} isn't running; start it first (env_up / \`osmatrix up ${name}\`)`);
+export function ensureViewerServer(name: string, running: () => Promise<boolean>): Promise<string> {
+  return withViewerLockOrBusy(name, async () => {
+    if (!(await running())) {
+      throw new Error(`${name}'s display isn't up yet (still starting, or it stopped); try again in a few seconds, or start it (env_up / \`osmatrix up ${name}\`)`);
+    }
     return startViewerServer(name);
   });
-}
-
-async function guestRunning(name: string): Promise<boolean> {
-  const st = await getGuest(name).backend.status();
-  return st.state !== "absent" && st.state !== "stopped";
 }
 
 /**
@@ -371,7 +389,8 @@ export async function down(name: string): Promise<GuestStatus> {
 export async function snapshot(name: string): Promise<GuestStatus> {
   const g = getGuest(name);
   await unforward(name, undefined, true);
-  await withViewerStopped(name, () => g.backend.snapshot());
+  // Backends that stop the guest for the copy start it again, so the viewer stays (its page reconnects).
+  await withViewerLock(name, () => g.backend.snapshot());
   return g.backend.status();
 }
 
