@@ -1,6 +1,7 @@
 import type { GuestConfig } from "../core/config.ts";
 import { ContainerBackend } from "./container.ts";
 import { DockurBackend } from "./dockur.ts";
+import { QemuMacBackend } from "./qemu-macos.ts";
 import { QemuBackend } from "./qemu.ts";
 import { SshBackend } from "./ssh.ts";
 import { TartBackend } from "./tart.ts";
@@ -15,7 +16,7 @@ export function backendFor(cfg: GuestConfig): Backend {
     case "tart":
       return new TartBackend(cfg);
     case "qemu":
-      return new QemuBackend(cfg);
+      return cfg.os === "macos" ? new QemuMacBackend(cfg) : new QemuBackend(cfg);
     case "ssh":
       return new SshBackend(cfg);
     default:

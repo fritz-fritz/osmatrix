@@ -302,7 +302,7 @@ export async function startMcp(): Promise<void> {
 
   register(
     "env_screenshot",
-    { description: "Screenshot a VM guest's display (dockur guests). Useful during OS setup or for GUI testing.", inputSchema: { guest } },
+    { description: "Screenshot a VM guest's display (dockur and qemu guests). Useful during OS setup or for GUI testing.", inputSchema: { guest } },
     safe(async ({ guest }) => {
       const s = await screenshot(guest);
       return {

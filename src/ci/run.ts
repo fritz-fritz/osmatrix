@@ -5,6 +5,7 @@ import path from "node:path";
 import YAML from "yaml";
 import { dockerBin } from "../backends/docker.ts";
 import { DockurBackend } from "../backends/dockur.ts";
+import { QemuMacBackend } from "../backends/qemu-macos.ts";
 import { ensureLinuxImage } from "../backends/linux-image.ts";
 import { ensureAct, patchedActFor, targetFromArch, type GoTarget } from "../core/act.ts";
 import { guestMsvc, guestWorkdir, loadConfig, type Config, type GuestConfig, type OsFamily } from "../core/config.ts";
@@ -778,7 +779,7 @@ async function runLeg(
       });
     } else {
       const g = getGuest(leg.target!);
-      if (g.backend instanceof DockurBackend && g.cfg.os === "macos" && !g.backend.everReady()) {
+      if ((g.backend instanceof DockurBackend || g.backend instanceof QemuMacBackend) && g.cfg.os === "macos" && !g.backend.everReady()) {
         throw new Error(
           `macOS guest "${g.cfg.name}" has not been set up yet. Run \`osmatrix setup ${g.cfg.name} --accept-license\` (MCP: env_setup) once the user agrees to Apple's macOS license; it is fully automatic (~30-60 min).`,
         );

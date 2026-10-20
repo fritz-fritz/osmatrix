@@ -47,15 +47,16 @@ export function hostTarget(platform: string = process.platform, arch: string = p
 }
 
 /**
- * The target a guest's act needs, when its configuration tells: dockur's macOS guests are Intel, tart's
- * run on Apple Silicon, Windows follows its image (dockurr/windows-arm or dockurr/windows) and Linux
- * containers share the host's act. ssh guests can be anything, so their target comes from probing them.
+ * The target a guest's act needs, when its configuration tells: dockur's and qemu's macOS guests are
+ * Intel, tart's run on Apple Silicon, Windows follows its image (dockurr/windows-arm or dockurr/windows)
+ * and Linux containers share the host's act. ssh guests can be anything, so their target comes from probing them.
  */
 export function guestTarget(g: GuestConfig): GoTarget | undefined {
   switch (g.backend) {
     case "tart":
       return "darwin/arm64";
     case "qemu":
+      if (g.os === "macos") return "darwin/amd64";
       return windowsArch(g) === "aarch64" ? "windows/arm64" : "windows/amd64";
     case "dockur":
       if (g.os === "macos") return "darwin/amd64";

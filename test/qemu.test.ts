@@ -1,8 +1,11 @@
 import assert from "node:assert/strict";
+import path from "node:path";
 import { test } from "node:test";
 import { defaultGuests, windowsArch } from "../src/core/config.ts";
 import { guestTarget } from "../src/core/act.ts";
 import { defaultAccel, qemuArgs, type QemuArgsInput } from "../src/backends/qemu.ts";
+import { macCpu, macQemuArgs, type MacQemuArgsInput } from "../src/backends/qemu-macos.ts";
+import { backendFor } from "../src/backends/index.ts";
 
 const base: QemuArgsInput = {
   arch: "aarch64",
@@ -93,4 +96,54 @@ test("a qemu guest's CPU, and the act it needs, follow its image or else the hos
   assert.equal(windowsArch({}, "x64"), "x86_64");
   assert.equal(guestTarget({ name: "w", os: "windows", backend: "qemu", image: "dockurr/windows" }), "windows/amd64");
   assert.equal(guestTarget({ name: "w", os: "windows", backend: "qemu", image: "dockurr/windows-arm" }), "windows/arm64");
+});
+
+const mac: MacQemuArgsInput = {
+  accel: "hvf",
+  platform: "darwin",
+  amdHost: false,
+  cpus: 4,
+  memory: "8G",
+  storage: "/s/15",
+  picker: false,
+  uuid: "00000000-0000-4000-8000-000000000001",
+  mac: "00:16:cb:00:00:01",
+  osk: "key",
+  sshPort: 2223,
+  vncDisplay: 2,
+  monitor: "/s/m.sock",
+  serialLog: "/s/serial.log",
+  pidFile: "/s/q.pid",
+};
+
+test("macQemuArgs: dockur's macOS machine on the host's QEMU, OpenCore with or without its boot menu", () => {
+  const a = macQemuArgs(mac);
+  assert.deepEqual(opt(a, "-accel"), ["hvf"]);
+  assert.ok(opt(a, "-cpu")[0].startsWith("host,vendor=GenuineIntel,"));
+  assert.deepEqual(opt(a, "-vga"), ["vmware"]);
+  assert.ok(opt(a, "-device").includes("isa-applesmc,osk=key"));
+  // path.join: the storage path uses the host's separators.
+  const file = (n: string) => `file=${path.join("/s/15", n)},`;
+  assert.ok(opt(a, "-drive").some((d) => d.startsWith(file("base.dmg")) && d.includes("format=dmg")));
+  assert.ok(opt(a, "-drive").some((d) => d.startsWith(file("boot.img"))));
+  assert.ok(opt(macQemuArgs({ ...mac, picker: true }), "-drive").some((d) => d.startsWith(file("boot-picker.img"))));
+  assert.deepEqual(opt(a, "-netdev"), ["user,id=hostnet0,hostfwd=tcp:127.0.0.1:2223-:22"]);
+  assert.deepEqual(opt(a, "-uuid"), [mac.uuid]);
+});
+
+test("macCpu: the host CPU on Intel; an Intel model on AMD hosts and under emulation", () => {
+  assert.ok(macCpu("hvf", false).startsWith("host,"));
+  assert.ok(macCpu("kvm", true).startsWith("Skylake-Client-v4,") && macCpu("kvm", true).includes("+invtsc"));
+  assert.ok(macCpu("tcg", false).startsWith("Skylake-Client-v4,") && macCpu("tcg", false).includes("-xsaves"));
+});
+
+test("Intel Macs run their macOS guest on the host's QEMU; Linux keeps dockur", () => {
+  const intel = defaultGuests("darwin", "x64").macos!;
+  assert.equal(intel.backend, "qemu");
+  assert.equal(intel.image, "dockurr/macos");
+  assert.ok(intel.homebrew, "Intel guests get the pinned Homebrew");
+  assert.equal(backendFor(intel).constructor.name, "QemuMacBackend");
+  assert.equal(backendFor(defaultGuests("darwin", "x64").windows!).constructor.name, "QemuBackend");
+  assert.equal(defaultGuests("linux", "x64").macos?.backend, "dockur");
+  assert.equal(guestTarget(intel), "darwin/amd64");
 });

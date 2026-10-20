@@ -411,12 +411,12 @@ export class QemuBackend implements Backend {
 }
 
 /** QEMU takes a VNC display number, so the port has to be 5900 + n. */
-async function freeVncPort(preferred: number): Promise<number> {
+export async function freeVncPort(preferred: number): Promise<number> {
   for (let p = Math.max(5900, preferred); p < 6000; p++) if (await canBind(p)) return p;
   throw new Error("no free VNC port between 5900 and 5999");
 }
 
-function dockerOk(): boolean {
+export function dockerOk(): boolean {
   try {
     dockerBin();
     return true;
@@ -461,7 +461,7 @@ export function qemuBinary(name: string): string | undefined {
 }
 
 /** Copy-on-write clone where the filesystem supports it (APFS, btrfs, XFS, ReFS), else a sparse copy. */
-async function cloneFile(from: string, to: string): Promise<void> {
+export async function cloneFile(from: string, to: string): Promise<void> {
   fs.rmSync(to, { force: true });
   if (process.platform === "win32") {
     fs.copyFileSync(from, to, fs.constants.COPYFILE_FICLONE);
@@ -473,16 +473,26 @@ async function cloneFile(from: string, to: string): Promise<void> {
 }
 
 /** Send one command to QEMU's human monitor over its unix socket or loopback TCP port. */
-function monitorCommand(monitor: string | number, cmd: string): Promise<void> {
+export async function monitorCommand(monitor: string | number, cmd: string): Promise<void> {
+  await monitorQuery(monitor, cmd);
+}
+
+/** Send one command to QEMU's human monitor and return what it printed (after its banner). */
+export function monitorQuery(monitor: string | number, cmd: string, waitMs = 500): Promise<string> {
   return new Promise((resolve, reject) => {
     const target: net.NetConnectOpts = typeof monitor === "number" ? { host: "127.0.0.1", port: monitor } : { path: monitor };
+    let out = "";
     const s = net.createConnection(target, () => {
       s.write(cmd + "\n");
       setTimeout(() => {
         s.end();
-        resolve();
-      }, 500);
+        // The monitor echoes the command line (with terminal escapes) before its output.
+        const text = out.replace(/\x1b\[[0-9;]*[A-Za-z]/g, "").replace(/\r/g, "");
+        const at = text.lastIndexOf(cmd);
+        resolve((at >= 0 ? text.slice(at + cmd.length) : text).replace(/\(qemu\)\s*$/, "").trim());
+      }, waitMs);
     });
+    s.on("data", (d) => (out += d.toString("latin1")));
     s.on("error", reject);
   });
 }
