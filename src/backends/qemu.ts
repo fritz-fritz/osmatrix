@@ -405,7 +405,7 @@ export class QemuBackend implements Backend {
 
   async vnc() {
     const rt = this.runtime();
-    if (!rt || !this.pid()) throw new Error(`${this.cfg.name} is not running`);
+    if (!rt || !this.pid()) return undefined; // not running
     return { host: "127.0.0.1", port: rt.vnc };
   }
 }

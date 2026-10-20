@@ -76,16 +76,10 @@ export async function status(name?: string): Promise<(GuestStatus & { forwards?:
 export async function viewer(name: string): Promise<GuestViewer> {
   const g = getGuest(name);
   // viewerFor checks the guest's status; under the lock, its VNC address is rechecked (once).
-  return viewerFor(g, (n) => ensureViewerServer(n, async () => !!(await g.backend.vnc?.().catch(notRunning))));
+  return viewerFor(g, (n) => ensureViewerServer(n, async () => !!(await g.backend.vnc?.())));
 }
 
 export type GuestViewer = Viewer & { guest: string };
-
-/** A backend's "not running" from vnc() means no display yet; any other error (e.g. "restart it") stands. */
-function notRunning(e: unknown): undefined {
-  if (/is not running/.test((e as Error)?.message ?? "")) return undefined;
-  throw e;
-}
 
 const HOW = "Open it in a browser. It shows the guest's screen, already signed in, and only listens on this machine.";
 
@@ -136,7 +130,10 @@ export const viewerLockHeld = (name: string) => lockHeld(viewerLockKey(name));
  * The URL of the guest's viewer server, started in the background unless it is already running.
  * `running` is rechecked under the lock: a guest being stopped meanwhile must not get a fresh server.
  */
-export function ensureViewerServer(name: string, running: () => Promise<boolean>): Promise<string> {
+export async function ensureViewerServer(name: string, running: () => Promise<boolean>): Promise<string> {
+  // A healthy server answers without the lock, so a slow probe never makes other callers wait for it.
+  const cur = viewerRecord(name);
+  if (cur && isAlive(cur.pid) && (await isViewer(cur.port, cur.id, 5000)) && (await running())) return viewerUrl(cur);
   return withViewerLock(name, async () => {
     if (!(await running())) {
       throw new Error(`${name}'s display isn't up yet (still starting, or it stopped); try again in a few seconds, or start it (env_up / \`osmatrix up ${name}\`)`);
@@ -165,20 +162,21 @@ const viewerUrl = (r: ViewerRecord) => `http://127.0.0.1:${r.port}/#t=${r.token}
 
 async function startViewerServer(name: string): Promise<string> {
   const cur = viewerRecord(name);
-  // Generous: a server busy relaying a heavy screen can be slow to answer, and replacing it cuts its page.
-  if (cur && isAlive(cur.pid) && (await isViewer(cur.port, cur.id, 5000))) return viewerUrl(cur);
+  // Rechecked under the lock (it may have been replaced meanwhile); the generous probe already ran outside.
+  if (cur && isAlive(cur.pid) && (await isViewer(cur.port, cur.id))) return viewerUrl(cur);
   // Not answering as our server (crashed, wedged, or the pid is another process's after a reboot): drop the
   // record without signalling anything. A server of ours that is merely slow exits by itself once it sees
   // its record gone (see `osmatrix _viewer`).
   fs.rmSync(viewerFile(name), { force: true });
   let lastErr: Error | undefined;
+  const log = path.join(ensureDir(paths.guestDir(name)), "viewer.log");
+  fs.writeFileSync(log, ""); // this server's log only
   // A free port can be taken before the server binds it; try a few.
   for (let attempt = 0; attempt < 3; attempt++) {
     const port = await freePort();
     const id = randomUUID();
     // The token goes through the environment, not argv, which other local users can list.
     const token = randomBytes(24).toString("base64url");
-    const log = path.join(ensureDir(paths.guestDir(name)), "viewer.log");
     const pid = spawnDetached(process.execPath, [cliEntry(), "_viewer", name, "--port", String(port), "--id", id], {
       logFile: log,
       env: { ...process.env, OSMATRIX_VIEWER_TOKEN: token },

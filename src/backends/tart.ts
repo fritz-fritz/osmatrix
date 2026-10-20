@@ -27,6 +27,10 @@ export class TartBackend implements Backend {
   private get golden() {
     return `${resourcePrefix}-${this.cfg.name}-golden`;
   }
+  /** `tart run`'s output, which carries its VNC address and password (so it's private to this user). */
+  private get runLog() {
+    return path.join(paths.guestDir(this.cfg.name), "tart-run.log");
+  }
   /** Present while the guest's runs start with tart's VNC server, so vnc() can tell them from older ones. */
   private get vncRunFile() {
     return path.join(paths.guestDir(this.cfg.name), "tart-run.vnc");
@@ -91,7 +95,8 @@ export class TartBackend implements Backend {
     if (this.cfg.cpus) set.push("--cpu", String(this.cfg.cpus));
     if (this.cfg.memory) set.push("--memory", String(sizeMiB(this.cfg.memory)));
     if (set.length > 2) await runOk(this.tart(), set);
-    const log = path.join(ensureDir(paths.guestDir(this.cfg.name)), "tart-run.log");
+    ensureDir(paths.guestDir(this.cfg.name));
+    const log = this.runLog;
     // Virtualization.framework's own VNC server (on 127.0.0.1, with a password made up for this run) shows
     // the screen from boot, with no macOS account involved; vnc() reads its address from the log.
     // The log carries tart's VNC password for this run: readable by this user only.
@@ -132,8 +137,9 @@ export class TartBackend implements Backend {
       /* fall through to tart stop */
     }
     await run(this.tart(), ["stop", this.vm], { timeoutMs: 3 * 60_000 });
-    // The next run decides for itself; one started by hand then gets the "restart it" hint from vnc().
-    fs.rmSync(this.vncRunFile, { force: true });
+    // Once stopped, the next run decides for itself (one started by hand then gets the "restart it" hint
+    // from vnc()); a VM that didn't stop keeps its VNC server, and its marker.
+    if (!(await running())) fs.rmSync(this.vncRunFile, { force: true });
   }
 
   async snapshot(): Promise<void> {
@@ -166,11 +172,14 @@ export class TartBackend implements Backend {
     // Running, but not started by an `up` that turned tart's VNC server on: an older osmatrix, `tart run`
     // by hand, or a tart without --vnc-experimental.
     if (!fs.existsSync(this.vncRunFile)) throw new Error(RESTART_FOR_VNC(this.cfg.name));
-    // Our `tart run` has exited (the VM is going down) or isn't ours: its log's address is stale.
-    if (!loadState().pids[this.cfg.name]) return undefined;
+    // Running, but our `tart run` has exited: the VM is going down, or was started again outside osmatrix.
+    // Either way the log's address is stale.
+    if (!loadState().pids[this.cfg.name]) {
+      throw new Error(`${this.cfg.name} is running, but not from osmatrix's \`tart run\` (it may be shutting down); if it stays up, restart it (env_down, then env_up) to view or screenshot it`);
+    }
     let log: string;
     try {
-      log = fs.readFileSync(path.join(paths.guestDir(this.cfg.name), "tart-run.log"), "utf8");
+      log = fs.readFileSync(this.runLog, "utf8");
     } catch {
       return undefined;
     }

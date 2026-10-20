@@ -207,7 +207,13 @@ function comboKeysyms(combo: string): number[] {
 async function connectGuest(name: string): Promise<Rfb> {
   const g = getGuest(name);
   const v = g.backend.vnc ? await g.backend.vnc() : undefined;
-  if (!v) throw new Error(`guest ${name} (${g.cfg.backend}) has no VNC display; screenshots/input are supported for dockur, qemu and tart guests`);
+  if (!v) {
+    throw new Error(
+      g.backend.vnc
+        ? `guest ${name} has no VNC display right now; is it running (env_up)?`
+        : `guest ${name} (${g.cfg.backend}) has no VNC display; screenshots/input are supported for dockur, qemu and tart guests`,
+    );
+  }
   const rfb = new Rfb();
   await rfb.connect(v.host, v.port, v.password);
   return rfb;

@@ -96,9 +96,10 @@ test("tart: the VNC address comes from the running VM's run started with it, the
   setPid(process.pid);
   fs.writeFileSync(path.join(dir, "tart-run.vnc"), "");
   assert.deepEqual(await tart.vnc(), { host: "127.0.0.1", port: 5999, password: "new%pw" });
-  // Our `tart run` gone while tart still lists the VM: going down, the log's address is stale.
+  // Our `tart run` gone while tart still lists the VM (going down, or started again by hand): the log's
+  // address is stale, and if it stays up it needs a restart.
   setPid();
-  assert.equal(await tart.vnc(), undefined);
+  await assert.rejects(tart.vnc(), /not from osmatrix's `tart run`/);
   // VM not running (e.g. after a reboot, whatever process has the old pid): nothing.
   setPid(process.pid);
   running = false;

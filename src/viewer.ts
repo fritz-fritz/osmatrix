@@ -112,13 +112,13 @@ export function viewerServer(title: string, target: VncTarget, opts: ViewerOptio
       res.writeHead(403).end();
       return;
     }
-    const p = requestUrl(req)?.pathname;
-    if (p === undefined) {
+    const url = requestUrl(req);
+    const p = url?.pathname;
+    if (!url || p === undefined) {
       res.writeHead(400).end();
       return;
     }
     if (p === "/status") {
-      const url = requestUrl(req)!;
       if (!tokenMatches(url.searchParams.get("t"), opts.token)) {
         res.writeHead(403).end();
         return;
@@ -213,7 +213,7 @@ export async function bridge(ws: WebSocket, target: VncTarget): Promise<void> {
     sock.on("close", () => ws.close());
 
     // To the browser: RFB 3.8, one security type, None; then its ClientInit and the guest's ServerInit pass through.
-    const fromBrowser: Buffer[] = [];
+    let pending = Buffer.alloc(0);
     let need = 12;
     let step: "version" | "security" | "relay" = "version";
     // A guest that stops reading: hold the browser's input back rather than queue it without limit.
@@ -233,9 +233,8 @@ export async function bridge(ws: WebSocket, target: VncTarget): Promise<void> {
         toGuest(data);
         return;
       }
-      fromBrowser.push(data);
-      let buf = Buffer.concat(fromBrowser);
-      fromBrowser.length = 0;
+      let buf = Buffer.concat([pending, data]);
+      pending = Buffer.alloc(0);
       while (step !== "relay" && buf.length >= need) {
         buf = buf.subarray(need);
         if (step === "version") {
@@ -261,7 +260,7 @@ export async function bridge(ws: WebSocket, target: VncTarget): Promise<void> {
       }
       if (buf.length) {
         if (step === "relay") toGuest(buf);
-        else fromBrowser.push(buf);
+        else pending = buf;
       }
     };
     ws.on("message", (d: Buffer) => onMessage(d));

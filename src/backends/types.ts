@@ -54,7 +54,8 @@ export interface Backend {
    */
   bootProbe?(): Promise<{ io: number; boots: number } | undefined>;
   /**
-   * VNC endpoint for screenshots/input and the browser viewer, when available. `password` is set when the
+   * VNC endpoint for screenshots/input and the browser viewer; undefined while there is none (not running,
+   * still starting). Throws only for something the user must act on. `password` is set when the
    * server wants VNC authentication with a password osmatrix holds (tart's per-run one); it never reaches the user.
    */
   vnc?(): Promise<{ host: string; port: number; password?: string } | undefined>;
