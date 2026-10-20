@@ -235,7 +235,7 @@ export class QemuMacBackend implements Backend, MacInstallVm {
       return { ...base, state: "needs-ssh-setup", urls, ports, detail: `sshd is up but the osmatrix key is not authorized. Run: osmatrix setup-ssh ${this.cfg.name} --user <guest user>` };
     }
     const detail = this.everReady()
-      ? `booting (accelerator: ${this.accel}; watch with env_screenshot or a VNC viewer at ${urls.vnc})`
+      ? `booting (accelerator: ${this.accel}; watch in a browser with env_viewer, or with env_screenshot)`
       : `not set up yet, or setup in progress. Fully automatic: \`osmatrix setup ${this.cfg.name}\` (MCP: env_setup).`;
     return { ...base, state: "booting", urls, ports, detail };
   }
@@ -380,7 +380,7 @@ export class QemuMacBackend implements Backend, MacInstallVm {
 
   async vnc() {
     const rt = this.runtime();
-    if (!rt || !this.pid()) throw new Error(`${this.cfg.name} is not running`);
+    if (!rt || !this.pid()) return undefined; // not running
     return { host: "127.0.0.1", port: rt.vnc };
   }
 
