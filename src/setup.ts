@@ -93,8 +93,14 @@ export async function setup(name: string, opts: SetupOptions = {}): Promise<Gues
   };
   try {
     const mac = g.cfg.os === "macos" ? macInstallVm(g) : undefined;
-    if (mac) await setupIntelMac(g, mac, opts, phase, log);
-    else await setupGeneric(g, phase);
+    if (mac) {
+      try {
+        await setupIntelMac(g, mac, opts, phase, log);
+      } finally {
+        // QEMU's bridge is an HTTP server in this process: left open, setup never exits.
+        await mac.bridgeStop?.();
+      }
+    } else await setupGeneric(g, phase);
     const st = await g.backend.status();
     if (st.state !== "ready") throw new Error(`guest not ready after setup: ${st.state} ${st.detail ?? ""}`);
     if (!st.hasSnapshot) {

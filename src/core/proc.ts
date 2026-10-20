@@ -140,3 +140,24 @@ export class TailBuffer {
 }
 
 export const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/** Seconds in ps's `etime` column ([[dd-]hh:]mm:ss); undefined when it doesn't parse. */
+export function parseEtime(s: string): number | undefined {
+  const m = /^(?:(?:(\d+)-)?(\d+):)?(\d+):(\d+)$/.exec(s.trim());
+  if (!m) return undefined;
+  const [, d = "0", h = "0", min, sec] = m;
+  return ((Number(d) * 24 + Number(h)) * 60 + Number(min)) * 60 + Number(sec);
+}
+
+/** When a running process started (ms since the epoch); undefined when it isn't running or can't be told. */
+export async function processStartedAt(pid: number): Promise<number | undefined> {
+  if (process.platform === "win32") {
+    const r = await run("powershell", ["-NoProfile", "-NonInteractive", "-Command", `(Get-Process -Id ${pid} -ErrorAction Stop).StartTime.ToUniversalTime().ToString('o')`], { timeoutMs: 30_000 });
+    const t = Date.parse(r.stdout.trim());
+    return r.code === 0 && !Number.isNaN(t) ? t : undefined;
+  }
+  // etime (not lstart or etimes) reads the same on Linux, macOS and the BSDs.
+  const r = await run("ps", ["-o", "etime=", "-p", String(pid)]);
+  const sec = r.code === 0 ? parseEtime(r.stdout) : undefined;
+  return sec === undefined ? undefined : Date.now() - sec * 1000;
+}

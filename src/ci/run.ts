@@ -12,7 +12,7 @@ import { guestMsvc, guestWorkdir, loadConfig, type Config, type GuestConfig, typ
 import { acquireLocks } from "../core/locks.ts";
 import { dockerReach, selinuxEnforcing } from "../core/nesting.ts";
 import { cliEntry, ensureDir } from "../core/paths.ts";
-import { isAlive, run, sleep, spawnDetached } from "../core/proc.ts";
+import { isAlive, processStartedAt, run, sleep, spawnDetached } from "../core/proc.ts";
 import {
   cloneWorktree,
   createBundle,
@@ -74,8 +74,6 @@ export interface LegResult {
   neededOnly?: boolean;
   /** Needed jobs replayed into this leg: the result it got for each, and the legs that produced it. */
   replayed?: { job: string; result: string; legs: string[] }[];
-  /** Host legs: act's job containers, recorded while they run, so ci_cancel can clean up after a crashed worker. */
-  containers?: string[];
 }
 
 export interface RunStatus {
@@ -318,9 +316,9 @@ export async function ciCancel(repoIn: string, idIn?: string): Promise<RunStatus
   }
   // The worker is gone or stuck: stop what it may have left running, then record the cancellation.
   const raw = JSON.parse(fs.readFileSync(path.join(dir, "status.json"), "utf8")) as RunStatus;
-  if (raw.pid && raw.pid !== process.pid) await killTree(raw.pid, id);
+  if (raw.pid && raw.pid !== process.pid) await killTree(raw.pid, id, raw.startedAt);
   const notes: string[] = [];
-  notes.push(...(await removeRunContainers(id, raw.legs.flatMap((l) => l.containers ?? []))));
+  notes.push(...(await removeRunContainers(id)));
   new HostCheckout(repo, dir).dispose();
   // Legs the worker already marked cancelled may still have act running in their guest.
   const started = raw.legs.filter((l) => l.startedAt && (l.state === "running" || l.state === "cancelled"));
@@ -345,37 +343,54 @@ export async function ciCancel(repoIn: string, idIn?: string): Promise<RunStatus
   return ciStatus(repo, id);
 }
 
+/** Mark a leg cancelled, finished now. */
+export function cancelLeg(l: LegResult, why = "cancelled", now = new Date().toISOString()) {
+  l.state = "cancelled";
+  l.error = why;
+  l.waitingFor = undefined;
+  l.finishedAt = now;
+  if (l.startedAt) l.durationSec = Math.round((Date.parse(now) - Date.parse(l.startedAt)) / 1000);
+}
+
 /** Mark a cancelled run's unfinished legs and the run itself. */
 function finishCancelled(sf: StatusFile, why = "cancelled") {
   const now = new Date().toISOString();
-  for (const l of sf.s.legs) {
-    if (l.state !== "pending" && l.state !== "running") continue;
-    l.state = "cancelled";
-    l.error = why;
-    l.waitingFor = undefined;
-    l.finishedAt = now;
-    if (l.startedAt) l.durationSec = Math.round((Date.parse(now) - Date.parse(l.startedAt)) / 1000);
-  }
+  for (const l of sf.s.legs) if (l.state === "pending" || l.state === "running") cancelLeg(l, why, now);
   sf.s.state = "done";
   sf.s.cancelled = true;
   sf.s.finishedAt ??= now;
 }
 
+/** How long after a run was created its worker may have started (ciRun spawns it right after). */
+const WORKER_START_SLACK_MS = 60_000;
+
+/**
+ * Whether a live process with a run's recorded worker pid is that worker: one that started after the run
+ * was created (plus a margin) has the pid reused, after the worker died. A foreground (--wait) run's
+ * worker started before the run. Unknown start times count as not the worker.
+ */
+export function isRunWorker(processStartedMs: number | undefined, runStartedAt: string): boolean {
+  const created = Date.parse(runStartedAt);
+  return processStartedMs !== undefined && !Number.isNaN(created) && processStartedMs <= created + WORKER_START_SLACK_MS;
+}
+
 /**
  * Kill a run's worker and everything it started. On POSIX the worker leads its own process group, which
- * outlives it: when it crashed, act may still run there. A group whose leader is gone counts only when a
- * process in it has the run's id on its command line (act's artifact store path), so a reused pid is safe.
+ * outlives it: when it crashed, act may still run there. A live process with the worker's pid counts only
+ * when it started with the run (isRunWorker), and a group whose leader is gone only when a process in it
+ * has the run's id on its command line (act's artifact store path), so a reused pid is safe.
  */
-async function killTree(pid: number, runId: string) {
+async function killTree(pid: number, runId: string, runStartedAt: string) {
+  const worker = async () => isAlive(pid) && isRunWorker(await processStartedAt(pid), runStartedAt);
   if (process.platform === "win32") {
-    if (isAlive(pid)) await run("taskkill", ["/PID", String(pid), "/T", "/F"]);
+    if (await worker()) await run("taskkill", ["/PID", String(pid), "/T", "/F"]);
     // act outlives a dead worker; find it by the run's directory in its arguments (split, so this
     // script's own command line doesn't match).
     const script = `$pat = '*' + '${runId}' + '*'; Get-CimInstance Win32_Process -Filter "Name = 'act.exe'" | Where-Object { $_.CommandLine -like $pat } | ForEach-Object { & taskkill.exe /PID $_.ProcessId /T /F *> $null }; exit 0`;
     await run("powershell", ["-NoProfile", "-NonInteractive", "-Command", script], { timeoutMs: 60_000 });
     return;
   }
-  const ours = async () => isAlive(pid) || (await run("pgrep", ["-g", String(pid), "-f", runId])).code === 0;
+  const ours = async () => (await worker()) || (await run("pgrep", ["-g", String(pid), "-f", runId])).code === 0;
   if (!(await ours())) return;
   for (const sig of ["SIGINT", "SIGKILL"] as const) {
     try {
@@ -399,16 +414,16 @@ async function runContainers(runId: string): Promise<string[]> {
 }
 
 /**
- * Remove what act left on the host's Docker for a run: its job containers (labelled, or `known` from the
- * run's status) and everything act names after one (pkg/runner createContainerName): service containers
- * start with the job container's name cut to 63 characters, and the job's network and volumes (-env,
- * -filecmds) with its whole name, which ends in a sha256, so nothing else matches. act removes all of it
+ * Remove what act left on the host's Docker for a run: its job containers (labelled in hostActArgs, so
+ * found without the worker) and everything act names after one (pkg/runner createContainerName): service
+ * containers start with the job container's name cut to 63 characters, and the job's network and volumes
+ * (-env, -filecmds) with its whole name, which ends in a sha256, so nothing else matches. act removes all of it
  * itself on SIGINT; this is for an act that died first (one whose worker died gets SIGPIPE as soon as it
  * logs). Returns what it removed, for the log.
  */
-export async function removeRunContainers(runId: string, known: string[] = []): Promise<string[]> {
+export async function removeRunContainers(runId: string): Promise<string[]> {
   const docker = dockerBin();
-  const jobs = [...new Set([...known, ...(await runContainers(runId))])];
+  const jobs = await runContainers(runId);
   if (!jobs.length) return [];
   const list = async (args: string[]) => {
     const r = await run(docker, args);
@@ -531,9 +546,7 @@ export async function worker(repo: string, id: string): Promise<void> {
               (e: Error): Replay => ({ needs: {}, error: `couldn't collect the results of the legs it needs: ${e.message}` }),
             );
             if (cancel.requested) {
-              const r = sf.s.legs.find((l) => l.id === leg.id)!;
-              r.state = "cancelled";
-              r.error = "cancelled";
+              cancelLeg(sf.s.legs.find((l) => l.id === leg.id)!);
               sf.save();
               outcomes.get(leg.id)!.resolve({ state: "cancelled", error: "cancelled", finished: Date.now() });
               continue;
@@ -551,9 +564,10 @@ export async function worker(repo: string, id: string): Promise<void> {
       }),
     );
   } finally {
+    // Also when the loop throws: the interval would keep this worker alive, its run "running" for good.
+    clearInterval(watch);
     checkout.dispose();
   }
-  clearInterval(watch);
   if (cancel.requested) finishCancelled(sf);
   sf.s.state = "done";
   sf.s.finishedAt = new Date().toISOString();
@@ -687,6 +701,9 @@ async function runLeg(
   }, leg.job);
   const timeoutMs = (sf.s.options.timeoutMin ?? 60) * 60_000;
   const note = (m: string) => log.write(`[osmatrix] ${m}\n`);
+  // For a cancel's stop function, which can still be running after the leg ended and closed `log` (a write
+  // to an ended stream emits an unhandled 'error' and crashes the worker).
+  const lateNote = (m: string) => (log.writableEnded ? fs.appendFileSync(logFile, `[osmatrix] ${m}\n`) : note(m));
   // Whether the leg runs osmatrix's patched act; stock act's known differences are only hinted at otherwise.
   let patched = false;
   const outcome = (): LegOutcome => ({ state: r.state, record, error: r.error, finished: Date.now() });
@@ -757,26 +774,15 @@ async function runLeg(
       const cwd = await checkout.dir((l) => log.write(l + "\n"));
       log.write(`$ act ${args.join(" ")}\n`);
       if (cancel.requested) throw new Cancelled();
-      code = await streamProcess(act.path, args, cwd, parser, timeoutMs, (child) => {
-        // Record act's job containers while they run: a cancel after this worker died has only the status.
-        const track = setInterval(async () => {
-          const names = (await runContainers(sf.s.id)).filter((n) => !r.containers?.includes(n));
-          if (!names.length) return;
-          r.containers = [...(r.containers ?? []), ...names];
-          sf.save();
-        }, 5000);
-        const unregister = cancel.onCancel(async () => {
+      code = await streamProcess(act.path, args, cwd, parser, timeoutMs, (child) =>
+        cancel.onCancel(async () => {
           // act stops the job and removes its containers, services, networks and volumes on SIGINT.
           child.kill("SIGINT");
           if (!(await exited(child, 30_000))) child.kill("SIGKILL");
           await exited(child, 10_000);
-          for (const n of await removeRunContainers(sf.s.id, r.containers)) log.write(`[osmatrix] ${n}\n`);
-        });
-        return () => {
-          clearInterval(track);
-          unregister();
-        };
-      });
+          for (const n of await removeRunContainers(sf.s.id)) lateNote(n);
+        }),
+      );
     } else {
       const g = getGuest(leg.target!);
       if ((g.backend instanceof DockurBackend || g.backend instanceof QemuMacBackend) && g.cfg.os === "macos" && !g.backend.everReady()) {
@@ -827,7 +833,7 @@ async function runLeg(
           cancel.onCancel(async () => {
             // Closing ssh leaves act running in the guest: stop it there, which ends the session.
             const r = await sshExec(ep, guestCancelCmd(ep, sf.s.id), { timeoutMs: 60_000 }).catch((e: Error) => ({ code: -1, stderr: e.message }));
-            if (r.code !== 0) log.write(`[osmatrix] warning: couldn't stop act in guest ${g.cfg.name}: ${r.stderr.trim() || `exit code ${r.code}`}\n`);
+            if (r.code !== 0) lateNote(`warning: couldn't stop act in guest ${g.cfg.name}: ${r.stderr.trim() || `exit code ${r.code}`}`);
             if (!(await exited(child, 15_000))) child.kill();
           }),
         );
@@ -1041,6 +1047,8 @@ class HostCheckout {
     log(`[osmatrix] ${this.repo} keeps its git directory outside the work tree (a linked worktree, say), which act doesn't copy into job containers; host legs run in a clone of it at ${this.clone}, with its uncommitted changes`);
     try {
       await cloneWorktree(this.repo, this.clone);
+      const copied = copyActCwdFiles(this.repo, this.clone);
+      if (copied.length) log(`[osmatrix] copied ${copied.join(", ")} into the clone: act reads ${copied.length > 1 ? "them" : "it"} from the directory it runs in, and the clone leaves out ignored files`);
       return this.clone;
     } catch (e) {
       fs.rmSync(this.clone, { recursive: true, force: true });
@@ -1056,6 +1064,28 @@ class HostCheckout {
       /* left for the next cleanup of the run directory */
     }
   }
+}
+
+/**
+ * The files act reads from the directory it runs in by default: its options (.actrc) and --env-file,
+ * --var-file and --input-file. .secrets isn't among them: resolveSecretFile passes the checkout's own.
+ */
+const ACT_CWD_FILES = [".actrc", ".env", ".vars", ".input"];
+
+/**
+ * Copy the act files (ACT_CWD_FILES) that `from` has and `to` lacks: usually ignored by git, so a clone of
+ * the work tree leaves them out. Returns the names copied.
+ */
+export function copyActCwdFiles(from: string, to: string): string[] {
+  const copied: string[] = [];
+  for (const f of ACT_CWD_FILES) {
+    const src = path.join(from, f);
+    const dest = path.join(to, f);
+    if (!fs.existsSync(src) || !fs.statSync(src).isFile() || fs.existsSync(dest)) continue;
+    fs.copyFileSync(src, dest);
+    copied.push(f);
+  }
+  return copied;
 }
 
 // ---------- replayed needs (see replay.ts) ----------
