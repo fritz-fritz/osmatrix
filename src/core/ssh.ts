@@ -330,19 +330,37 @@ export async function startForward(ep: Endpoint, kind: "local" | "reverse", host
   throw new Error(`forward did not come up: ${fs.readFileSync(logFile, "utf8").trim()}`);
 }
 
+/** What shutdownMacOverSsh calls, replaceable in tests. */
+export interface ShutdownDeps {
+  probe: typeof sshProbe;
+  exec: typeof sshExec;
+  sleep: (ms: number) => Promise<unknown>;
+  now: () => number;
+  timeoutMs: number;
+}
+
+const SHUTDOWN_DEPS: ShutdownDeps = { probe: sshProbe, exec: sshExec, sleep, now: Date.now, timeoutMs: 120_000 };
+
 /**
  * Shut a macOS guest down over ssh and wait (up to 120 s) until `running` reports it stopped. macOS
  * answers the ACPI power button and Virtualization.framework's stop request with a dialog, not a
  * shutdown, so backends that only ask the VM to stop end up killing it after their timeout: slow, and
- * an unclean power-off. Needs passwordless sudo, which osmatrix's setup gives the guest user. Returns
- * false (the caller stops the VM its usual way) when ssh doesn't answer or sudo needs a password.
+ * an unclean power-off. Needs passwordless sudo, which osmatrix's setup gives the guest user.
+ *
+ * Never throws: it returns false (the caller then stops the VM its usual way) when ssh doesn't answer
+ * or can't run (no ssh client), sudo needs a password, or the guest is still running at the deadline.
  */
-export async function shutdownMacOverSsh(ep: Endpoint, running: () => Promise<boolean>): Promise<boolean> {
-  if ((await sshProbe(ep)) !== "ok") return false;
-  const r = await sshExec(ep, "sudo -n shutdown -h now", { timeoutMs: 30_000 }).catch(() => undefined);
-  // ssh may drop as the guest goes down; only a refusal (no passwordless sudo) means it didn't start.
-  if (r && r.code !== 0 && /password|sudoers|not allowed/i.test(r.stderr)) return false;
-  const deadline = Date.now() + 120_000;
-  while (Date.now() < deadline && (await running())) await sleep(1000);
-  return !(await running());
+export async function shutdownMacOverSsh(ep: Endpoint, running: () => Promise<boolean>, deps: Partial<ShutdownDeps> = {}): Promise<boolean> {
+  const d = { ...SHUTDOWN_DEPS, ...deps };
+  try {
+    if ((await d.probe(ep)) !== "ok") return false;
+    const r = await d.exec(ep, "sudo -n shutdown -h now", { timeoutMs: 30_000 }).catch(() => undefined);
+    // ssh may drop as the guest goes down; only a refusal (no passwordless sudo) means it didn't start.
+    if (r && r.code !== 0 && /password|sudoers|not allowed/i.test(r.stderr)) return false;
+    const deadline = d.now() + d.timeoutMs;
+    while (d.now() < deadline && (await running())) await d.sleep(1000);
+    return !(await running());
+  } catch {
+    return false;
+  }
 }
