@@ -26,7 +26,20 @@ export const CLIENTS = {
 };
 
 /** Files every client's bundled plugin carries (plus that client's manifest): what a client reads from the repository. */
-export const BUNDLE_FILES = ["skills", "assets/logo.svg", "assets/logo.png", "assets/social-preview.svg", "README.md", "LICENSE", "PRIVACY.md", "TERMS.md", "mcp.json"];
+// assets/social-preview.svg (the README's banner on GitHub) stays out: no client reads it, and the bundled
+// README points at the tagged copy instead (bundleReadme).
+export const BUNDLE_FILES = ["skills", "assets/logo.svg", "assets/logo.png", "README.md", "LICENSE", "PRIVACY.md", "TERMS.md", "mcp.json"];
+
+/**
+ * A bundle's README: the bundle carries only part of the repository, so Markdown links and HTML `src`
+ * attributes to anything else point at the tagged source (raw files for `src`, so images still render).
+ * `has(path)` says whether the bundle carries that path.
+ */
+export function bundleReadme(text, has, homepage, version) {
+  return text
+    .replace(/\]\(([^)#\s:]+)((?:#[^)]*)?)\)/g, (m, target, hash) => (has(target) ? m : `](${homepage}/blob/v${version}/${target}${hash})`))
+    .replace(/\bsrc="([^"#\s:]+)"/g, (m, target) => (has(target) ? m : `src="${homepage}/raw/v${version}/${target}"`));
+}
 
 /** The MCP args a plugin must use: the npm major pin, or the runtime tarball bundled inside the plugin. */
 export function expectedMcpArgs(client, version, bundled) {
