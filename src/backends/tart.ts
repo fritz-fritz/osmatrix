@@ -2,7 +2,7 @@ import path from "node:path";
 import { guestShell, type GuestConfig } from "../core/config.ts";
 import { ensureDir, paths, resourcePrefix } from "../core/paths.ts";
 import { run, runOk, spawnDetached, which } from "../core/proc.ts";
-import { ensureKey, sshProbe, type Endpoint } from "../core/ssh.ts";
+import { ensureKey, shutdownMacOverSsh, sshProbe, type Endpoint } from "../core/ssh.ts";
 import { updateState } from "../core/state.ts";
 import type { Backend, GuestStatus, Support, Viewer } from "./types.ts";
 import { sizeMiB } from "../core/sizing.ts";
@@ -89,7 +89,19 @@ export class TartBackend implements Backend {
     return r.code === 0;
   }
 
+  /**
+   * `tart stop` asks the VM to stop and force-stops it after 30 s; a macOS guest answers that request
+   * with a dialog, not a shutdown. A reachable macOS guest is shut down over ssh first, so it stops
+   * cleanly; `tart stop` then handles whatever is still running.
+   */
   async down(): Promise<void> {
+    const running = async () => (await this.list()).some((v) => v.Name === this.vm && v.State === "running");
+    try {
+      // Optional: no address yet (still booting), no key or no ssh all fall through to tart stop.
+      if (this.cfg.os === "macos" && (await running())) await shutdownMacOverSsh(await this.endpoint(), running);
+    } catch {
+      /* fall through to tart stop */
+    }
     await run(this.tart(), ["stop", this.vm], { timeoutMs: 3 * 60_000 });
   }
 
