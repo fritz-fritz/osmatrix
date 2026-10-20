@@ -783,13 +783,13 @@ async function runLeg(
       log.write(`$ act ${args.join(" ")}\n`);
       if (cancel.requested) throw new Cancelled();
       code = await streamProcess(act.path, args, cwd, parser, timeoutMs, (child) => {
-        // Record act's job container once it exists (then stop looking): if act dies mid-teardown after
-        // removing it, its name still finds the job's network, volumes and services.
+        // Record act's job containers while act runs (replay stubs, the job, a collector: one after the
+        // other), saving only when a new one appears: if act dies mid-teardown after removing one, its name
+        // still finds that job's network, volumes and services.
         const track = setInterval(async () => {
-          const names = await runContainers(sf.s.id);
+          const names = (await runContainers(sf.s.id)).filter((n) => !r.containers?.includes(n));
           if (!names.length) return;
-          clearInterval(track);
-          r.containers = [...new Set([...(r.containers ?? []), ...names])];
+          r.containers = [...(r.containers ?? []), ...names];
           sf.save();
         }, 5000);
         const unregister = cancel.onCancel(async () => {
