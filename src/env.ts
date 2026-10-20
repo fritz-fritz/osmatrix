@@ -149,9 +149,7 @@ export const viewerLockHeld = (name: string) => lockHeld(viewerLockKey(name));
  * `running` is rechecked under the lock: a guest being stopped meanwhile must not get a fresh server.
  */
 export async function ensureViewerServer(name: string, running: () => Promise<boolean>): Promise<string> {
-  // A healthy server answers without the lock, so a slow probe never makes other callers wait for it.
-  const cur = viewerRecord(name);
-  if (cur && isAlive(cur.pid) && (await isViewer(cur.port, cur.id, cur.token, 5000)) && (await running())) return viewerUrl(cur);
+  // All under the lock teardown takes too, so a server being stopped is never handed out.
   return withViewerLock(name, async () => {
     if (!(await running())) {
       throw new DisplayNotUp(`${name}'s display isn't up yet (still starting); try again in a few seconds`);
@@ -167,9 +165,18 @@ export async function ensureViewerServer(name: string, running: () => Promise<bo
 type ViewerRecord = { pid: number; port: number; id: string; token: string };
 const viewerFile = (name: string) => path.join(paths.guestDir(name), "viewer.json");
 
-/** For a viewer server exiting by itself: drop its record, if it's still its own. */
-export function dropViewerRecord(name: string, id: string): void {
-  if (viewerRecord(name)?.id === id) fs.rmSync(viewerFile(name), { force: true });
+/**
+ * For a viewer server exiting by itself: drop its record, if it's still its own. Under the lock, so a
+ * replacement published meanwhile isn't removed; best effort if the lock stays busy.
+ */
+export async function dropViewerRecord(name: string, id: string): Promise<void> {
+  await withViewerLock(
+    name,
+    async () => {
+      if (viewerRecord(name)?.id === id) fs.rmSync(viewerFile(name), { force: true });
+    },
+    30_000,
+  ).catch(() => undefined);
 }
 
 export function viewerRecord(name: string): ViewerRecord | undefined {
@@ -185,8 +192,8 @@ const viewerUrl = (r: ViewerRecord) => `http://127.0.0.1:${r.port}/#t=${r.token}
 
 async function startViewerServer(name: string): Promise<string> {
   const cur = viewerRecord(name);
-  // Rechecked under the lock (it may have been replaced meanwhile); the generous probe already ran outside.
-  if (cur && isAlive(cur.pid) && (await isViewer(cur.port, cur.id, cur.token))) return viewerUrl(cur);
+  // Generous: a server busy relaying a heavy screen can be slow to answer, and replacing it cuts its page.
+  if (cur && isAlive(cur.pid) && (await isViewer(cur.port, cur.id, cur.token, 5000))) return viewerUrl(cur);
   // Not answering as our server (crashed, wedged, or the pid is another process's after a reboot): drop the
   // record without signalling anything. A server of ours that is merely slow exits by itself once it sees
   // its record gone (see `osmatrix _viewer`).
