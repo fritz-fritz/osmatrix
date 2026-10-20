@@ -4,7 +4,7 @@ import { ensureDir, paths, resourcePrefix } from "../core/paths.ts";
 import { run, runOk, spawnDetached, which } from "../core/proc.ts";
 import { ensureKey, shutdownMacOverSsh, sshProbe, type Endpoint } from "../core/ssh.ts";
 import { updateState } from "../core/state.ts";
-import type { Backend, GuestStatus, Support } from "./types.ts";
+import type { Backend, GuestStatus, Support, Viewer } from "./types.ts";
 import { sizeMiB } from "../core/sizing.ts";
 
 /** macOS (or Linux) VMs on Apple Silicon via cirruslabs/tart (Virtualization.framework). */
@@ -123,6 +123,16 @@ export class TartBackend implements Backend {
     await this.down();
     await run(this.tart(), ["delete", this.vm]);
     await run(this.tart(), ["delete", this.golden]);
+  }
+
+  /** tart runs headless; cirruslabs images have Screen Sharing on, reachable at the VM's own address. */
+  async viewer(): Promise<Viewer> {
+    const ip = (await runOk(this.tart(), ["ip", "--wait", "5", this.vm])).trim();
+    return {
+      kind: "vnc",
+      url: `vnc://${ip}`,
+      how: `Open it with Screen Sharing (\`open vnc://${ip}\`) and log in as the guest user, \`${this.cfg.user ?? "admin"}\`.`,
+    };
   }
 
   async endpoint(): Promise<Endpoint> {

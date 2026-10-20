@@ -2,6 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { backendFor, type Backend, type GuestStatus } from "./backends/index.ts";
+import type { Viewer } from "./backends/types.ts";
 import { guestArm64Brew, guestHomebrew, guestMsvc, guestWorkdir, homebrewProvisionEnv, loadConfig, readRawConfig, writeConfig, type GuestConfig } from "./core/config.ts";
 import { macArm64Image, runnerHomebrew } from "./core/runner-images.ts";
 import { checkSizing, requirements, type Sizing } from "./core/sizing.ts";
@@ -60,6 +61,54 @@ export async function status(name?: string): Promise<(GuestStatus & { forwards?:
       return f.length ? { ...withSetup, forwards: f } : withSetup;
     }),
   );
+}
+
+/**
+ * Where the user can watch and use a running guest's screen: dockur's noVNC web viewer (the host port
+ * Docker actually published, which differs from the 8006 in dockur's log when that port was taken), the
+ * VNC display of a qemu guest, or Screen Sharing for tart. Includes the guest login osmatrix created,
+ * as a file path rather than the password itself.
+ */
+export async function viewer(name: string): Promise<GuestViewer> {
+  return viewerFor(getGuest(name), path.join(paths.guestDir(name), "credentials.json"));
+}
+
+export type GuestViewer = Viewer & { guest: string; login?: { user: string; passwordFile: string } };
+
+/** viewer() for a resolved guest; `credentialsFile` is where osmatrix keeps the account it created. */
+export async function viewerFor(g: Guest, credentialsFile: string): Promise<GuestViewer> {
+  const name = g.cfg.name;
+  if (g.cfg.backend === "ssh" || g.cfg.backend === "container") {
+    throw new Error(`${name} is a${g.cfg.backend === "ssh" ? "n ssh" : " container"} guest without a display osmatrix manages`);
+  }
+  const st = await g.backend.status();
+  if (st.state === "absent" || st.state === "stopped") throw new Error(`${name} is ${st.state}; start it first (env_up / \`osmatrix up ${name}\`)`);
+  let v: Viewer | undefined;
+  if (g.backend.viewer) v = await g.backend.viewer();
+  else if (st.ports?.web) {
+    v = { kind: "web", url: `http://127.0.0.1:${st.ports.web}`, how: "Open it in a browser (dockur's noVNC viewer); it only listens on this machine." };
+  } else {
+    const vnc = g.backend.vnc ? await g.backend.vnc() : undefined;
+    if (vnc) {
+      const url = `vnc://${vnc.host}:${vnc.port}`;
+      v = {
+        kind: "vnc",
+        url,
+        how: `Open it with a VNC client such as TigerVNC, RealVNC Viewer or Remmina (\`vncviewer ${vnc.host}::${vnc.port}\`); there is no password, and it only listens on this machine.`,
+      };
+    }
+  }
+  if (!v) throw new Error(`${name} has no display osmatrix can show`);
+  // The user name comes from the same file as the password, not from cfg.user: setup-ssh can point ssh
+  // at another account, whose password osmatrix doesn't have.
+  let login: GuestViewer["login"];
+  try {
+    const { username } = JSON.parse(fs.readFileSync(credentialsFile, "utf8")) as { username?: unknown };
+    if (typeof username === "string" && username) login = { user: username, passwordFile: credentialsFile };
+  } catch {
+    /* no account created by osmatrix (e.g. tart images bring their own) */
+  }
+  return { guest: name, ...v, ...(login ? { login } : {}) };
 }
 
 /** Without boot history, how long an installed guest may take before a quiet boot counts as hung. */

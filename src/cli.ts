@@ -115,6 +115,11 @@ program
   .action(action((g?: string) => env.status(g)));
 
 program
+  .command("viewer <guest>")
+  .description("Show where to watch and use a running guest's screen (web viewer or VNC URL) and its login")
+  .action(action((g: string) => env.viewer(g)));
+
+program
   .command("up <guest>")
   .description("Start (creating on first use) a guest")
   .addOption(new Option("--wait [seconds]", "wait for ssh readiness").argParser(int).preset(1800))
