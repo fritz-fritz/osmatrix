@@ -108,3 +108,16 @@ test("lateNoter: a note after the leg closed its log lands in the file, without 
     "[osmatrix] before\n[osmatrix] removed container act-x\n[osmatrix] warning: couldn't stop act in guest macos: exit code 1\n",
   );
 });
+
+test("copyActCwdFiles: never writes through a symlink in the clone, even a dangling one", { skip: process.platform === "win32" && "symlinks need privileges on Windows" }, () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "osmatrix-actcwd-link-"));
+  const from = path.join(root, "repo");
+  const to = path.join(root, "runs", "id", "checkout");
+  fs.mkdirSync(from, { recursive: true });
+  fs.mkdirSync(to, { recursive: true });
+  fs.writeFileSync(path.join(from, ".env"), "SECRET=1\n");
+  // A tracked `.env -> ../.env`: fine in the repo's parent, dangling in the clone's.
+  fs.symlinkSync("../.env", path.join(to, ".env"));
+  assert.deepEqual(copyActCwdFiles(from, to), []);
+  assert.equal(fs.existsSync(path.join(root, "runs", "id", ".env")), false, "nothing written outside the clone");
+});

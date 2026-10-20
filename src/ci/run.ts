@@ -1105,6 +1105,16 @@ class HostCheckout {
  */
 const ACT_CWD_FILES = [".actrc", ".env", ".vars", ".input"];
 
+/** Whether anything is at `p`, a dangling symlink included. */
+function lexists(p: string): boolean {
+  try {
+    fs.lstatSync(p);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Copy the act files (ACT_CWD_FILES) that `from` has and `to` lacks: usually ignored by git, so a clone of
  * the work tree leaves them out. Returns the names copied.
@@ -1114,7 +1124,9 @@ export function copyActCwdFiles(from: string, to: string): string[] {
   for (const f of ACT_CWD_FILES) {
     const src = path.join(from, f);
     const dest = path.join(to, f);
-    if (!fs.existsSync(src) || !fs.statSync(src).isFile() || fs.existsSync(dest)) continue;
+    // lstat, not exists: a symlink in the clone (tracked, say `.env -> ../.env`) that dangles there still
+    // counts, or copyFileSync would follow it and write outside the clone.
+    if (!fs.existsSync(src) || !fs.statSync(src).isFile() || lexists(dest)) continue;
     fs.copyFileSync(src, dest);
     copied.push(f);
   }
