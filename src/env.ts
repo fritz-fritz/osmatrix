@@ -66,17 +66,17 @@ export async function status(name?: string): Promise<(GuestStatus & { forwards?:
 /**
  * Where the user can watch and use a running guest's screen: dockur's noVNC web viewer (the host port
  * Docker actually published, which differs from the 8006 in dockur's log when that port was taken), the
- * VNC display of a qemu guest, or Screen Sharing for tart. Includes the guest login osmatrix created,
- * as a file path rather than the password itself.
+ * VNC display of a qemu guest, or Screen Sharing for tart. No login: guests auto-login and never lock
+ * their screen, so the viewer opens on the desktop, and printing credentials would only expose them.
  */
 export async function viewer(name: string): Promise<GuestViewer> {
-  return viewerFor(getGuest(name), path.join(paths.guestDir(name), "credentials.json"));
+  return viewerFor(getGuest(name));
 }
 
-export type GuestViewer = Viewer & { guest: string; login?: { user: string; passwordFile: string } };
+export type GuestViewer = Viewer & { guest: string };
 
-/** viewer() for a resolved guest; `credentialsFile` is where osmatrix keeps the account it created. */
-export async function viewerFor(g: Guest, credentialsFile: string): Promise<GuestViewer> {
+/** viewer() for a resolved guest. */
+export async function viewerFor(g: Guest): Promise<GuestViewer> {
   const name = g.cfg.name;
   if (g.cfg.backend === "ssh" || g.cfg.backend === "container") {
     throw new Error(`${name} is a${g.cfg.backend === "ssh" ? "n ssh" : " container"} guest without a display osmatrix manages`);
@@ -99,16 +99,7 @@ export async function viewerFor(g: Guest, credentialsFile: string): Promise<Gues
     }
   }
   if (!v) throw new Error(`${name} has no display osmatrix can show`);
-  // The user name comes from the same file as the password, not from cfg.user: setup-ssh can point ssh
-  // at another account, whose password osmatrix doesn't have.
-  let login: GuestViewer["login"];
-  try {
-    const { username } = JSON.parse(fs.readFileSync(credentialsFile, "utf8")) as { username?: unknown };
-    if (typeof username === "string" && username) login = { user: username, passwordFile: credentialsFile };
-  } catch {
-    /* no account created by osmatrix (e.g. tart images bring their own) */
-  }
-  return { guest: name, ...v, ...(login ? { login } : {}) };
+  return { guest: name, ...v };
 }
 
 /** Without boot history, how long an installed guest may take before a quiet boot counts as hung. */

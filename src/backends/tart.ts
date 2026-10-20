@@ -131,7 +131,7 @@ export class TartBackend implements Backend {
     return {
       kind: "vnc",
       url: `vnc://${ip}`,
-      how: `Open it with Screen Sharing (\`open vnc://${ip}\`) and log in as the guest user, \`${this.cfg.user ?? "admin"}\`.`,
+      how: `Open it with Screen Sharing (\`open vnc://${ip}\`).`,
     };
   }
 

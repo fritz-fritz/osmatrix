@@ -116,7 +116,7 @@ program
 
 program
   .command("viewer <guest>")
-  .description("Show where to watch and use a running guest's screen (web viewer or VNC URL) and its login")
+  .description("Show where to watch and use a running guest's screen (web viewer or VNC URL)")
   .action(action((g: string) => env.viewer(g)));
 
 program

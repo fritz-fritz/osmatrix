@@ -146,7 +146,7 @@ export async function startMcp(): Promise<void> {
     "env_viewer",
     {
       description:
-        "The URL where the user can watch and use a running VM guest's screen: dockur's web viewer (http://127.0.0.1:<port>, open in a browser), a qemu guest's VNC display (vnc://127.0.0.1:<port>) or a tart guest's Screen Sharing address, with how to open it and the guest login (user and the file holding its password). Give the user the URL and the `how` text whenever they want to see, watch or click around in a guest, or a setup or GUI step needs a human look. Ports change across restarts; call this again rather than reusing an old URL.",
+        "The URL where the user can watch and use a running VM guest's screen: dockur's web viewer (http://127.0.0.1:<port>, open in a browser), a qemu guest's VNC display (vnc://127.0.0.1:<port>) or a tart guest's Screen Sharing address, and how to open it. No login is needed: guests sign in automatically and don't lock their screen. Give the user the URL and the `how` text whenever they want to see, watch or click around in a guest, or a setup or GUI step needs a human look. Ports change across restarts; call this again rather than reusing an old URL.",
       inputSchema: { guest },
     },
     safe(async ({ guest }) => text(await env.viewer(guest))),
