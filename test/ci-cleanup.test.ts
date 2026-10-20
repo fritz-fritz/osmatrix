@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
 import { QemuMacBackend } from "../src/backends/qemu-macos.ts";
-import { cancelLeg, copyActCwdFiles, isRunWorker, type LegResult } from "../src/ci/run.ts";
+import { cancelLeg, copyActCwdFiles, isRunWorker, lateNoter, type LegResult } from "../src/ci/run.ts";
 import type { GuestConfig } from "../src/core/config.ts";
 import { parseEtime, processStartedAt } from "../src/core/proc.ts";
 
@@ -86,4 +86,25 @@ test("QemuMacBackend.bridgeStop closes the bridge's server, so setup can exit", 
   await b.bridgeStop();
   assert.equal(await connects(), false);
   assert.throws(() => b.bridgeUrl(), /bridge not started/);
+});
+
+test("lateNoter: a note after the leg closed its log lands in the file, without a stream error", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "osmatrix-late-"));
+  const file = path.join(dir, "leg.log");
+  const log = fs.createWriteStream(file, { flags: "a" });
+  const errors: Error[] = [];
+  log.on("error", (e) => errors.push(e));
+  const note = lateNoter(log, file);
+  note("before");
+  // The leg ends and closes its log while a cancel's stop function is still running...
+  await new Promise<void>((r) => log.end(r));
+  // ...which then reports what it cleaned up (host) or that act couldn't be stopped (guest).
+  note("removed container act-x");
+  note("warning: couldn't stop act in guest macos: exit code 1");
+  await new Promise((r) => setImmediate(r));
+  assert.deepEqual(errors, []);
+  assert.equal(
+    fs.readFileSync(file, "utf8"),
+    "[osmatrix] before\n[osmatrix] removed container act-x\n[osmatrix] warning: couldn't stop act in guest macos: exit code 1\n",
+  );
 });

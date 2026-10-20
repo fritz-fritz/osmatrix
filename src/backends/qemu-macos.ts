@@ -323,7 +323,8 @@ export class QemuMacBackend implements Backend, MacInstallVm {
     let clean = false;
     try {
       // endpoint() can fail too (ensureKey runs ssh-keygen); this step is optional, the stop below isn't.
-      clean = await shutdownMacOverSsh(await this.endpoint(), async () => isAlive(pid));
+      // 80 s of the 120: the power button below still gets at least 40 s if this doesn't work.
+      clean = await shutdownMacOverSsh(await this.endpoint(), async () => isAlive(pid), { timeoutMs: 80_000 });
     } catch {
       /* fall through to the power button */
     }

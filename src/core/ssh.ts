@@ -352,12 +352,15 @@ const SHUTDOWN_DEPS: ShutdownDeps = { probe: sshProbe, exec: sshExec, sleep, now
  */
 export async function shutdownMacOverSsh(ep: Endpoint, running: () => Promise<boolean>, deps: Partial<ShutdownDeps> = {}): Promise<boolean> {
   const d = { ...SHUTDOWN_DEPS, ...deps };
+  // One budget for the whole attempt, ssh included, so a caller's own deadline (and its fallback) holds.
+  const deadline = d.now() + d.timeoutMs;
   try {
     if ((await d.probe(ep)) !== "ok") return false;
-    const r = await d.exec(ep, "sudo -n shutdown -h now", { timeoutMs: 30_000 }).catch(() => undefined);
+    const left = deadline - d.now();
+    if (left <= 0) return false;
+    const r = await d.exec(ep, "sudo -n shutdown -h now", { timeoutMs: Math.min(30_000, left) }).catch(() => undefined);
     // ssh may drop as the guest goes down; only a refusal (no passwordless sudo) means it didn't start.
     if (r && r.code !== 0 && /password|sudoers|not allowed/i.test(r.stderr)) return false;
-    const deadline = d.now() + d.timeoutMs;
     while (d.now() < deadline && (await running())) await d.sleep(1000);
     return !(await running());
   } catch {

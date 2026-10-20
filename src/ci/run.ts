@@ -350,6 +350,18 @@ export async function ciCancel(repoIn: string, idIn?: string): Promise<RunStatus
   return ciStatus(repo, id);
 }
 
+/**
+ * A note writer for a leg log that may already be closed: a cancel's stop function can still run after
+ * the leg ended and closed `log`, and a write to an ended stream emits an unhandled 'error' that crashes
+ * the worker. Once ended, notes are appended to the file directly.
+ */
+export function lateNoter(log: fs.WriteStream, logFile: string): (m: string) => void {
+  return (m) => {
+    if (log.writableEnded) fs.appendFileSync(logFile, `[osmatrix] ${m}\n`);
+    else log.write(`[osmatrix] ${m}\n`);
+  };
+}
+
 /** Mark a leg cancelled, finished now. */
 export function cancelLeg(l: LegResult, why = "cancelled", now = new Date().toISOString()) {
   l.state = "cancelled";
@@ -711,7 +723,7 @@ async function runLeg(
   const note = (m: string) => log.write(`[osmatrix] ${m}\n`);
   // For a cancel's stop function, which can still be running after the leg ended and closed `log` (a write
   // to an ended stream emits an unhandled 'error' and crashes the worker).
-  const lateNote = (m: string) => (log.writableEnded ? fs.appendFileSync(logFile, `[osmatrix] ${m}\n`) : note(m));
+  const lateNote = lateNoter(log, logFile);
   // Whether the leg runs osmatrix's patched act; stock act's known differences are only hinted at otherwise.
   let patched = false;
   const outcome = (): LegOutcome => ({ state: r.state, record, error: r.error, finished: Date.now() });
