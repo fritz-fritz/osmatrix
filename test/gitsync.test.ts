@@ -322,12 +322,35 @@ test("a linked worktree becomes a self-contained clone for host legs", async () 
   git(clone, ["fsck", "--no-progress"]);
   assert.equal(git(main, ["status", "--porcelain"]), "");
 
-  // Concurrent host legs share the cache; each clone gets its own snapshot and leaves no ref behind.
+  // Concurrent host legs share the cache; each clone gets its own snapshot and leaves no ref behind. They
+  // write the same snapshot (same tree, fixed identity and date) into one cache, which on Windows fails
+  // with "Permission denied" unless the writers take turns.
   fs.writeFileSync(path.join(wt, "b.txt"), "b2\n");
-  const clones = ["linked-c1", "linked-c2", "linked-c3"].map((n) => path.join(root, n));
+  fs.writeFileSync(path.join(wt, "big.txt"), crypto.randomBytes(256 * 1024).toString("hex"));
+  const clones = Array.from({ length: 6 }, (_, i) => path.join(root, `linked-c${i + 1}`));
   await Promise.all(clones.map((c) => gs.cloneWorktree(wt, c)));
   for (const c of clones) assert.equal(fs.readFileSync(path.join(c, "b.txt"), "utf8"), "b2\n");
   const cache = snapshotCache(wt, "host");
+  assert.equal(git(cache, ["--git-dir", cache, "for-each-ref", "--format=%(refname)", "refs/osmatrix/"]).trim(), SNAPSHOT_REF);
+
+  // A clone doesn't write to the cache while another run holds it.
+  const release = await gs.lockSnapshotCache(cache);
+  const before = git(cache, ["--git-dir", cache, "rev-parse", SNAPSHOT_REF]).trim();
+  fs.writeFileSync(path.join(wt, "b.txt"), "b3\n");
+  let settled = false;
+  const waiting = gs.cloneWorktree(wt, path.join(root, "linked-c-wait")).finally(() => (settled = true));
+  await new Promise((r) => setTimeout(r, 500));
+  assert.equal(settled, false);
+  assert.equal(git(cache, ["--git-dir", cache, "rev-parse", SNAPSHOT_REF]).trim(), before);
+  release();
+  await waiting;
+  assert.equal(fs.readFileSync(path.join(root, "linked-c-wait", "b.txt"), "utf8"), "b3\n");
+
+  // A clone that can't create its destination fails cleanly, releases the lock and leaves no ref behind.
+  const blocker = path.join(root, "linked-blocker");
+  fs.writeFileSync(blocker, "a file, not a directory");
+  await assert.rejects(gs.cloneWorktree(wt, path.join(blocker, "clone")));
+  (await gs.lockSnapshotCache(cache))();
   assert.equal(git(cache, ["--git-dir", cache, "for-each-ref", "--format=%(refname)", "refs/osmatrix/"]).trim(), SNAPSHOT_REF);
 
   // A repository without an origin stays without one.
@@ -335,6 +358,24 @@ test("a linked worktree becomes a self-contained clone for host legs", async () 
   const bare = path.join(root, "linked-clone-noorigin");
   await gs.cloneWorktree(wt, bare);
   assert.equal(gStatus(bare, ["config", "remote.origin.url"]), 1);
+});
+
+test("concurrent snapshots of one checkout into one cache take turns", async () => {
+  const repo = makeRepo("concurrent");
+  fs.writeFileSync(path.join(repo, "a.txt"), "a\n");
+  git(repo, ["add", "-A"]);
+  commit(repo, "first");
+  fs.writeFileSync(path.join(repo, "u.txt"), crypto.randomBytes(256 * 1024).toString("hex"));
+  const snaps = await Promise.all(Array.from({ length: 6 }, () => snapshotWorktree(repo, "g")));
+  try {
+    assert.equal(new Set(snaps.map((s) => s.commit)).size, 1);
+    await Promise.all(snaps.map((s) => s.synced()));
+    const cache = snapshotCache(repo, "g");
+    git(cache, ["--git-dir", cache, "fsck", "--no-progress", "--connectivity-only"]);
+    assert.equal(git(cache, ["--git-dir", cache, "rev-parse", "refs/osmatrix/sent"]).trim(), snaps[0].commit);
+  } finally {
+    for (const s of snaps) s.dispose();
+  }
 });
 
 test("repositories a checkout can't reproduce fall back to copying", async () => {
