@@ -2,6 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
 import { ensureDir, paths } from "./paths.ts";
+import { DEFAULT_HOMEBREW, DEFAULT_LINUX_IMAGE, PATCHED_ACT_VERSION } from "./pins.ts";
 
 export type OsFamily = "linux" | "windows" | "macos";
 export type BackendKind = "container" | "dockur" | "tart" | "qemu" | "ssh";
@@ -74,22 +75,9 @@ export interface Config {
   guests: Record<string, GuestConfig>;
 }
 
-export const DEFAULT_ACT_VERSION = "v0.2.89";
-export const DEFAULT_LINUX_IMAGE = "catthehacker/ubuntu:act-24.04";
-
-/**
- * Homebrew stopped building Intel macOS bottles on 2026-08-27 (Homebrew/brew#23677) and made Intel
- * Tier 3 in 7.0.0, so Intel guests get Homebrew pinned to where bottles still exist on ghcr.io:
- * - brew 6.0.22, the last release before 7.0.0;
- * - homebrew-core a5783fb (2026-08-27 21:04 UTC), the last commit before the first update that
- *   shipped without an Intel bottle (apify-cli 1.9.0, merged 22:03 UTC).
- * Formula versions are frozen there: older than on GitHub's runners, but they pour bottles instead
- * of building from source.
- */
-export const DEFAULT_HOMEBREW: Required<HomebrewPins> = {
-  brew: "6.0.22",
-  core: "a5783fb0df65b1eeeaee4dbdf7e0c41b133c72ac",
-};
+/** The patched act, unless config says otherwise. The pins live in pins.ts (see there for why). */
+export const DEFAULT_ACT_VERSION = PATCHED_ACT_VERSION;
+export { DEFAULT_HOMEBREW, DEFAULT_LINUX_IMAGE };
 
 export const DEFAULT_LABELS: Record<OsFamily, string[]> = {
   linux: ["ubuntu-*", "linux"],

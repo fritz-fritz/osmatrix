@@ -9,7 +9,7 @@
   "homepage": "https://github.com/fritz-fritz/osmatrix",
   "repository": "https://github.com/fritz-fritz/osmatrix",
   "license": "MIT",
-  "icon": "./assets/logo.png",
+  "icon": "./assets/logo.svg",
   "keywords": [
     "ci",
     "github-actions",

@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 // Frontmatter, size and link checks for every skill in skills/ (Agent Skills format). Codex, Cursor and
 // skills.sh install skills flat into a shared directory, so each one must be self-contained and carry
-// the plugin's name as a prefix.
+// the plugin's name as a prefix. The one exception is the bare "osmatrix": the map to the other skills,
+// which can't collide with anything but the plugin itself.
 import { access, readdir, readFile } from "node:fs/promises";
 import { basename, dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -62,7 +63,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     if (!name) problems.push(`${label}: no name`);
     else if (name !== basename(dirname(file))) problems.push(`${label}: name "${name}" != directory`);
     else if (!/^[a-z0-9]+(-[a-z0-9]+)*$/.test(name) || name.length > 64) problems.push(`${label}: name must be lowercase letters, digits, single hyphens, at most 64 chars`);
-    else if (!name.startsWith(PREFIX)) problems.push(`${label}: name must start with "${PREFIX}" (skills are installed flat next to other plugins' skills)`);
+    else if (name !== "osmatrix" && !name.startsWith(PREFIX)) problems.push(`${label}: name must be "osmatrix" or start with "${PREFIX}" (skills are installed flat next to other plugins' skills)`);
     if (!description) problems.push(`${label}: no description`);
     else if (description.length > 1024) problems.push(`${label}: description longer than 1024 chars`);
     // Relative links must stay inside the skill: nothing else is installed with it.

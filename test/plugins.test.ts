@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
-import { BUNDLE_FILES, CLIENTS, expectedMcpArgs, validatePlugin } from "../scripts/validate-plugins.mjs";
+import { BUNDLE_FILES, CLIENTS, bundleReadme, expectedMcpArgs, validatePlugin } from "../scripts/validate-plugins.mjs";
 import { unpinnedUses } from "../scripts/validate-workflows.mjs";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
@@ -81,4 +81,13 @@ test("workflow actions must be pinned to commit SHAs with a version comment", ()
   assert.match(unpinnedUses("        run: npx -y @anthropic-ai/claude-code@2.1.0 plugin validate")[0], /ci-tools/);
   assert.match(unpinnedUses("          npm i --no-save ajv@8 ajv-formats@3")[0], /ci-tools/);
   assert.deepEqual(unpinnedUses("          npm ci --prefix .github/ci-tools"), []);
+});
+
+test("a bundle's README points links and images it doesn't carry at the tagged source", () => {
+  const text = 'See [the act patch](assets/act/README.md#notes) and [a skill](skills/osmatrix-ci/SKILL.md).\n<img src="assets/social-preview.svg" alt="card"> <img src="assets/logo.svg"> [site](https://example.com)';
+  const has = (t: string) => t === "skills/osmatrix-ci/SKILL.md" || t === "assets/logo.svg";
+  assert.equal(
+    bundleReadme(text, has, "https://github.com/fritz-fritz/osmatrix", "1.2.3"),
+    'See [the act patch](https://github.com/fritz-fritz/osmatrix/blob/v1.2.3/assets/act/README.md#notes) and [a skill](skills/osmatrix-ci/SKILL.md).\n<img src="https://github.com/fritz-fritz/osmatrix/raw/v1.2.3/assets/social-preview.svg" alt="card"> <img src="assets/logo.svg"> [site](https://example.com)',
+  );
 });

@@ -16,7 +16,7 @@ import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { BUNDLE_FILES, CLIENTS, expectedMcpArgs, readJson, validatePlugin } from "./validate-plugins.mjs";
+import { BUNDLE_FILES, CLIENTS, bundleReadme, expectedMcpArgs, readJson, validatePlugin } from "./validate-plugins.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const { version, homepage } = await readJson(join(root, "package.json"));
@@ -46,10 +46,8 @@ try {
     const mcp = await readJson(mcpFile);
     mcp.mcpServers.osmatrix.args = expectedMcpArgs(client, version, true);
     await writeJson(mcpFile, mcp);
-    // The bundle carries only part of the repository: links to anything else point at the tagged source.
-    const readme = (await readFile(join(plugin, "README.md"), "utf8")).replace(/\]\(([^)#\s:]+)((?:#[^)]*)?)\)/g, (m, target, hash) =>
-      existsSync(join(plugin, target)) ? m : `](${homepage}/blob/v${version}/${target}${hash})`,
-    );
+    // The bundle carries only part of the repository: links and images to anything else point at the tagged source.
+    const readme = bundleReadme(await readFile(join(plugin, "README.md"), "utf8"), (target) => existsSync(join(plugin, target)), homepage, version);
     await writeFile(
       join(plugin, "README.md"),
       readme.replace(

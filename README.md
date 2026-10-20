@@ -18,7 +18,7 @@ Local **Ubuntu, Windows and macOS** environments plus **local GitHub Actions mat
 
 ```
 Claude Code / Cursor / Codex
-  ├─ skills (SKILL.md ×3): when and how
+  ├─ skills (SKILL.md ×4: osmatrix, the map; -setup, -guests, -ci, the work): when and how
   └─ MCP server (osmatrix mcp, stdio) ─┐
 human / scripts ── osmatrix CLI ───────┴─ core ─┬─ ubuntu  : act runner image + sshd (container)
                                                ├─ windows : dockur/windows VM (KVM) | host QEMU (Macs, Windows on ARM)
@@ -71,7 +71,7 @@ osmatrix install-agents        # optional: register MCP server + skills with Cla
 - **Cursor**: `~/.cursor/mcp.json`, plus the shared `~/.agents/skills/osmatrix-*`.
 - **Codex**: `~/.codex/config.toml` `[mcp_servers.osmatrix]`, plus the shared `~/.agents/skills/osmatrix-*`.
 
-A single `osmatrix` skill installed by an earlier version is removed, so it doesn't trigger next to the new ones.
+Skill directories an earlier osmatrix created under those names (the single `osmatrix` skill of 0.1, say) are replaced; a directory osmatrix didn't create is left alone and reported.
 
 Options:
 
@@ -265,7 +265,7 @@ osmatrix is developed with AI coding agents under human review. [AI_POLICY.md](A
 ```
 osmatrix/                              # the repository root is the plugin, for every client
 ├── src/, assets/                      # the CLI + MCP server (npm package "osmatrix"); assets/logo.* is the plugin artwork, assets/act/ the act patch
-├── skills/osmatrix-{ci,guests,setup}/ # the skills, each self-contained (SKILL.md + references/)
+├── skills/osmatrix*/                  # the skills, each self-contained (SKILL.md + references/): osmatrix maps to osmatrix-{setup,guests,ci}
 ├── .claude-plugin/                    # Claude Code: marketplace.json → ./, plugin.json
 ├── .cursor-plugin/                    # Cursor:      marketplace.json → ./, plugin.json
 ├── .agents/plugins/marketplace.json   # Codex:       marketplace    → ./

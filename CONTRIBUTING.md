@@ -38,6 +38,8 @@ Set `OSMATRIX_HOME=/some/dir` to keep experiments apart from your real guests: c
 
 osmatrix builds act from source with `assets/act/act-v0.2.89-osmatrix.patch` (see `src/core/act.ts`). To change it, apply it to the v0.2.89 source with `git apply`, edit, run `gofmt`, and write the result back with `git diff` (keep the header text). Any change to the patch, the Go image or the build script changes the build's cache key, so the next run rebuilds act and pushes it to guests again. Check it with `node src/cli.ts install-act --all-targets` and `node src/cli.ts ci run --repo fixtures/act-compat --only linux --job <job> --wait` for each of `file-commands`, `docker-action` and `download`. Moving to a newer act means a new source sha256 and patch in `act.ts`.
 
+Versions the docs repeat are pinned in code: act in `src/core/pins.ts`, the Linux act image and Intel Homebrew in `src/core/config.ts`, Node in `package.json`'s `engines`, osmatrix's own in `package.json`. Bump the pin and run `npm run sync`, which stamps README, CONTRIBUTING and the skills; CI's `npm run validate` fails on drift.
+
 ## Checks before you push
 
 | Script | What it runs |
@@ -83,7 +85,7 @@ Query packs are downloaded and cached on first use.
 - **Every MCP tool is also a CLI command.** Add both, and document new tools in the matching skill's `references/reference.md`.
 - **New MCP tools need an entry in `TOOL_ANNOTATIONS`** (`src/mcp.ts`), with honest `readOnlyHint` / `destructiveHint` / `openWorldHint` values. The MCP test fails without one.
 - **Cross-platform:** no shelling out through bash on the host; spawn with argument arrays. Paths come from `src/core/paths.ts`. Never assume a port is free.
-- **Keep each skill self-contained** (links only inside its directory, name prefixed `osmatrix-`): Codex, Cursor and skills.sh install skills flat. `npm run validate` checks this.
+- **Keep each skill self-contained** (links only inside its directory; names prefixed `osmatrix-`, except the bare `osmatrix`, which only maps to the others): Codex, Cursor and skills.sh install skills flat, and skills.sh never drops a skill it once listed, so a skill's name is for keeps. `npm run validate` checks this.
 - **Keep the skills accurate.** Agents follow them literally, so describe real behavior and limits.
 - **Add or update tests** in `test/` for behavior changes.
 - **Pin GitHub Actions to full commit SHAs** with a version comment, like `actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1`. Tags can be moved; commits can't. `npm run validate` rejects unpinned actions, and Dependabot keeps the SHAs and comments current. npm tools that workflows run belong in `.github/ci-tools/package.json`. They're pinned by its lockfile, updated by Dependabot, and installed with `npm ci --prefix .github/ci-tools`, never with `npx -y` or `npm install <pkg>@<version>`, which the validator also rejects.
