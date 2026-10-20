@@ -11,8 +11,8 @@ import { sizeMiB } from "../core/sizing.ts";
 const RESTART_FOR_VNC = (name: string) =>
   `${name} was started without tart's VNC server (by an older osmatrix, outside osmatrix, or with a tart that lacks --vnc-experimental: update tart); restart it (env_down, then env_up) to view or screenshot it`;
 
-/** Whether this tart has `run --vnc-experimental`; looked up once per process. */
-let vncFlag: Promise<boolean> | undefined;
+/** Set once this tart is known to have `run --vnc-experimental`; a "no" is asked again (tart may get updated). */
+let vncFlag = false;
 
 /** macOS (or Linux) VMs on Apple Silicon via cirruslabs/tart (Virtualization.framework). */
 export class TartBackend implements Backend {
@@ -31,8 +31,12 @@ export class TartBackend implements Backend {
   private get vncRunFile() {
     return path.join(paths.guestDir(this.cfg.name), "tart-run.vnc");
   }
-  private supportsVnc(): Promise<boolean> {
-    return (vncFlag ??= run(this.tart(), ["run", "--help"]).then((r) => /--vnc-experimental/.test(r.stdout + r.stderr)));
+  private async supportsVnc(): Promise<boolean> {
+    if (!vncFlag) {
+      const r = await run(this.tart(), ["run", "--help"]);
+      vncFlag = /--vnc-experimental/.test(r.stdout + r.stderr);
+    }
+    return vncFlag;
   }
 
   private tart(): string {

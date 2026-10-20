@@ -53,12 +53,15 @@ const token = new URLSearchParams(location.hash.slice(1)).get("t") ?? "";
 // A new URL for the same server (a fresh token) only changes the fragment: reload to use it.
 addEventListener("hashchange", () => location.reload());
 let retry = 1000;
+let failures = 0;
 function connect() {
   const rfb = new RFB(document.getElementById("screen"), (location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/websockify?t=" + encodeURIComponent(token));
   rfb.scaleViewport = true;
-  rfb.addEventListener("connect", () => { status.textContent = ""; retry = 1000; });
+  rfb.addEventListener("connect", () => { status.textContent = ""; retry = 1000; failures = 0; });
   rfb.addEventListener("disconnect", () => {
-    status.textContent = "Disconnected; reconnecting…";
+    failures++;
+    status.textContent = failures < 4 ? "Disconnected; reconnecting…"
+      : "Can't reach the guest's screen. If it was stopped or restarted, ask for its viewer again (env_viewer, or osmatrix viewer <guest>) and open the new link. Still retrying…";
     setTimeout(connect, retry);
     retry = Math.min(retry * 2, 10000);
   });
@@ -149,14 +152,19 @@ export function viewerServer(title: string, target: VncTarget, opts: ViewerOptio
   return server;
 }
 
+/** Browsers connected through this process's bridges right now. */
+let activeBridges = 0;
+
 /** Connect a browser's WebSocket to the guest's VNC server, standing in for the guest's security handshake. */
 export async function bridge(ws: WebSocket, target: VncTarget): Promise<void> {
   let vnc: net.Socket | undefined;
   let closed = false;
+  activeBridges++;
   // Registered before anything is awaited: a browser that goes away mid-handshake takes the guest
   // connection with it, and a bad frame closes this connection instead of crashing the server.
   ws.on("close", () => {
     closed = true;
+    activeBridges--;
     vnc?.destroy();
   });
   ws.on("error", () => ws.terminate());
@@ -177,7 +185,9 @@ export async function bridge(ws: WebSocket, target: VncTarget): Promise<void> {
     await clientHandshake((n) => reader.read(n), (b) => sock.write(b), t.password);
     sock.setTimeout(0);
     if (closed) return void sock.destroy();
-    sock.pause();
+    // The guest says nothing more until the browser's ClientInit; the reader keeps listening meanwhile,
+    // so a guest that drops the connection now closes the browser's at once.
+    sock.on("close", () => ws.close());
 
     // To the browser: RFB 3.8, one security type, None; then its ClientInit and the guest's ServerInit pass through.
     const fromBrowser: Buffer[] = [];
@@ -223,7 +233,6 @@ export async function bridge(ws: WebSocket, target: VncTarget): Promise<void> {
             ws.send(d, sent);
             if (ws.bufferedAmount > HIGH_WATER) sock.pause();
           });
-          sock.resume();
         }
       }
       if (buf.length) {
@@ -232,7 +241,6 @@ export async function bridge(ws: WebSocket, target: VncTarget): Promise<void> {
       }
     };
     ws.on("message", (d: Buffer) => onMessage(d));
-    sock.on("close", () => ws.close());
     ws.send(Buffer.from("RFB 003.008\n", "latin1"));
   } catch (e) {
     fail(e);
@@ -251,9 +259,16 @@ export function closeReason(msg: string): string {
 
 /**
  * The `osmatrix _viewer` process: serve until killed, or until `keepAlive` says the server is no longer
- * wanted (checked every few seconds; e.g. osmatrix dropped its record, or the guest stopped).
+ * wanted (checked every few seconds; e.g. osmatrix dropped its record, or the guest stopped). It is told
+ * whether a browser is connected, in which case the guest's display is plainly there.
  */
-export async function serveViewer(title: string, port: number, opts: ViewerOptions, target: VncTarget, keepAlive: () => Promise<boolean>): Promise<void> {
+export async function serveViewer(
+  title: string,
+  port: number,
+  opts: ViewerOptions,
+  target: VncTarget,
+  keepAlive: (connected: boolean) => Promise<boolean>,
+): Promise<void> {
   const server = viewerServer(title, target, opts);
   await new Promise<void>((resolve, reject) => {
     server.once("error", reject);
@@ -265,7 +280,7 @@ export async function serveViewer(title: string, port: number, opts: ViewerOptio
     await new Promise((r) => setTimeout(r, 5000));
     let keep = true;
     try {
-      keep = await keepAlive();
+      keep = await keepAlive(activeBridges > 0);
     } catch {
       /* keep serving */
     }

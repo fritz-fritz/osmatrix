@@ -77,10 +77,6 @@ export function unlock(key: string, owner: LockOwner): void {
   if (cur?.owner?.pid === owner.pid && cur.owner.run === owner.run && cur.owner.leg === owner.leg) fs.rmSync(file, { force: true });
 }
 
-/**
- * Take every key, waiting while another live process holds one. Keys are taken in sorted order so two
- * runs needing overlapping sets can't deadlock. Returns the release function.
- */
 /** acquireLocks gave up after its timeout. */
 export class LockTimeout extends Error {}
 
@@ -90,6 +86,11 @@ export function lockHeld(key: string): boolean {
   return isLive(file, readOwner(file)?.owner);
 }
 
+/**
+ * Take every key, waiting while another live process holds one. Keys are taken in sorted order so two
+ * runs needing overlapping sets can't deadlock. Returns the release function. With `timeoutMs`, throws
+ * LockTimeout once it has waited that long.
+ */
 export async function acquireLocks(
   keys: string[],
   owner: LockOwner,

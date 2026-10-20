@@ -76,7 +76,7 @@ export async function status(name?: string): Promise<(GuestStatus & { forwards?:
 export async function viewer(name: string): Promise<GuestViewer> {
   const g = getGuest(name);
   // viewerFor checks the guest's status; under the lock, its VNC address is rechecked (once).
-  return viewerFor(g, (n) => ensureViewerServer(n, async () => !!(await g.backend.vnc?.())));
+  return viewerFor(g, (n) => ensureViewerServer(n, async () => !!(await g.backend.vnc?.().catch(() => undefined))));
 }
 
 export type GuestViewer = Viewer & { guest: string };
@@ -98,10 +98,17 @@ export async function viewerFor(g: Guest, serve: (name: string) => Promise<strin
 
 /**
  * Serializes starting and stopping a guest's viewer server across CLI and MCP processes, so concurrent
- * callers share one server and none is left running untracked.
+ * callers share one server and none is left running untracked. With `busyAfterMs` (env_viewer), rather
+ * than wait out a long stop, snapshot or reset, it says the guest is busy.
  */
-async function withViewerLock<T>(name: string, fn: () => Promise<T>): Promise<T> {
-  const release = await acquireLocks([viewerLockKey(name)], viewerLockOwner(name), () => {}, 100);
+async function withViewerLock<T>(name: string, fn: () => Promise<T>, busyAfterMs?: number): Promise<T> {
+  let release: () => void;
+  try {
+    release = await acquireLocks([viewerLockKey(name)], viewerLockOwner(name), () => {}, 100, busyAfterMs);
+  } catch (e) {
+    if (e instanceof LockTimeout) throw new Error(`${name} is busy (being started, stopped, snapshotted or reset, or another viewer request); ask again in a moment`);
+    throw e;
+  }
   try {
     return await fn();
   } finally {
@@ -115,22 +122,6 @@ const viewerLockOwner = (name: string) => ({ pid: process.pid, run: "viewer", re
 /** How long env_viewer waits for whatever holds the guest's viewer lock before saying it's busy. */
 const VIEWER_LOCK_WAIT_MS = 10_000;
 
-/** withViewerLock for env_viewer: rather than wait out a long stop, snapshot or reset, say the guest is busy. */
-async function withViewerLockOrBusy<T>(name: string, fn: () => Promise<T>): Promise<T> {
-  let release: () => void;
-  try {
-    release = await acquireLocks([viewerLockKey(name)], viewerLockOwner(name), () => {}, 100, VIEWER_LOCK_WAIT_MS);
-  } catch (e) {
-    if (e instanceof LockTimeout) throw new Error(`${name} is busy (being started, stopped, snapshotted or reset, or another viewer request); ask again in a moment`);
-    throw e;
-  }
-  try {
-    return await fn();
-  } finally {
-    release();
-  }
-}
-
 /** Whether something (a stop, snapshot, reset or viewer start) is working on the guest right now. */
 export const viewerLockHeld = (name: string) => lockHeld(viewerLockKey(name));
 
@@ -139,12 +130,12 @@ export const viewerLockHeld = (name: string) => lockHeld(viewerLockKey(name));
  * `running` is rechecked under the lock: a guest being stopped meanwhile must not get a fresh server.
  */
 export function ensureViewerServer(name: string, running: () => Promise<boolean>): Promise<string> {
-  return withViewerLockOrBusy(name, async () => {
+  return withViewerLock(name, async () => {
     if (!(await running())) {
       throw new Error(`${name}'s display isn't up yet (still starting, or it stopped); try again in a few seconds, or start it (env_up / \`osmatrix up ${name}\`)`);
     }
     return startViewerServer(name);
-  });
+  }, VIEWER_LOCK_WAIT_MS);
 }
 
 /**

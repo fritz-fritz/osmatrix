@@ -132,13 +132,14 @@ program
     const target = async () => (guest.backend.vnc ? guest.backend.vnc() : undefined);
     const started = Date.now();
     let lastDisplay = started;
-    await serveViewer(`osmatrix: ${g}`, o.port, { id: o.id, token }, target, async () => {
+    await serveViewer(`osmatrix: ${g}`, o.port, { id: o.id, token }, target, async (connected) => {
       // Exit once osmatrix no longer records this server (stopped, or replaced), or once the guest has had
       // no display for a while (stopped outside osmatrix, crashed).
       const rec = env.viewerRecord(g);
       if (rec ? rec.id !== o.id : Date.now() - started > 30_000) return false;
       // A reset or snapshot in progress (it holds the guest's viewer lock) counts as the display being there.
-      if (env.viewerLockHeld(g) || (await target().catch(() => undefined))) lastDisplay = Date.now();
+      // A connected browser means the display is there; otherwise ask the backend (that runs tools).
+      if (connected || env.viewerLockHeld(g) || (await target().catch(() => undefined))) lastDisplay = Date.now();
       return Date.now() - lastDisplay < 120_000;
     });
   }));

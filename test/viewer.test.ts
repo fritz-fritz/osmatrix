@@ -352,3 +352,29 @@ test("viewer server: a client resetting a rejected upgrade doesn't take the serv
     server.close();
   }
 });
+
+test("viewer bridge: a guest dropping the connection after its handshake closes the browser's at once", async () => {
+  // Completes RFB 3.8 with no authentication, then hangs up before ClientInit.
+  const quitter = net.createServer((sock) => {
+    let stage = 0;
+    sock.write("RFB 003.008\n");
+    sock.on("data", () => {
+      if (stage === 0) sock.write(Buffer.from([1, 1]));
+      else if (stage === 1) (sock.write(Buffer.alloc(4)), setTimeout(() => sock.end(), 50));
+      stage++;
+    });
+    sock.on("error", () => {});
+  });
+  await new Promise<void>((r) => quitter.listen(0, "127.0.0.1", r));
+  const { server, port } = await listen(async () => ({ host: "127.0.0.1", port: (quitter.address() as net.AddressInfo).port }));
+  try {
+    const ws = new WebSocket(`ws://127.0.0.1:${port}/websockify?t=${TOKEN}`, { origin: `http://127.0.0.1:${port}` });
+    ws.on("error", () => {});
+    // The browser only reads the server's version and then waits: the close must come from the guest's hang-up.
+    const closedAt = await new Promise<number>((resolve) => ws.on("close", () => resolve(Date.now())));
+    assert.ok(closedAt > 0);
+  } finally {
+    server.close();
+    quitter.close();
+  }
+});
