@@ -53,19 +53,18 @@ export interface Backend {
    * Undefined while the guest is still being installed, when long quiet phases are normal.
    */
   bootProbe?(): Promise<{ io: number; boots: number } | undefined>;
-  /** VNC endpoint for screenshots/input, when available. */
-  vnc?(): Promise<{ host: string; port: number } | undefined>;
   /**
-   * How a person watches this guest's screen, for backends whose display isn't the web viewer or VNC
-   * endpoint above (env.viewer falls back to those).
+   * VNC endpoint for screenshots/input and the browser viewer; undefined while there is none (not running,
+   * still starting). Throws only for something the user must act on. `password` is set when the
+   * server wants VNC authentication with a password osmatrix holds (tart's per-run one); it never reaches the user.
    */
-  viewer?(): Promise<Viewer>;
+  vnc?(): Promise<{ host: string; port: number; password?: string } | undefined>;
 }
 
 /** Where a person can watch and use a guest's screen. */
 export interface Viewer {
-  /** "web": open url in a browser; "vnc": open it with a VNC client (Screen Sharing on macOS). */
-  kind: "web" | "vnc";
+  /** Open url in a browser: it lands on the guest's screen without a sign-in. */
+  kind: "web";
   url: string;
   /** How to open it, in the user's terms. */
   how: string;

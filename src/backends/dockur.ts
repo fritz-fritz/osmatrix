@@ -344,7 +344,7 @@ export class DockurBackend implements Backend {
 
   async vnc() {
     const port = await publishedPort(this.container, 5900);
-    if (!port) throw new Error(`${this.cfg.name} is not running`);
+    if (!port) return undefined; // not running
     return { host: "127.0.0.1", port };
   }
 }

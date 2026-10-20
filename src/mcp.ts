@@ -55,7 +55,8 @@ export const TOOL_ANNOTATIONS: Record<string, { title: string; readOnlyHint: boo
   // Posts to github.com as the user (gh): outward-facing, so clients should confirm it.
   host_report_file: { title: "File a compatibility report on GitHub", readOnlyHint: false, destructiveHint: false, openWorldHint: true },
   env_status: { title: "Show guest status", readOnlyHint: true, destructiveHint: false, openWorldHint: false },
-  env_viewer: { title: "Show where to view a guest's screen", readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+  // Starts a background viewer server for qemu and tart guests.
+  env_viewer: { title: "Show where to view a guest's screen", readOnlyHint: false, destructiveHint: false, openWorldHint: false },
   env_setup: { title: "Set up a guest OS", readOnlyHint: false, destructiveHint: true, openWorldHint: true },
   env_up: { title: "Start a guest", readOnlyHint: false, destructiveHint: false, openWorldHint: false },
   env_down: { title: "Stop a guest", readOnlyHint: false, destructiveHint: true, openWorldHint: false },
@@ -146,7 +147,7 @@ export async function startMcp(): Promise<void> {
     "env_viewer",
     {
       description:
-        "The URL where the user can watch and use a running VM guest's screen: dockur's web viewer (http://127.0.0.1:<port>, open in a browser), a qemu guest's VNC display (vnc://127.0.0.1:<port>) or a tart guest's Screen Sharing address, with how to open it and the guest login (user and the file holding its password). Give the user the URL and the `how` text whenever they want to see, watch or click around in a guest, or a setup or GUI step needs a human look. Ports change across restarts; call this again rather than reusing an old URL.",
+        "The URL where the user can watch and use a running VM guest's screen: a browser page (http://127.0.0.1:<port>) showing the guest's desktop: dockur's own noVNC page, or for qemu and tart guests one osmatrix serves. No login is needed: guests sign in automatically and don't lock their screen, and the page never asks for a password. Give the user the URL and the `how` text whenever they want to see, watch or click around in a guest, or a setup or GUI step needs a human look. For qemu and tart guests the URL ends in a `#t=` token that opens the viewer: pass the URL on whole, and don't post it anywhere else. Ports change across restarts; call this again rather than reusing an old URL.",
       inputSchema: { guest },
     },
     safe(async ({ guest }) => text(await env.viewer(guest))),
@@ -313,7 +314,7 @@ export async function startMcp(): Promise<void> {
 
   register(
     "env_screenshot",
-    { description: "Screenshot a VM guest's display (dockur and qemu guests). Useful during OS setup or for GUI testing.", inputSchema: { guest } },
+    { description: "Screenshot a VM guest's display (dockur, qemu and tart guests). Useful during OS setup or for GUI testing.", inputSchema: { guest } },
     safe(async ({ guest }) => {
       const s = await screenshot(guest);
       return {

@@ -12,6 +12,7 @@ import { ensureKey } from "./core/ssh.ts";
 import * as env from "./env.ts";
 import { input, screenshot, type InputAction } from "./gui.ts";
 import { installAgents, type Agent } from "./install.ts";
+import { serveViewer } from "./viewer.ts";
 
 const program = new Command();
 const version = JSON.parse(fs.readFileSync(path.join(pkgRoot, "package.json"), "utf8")).version as string;
@@ -116,8 +117,46 @@ program
 
 program
   .command("viewer <guest>")
-  .description("Show where to watch and use a running guest's screen (web viewer or VNC URL) and its login")
+  .description("Show the browser URL where you can watch and use a running guest's screen")
   .action(action((g: string) => env.viewer(g)));
+
+program
+  .command("_viewer <guest>", { hidden: true })
+  .requiredOption("--port <n>", "port to listen on (127.0.0.1)", int)
+  .action(action(async (g: string, o: { port: number }) => {
+    // From the osmatrix process that started this server, through the environment (not argv, which other
+    // local users can list); not passed on to the tools the backend runs (tart list and the like).
+    const token = process.env.OSMATRIX_VIEWER_TOKEN ?? "";
+    const id = process.env.OSMATRIX_VIEWER_ID ?? "";
+    delete process.env.OSMATRIX_VIEWER_TOKEN;
+    delete process.env.OSMATRIX_VIEWER_ID;
+    if (!token || !id) throw new Error("_viewer is started by osmatrix itself (env_viewer / osmatrix viewer)");
+    const guest = env.getGuest(g);
+    const target = async () => (guest.backend.vnc ? guest.backend.vnc() : undefined);
+    const started = Date.now();
+    let lastDisplay = started;
+    let lastBrowser = started;
+    let lastProbe = 0;
+    await serveViewer(`osmatrix: ${g}`, o.port, { id, token }, target, async (connected) => {
+      const now = Date.now();
+      // Exit once osmatrix no longer records this server (stopped, or replaced)...
+      const rec = env.viewerRecord(g);
+      if (rec ? rec.id !== id : now - started > 30_000) return false;
+      // ...after an hour with no browser (env_viewer starts a new one when asked)...
+      if (connected) lastBrowser = now;
+      else if (now - lastBrowser > 60 * 60_000) return false;
+      // ...or once the guest has had no display for two minutes (stopped outside osmatrix, crashed). A
+      // reset or snapshot holding the guest's viewer lock counts as a display; otherwise ask the backend
+      // (bounded; it runs tools) every 30 s, also with a browser connected: a stalled connection can
+      // outlive its guest.
+      if (env.viewerLockHeld(g)) lastDisplay = now;
+      else if (now - lastProbe >= 30_000) {
+        lastProbe = now;
+        if (await target().catch(() => undefined)) lastDisplay = now;
+      }
+      return now - lastDisplay < 120_000;
+    }, () => env.dropViewerRecord(g, id)); // a record left behind could vouch for a reused pid
+  }));
 
 program
   .command("up <guest>")
@@ -284,7 +323,7 @@ program
 
 program
   .command("screenshot <guest>")
-  .description("Save a PNG of the guest display (dockur and qemu guests)")
+  .description("Save a PNG of the guest display (dockur, qemu and tart guests)")
   .option("-o, --output <file>", "output file", "screenshot.png")
   .action(
     action(async (g: string, o: { output: string }) => {

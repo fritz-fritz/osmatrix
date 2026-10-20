@@ -1,54 +1,24 @@
 import net from "node:net";
 import zlib from "node:zlib";
+import { clientHandshake, SocketReader } from "./core/rfb.ts";
 import { getGuest } from "./env.ts";
 
 /**
- * Minimal RFB (VNC) client: unauthenticated, raw encoding. Enough for QEMU's built-in VNC server (dockur).
+ * Minimal RFB (VNC) client: no authentication or VNC authentication, raw encoding. Enough for QEMU's built-in
+ * VNC server (dockur, qemu) and Virtualization.framework's (tart).
  * Used for screenshots and keyboard/mouse input when a guest has no usable ssh yet (installers, GUI apps).
  */
 class Rfb {
   private sock!: net.Socket;
-  private buf = Buffer.alloc(0);
-  private waiters: (() => void)[] = [];
-  private closed?: Error;
+  private reader!: SocketReader;
   width = 0;
   height = 0;
 
-  async connect(host: string, port: number, timeoutMs = 10_000): Promise<void> {
+  async connect(host: string, port: number, password?: string, timeoutMs = 10_000): Promise<void> {
     this.sock = net.connect({ host, port });
     this.sock.setTimeout(timeoutMs, () => this.sock.destroy(new Error("VNC timeout")));
-    this.sock.on("data", (d: Buffer) => {
-      this.buf = Buffer.concat([this.buf, d]);
-      this.wake();
-    });
-    this.sock.on("error", (e) => {
-      this.closed = e;
-      this.wake();
-    });
-    this.sock.on("close", () => {
-      this.closed ??= new Error("VNC connection closed");
-      this.wake();
-    });
-
-    const ver = (await this.read(12)).toString("latin1");
-    if (!ver.startsWith("RFB ")) throw new Error(`not a VNC server: ${JSON.stringify(ver)}`);
-    const minor = parseInt(ver.slice(8, 11), 10);
-    const proto = minor >= 8 ? "RFB 003.008\n" : minor >= 7 ? "RFB 003.007\n" : "RFB 003.003\n";
-    this.sock.write(proto);
-    if (proto === "RFB 003.003\n") {
-      const t = (await this.read(4)).readUInt32BE(0);
-      if (t !== 1) throw new Error(`VNC requires authentication (type ${t}); only unauthenticated VNC is supported`);
-    } else {
-      const n = (await this.read(1))[0];
-      if (n === 0) throw new Error("VNC refused connection");
-      const types = [...(await this.read(n))];
-      if (!types.includes(1)) throw new Error(`VNC requires authentication (types ${types.join(",")}); only unauthenticated VNC is supported`);
-      this.sock.write(Buffer.from([1]));
-      if (proto === "RFB 003.008\n") {
-        const res = (await this.read(4)).readUInt32BE(0);
-        if (res !== 0) throw new Error("VNC security handshake failed");
-      }
-    }
+    this.reader = new SocketReader(this.sock);
+    await clientHandshake((n) => this.read(n), (b) => this.sock.write(b), password);
     this.sock.write(Buffer.from([1])); // ClientInit: shared
     const init = await this.read(24);
     this.width = init.readUInt16BE(0);
@@ -79,20 +49,8 @@ class Rfb {
     this.sock.write(enc);
   }
 
-  private wake() {
-    const w = this.waiters;
-    this.waiters = [];
-    for (const f of w) f();
-  }
-
-  private async read(n: number): Promise<Buffer> {
-    while (this.buf.length < n) {
-      if (this.closed) throw this.closed;
-      await new Promise<void>((r) => this.waiters.push(r));
-    }
-    const out = this.buf.subarray(0, n);
-    this.buf = this.buf.subarray(n);
-    return Buffer.from(out);
+  private read(n: number): Promise<Buffer> {
+    return this.reader.read(n);
   }
 
   /** Request a full frame and return RGBA pixels. */
@@ -249,9 +207,15 @@ function comboKeysyms(combo: string): number[] {
 async function connectGuest(name: string): Promise<Rfb> {
   const g = getGuest(name);
   const v = g.backend.vnc ? await g.backend.vnc() : undefined;
-  if (!v) throw new Error(`guest ${name} (${g.cfg.backend}) has no VNC display; screenshots/input are supported for dockur and qemu guests`);
+  if (!v) {
+    throw new Error(
+      g.backend.vnc
+        ? `guest ${name} has no VNC display right now; is it running (env_up)?`
+        : `guest ${name} (${g.cfg.backend}) has no VNC display; screenshots/input are supported for dockur, qemu and tart guests`,
+    );
+  }
   const rfb = new Rfb();
-  await rfb.connect(v.host, v.port);
+  await rfb.connect(v.host, v.port, v.password);
   return rfb;
 }
 

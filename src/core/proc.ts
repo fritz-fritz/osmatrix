@@ -64,13 +64,20 @@ export async function runOk(cmd: string, args: string[], opts: RunOptions = {}):
 }
 
 /** Start a process that outlives us. Returns its pid. */
-export function spawnDetached(cmd: string, args: string[], opts: { cwd?: string; logFile?: string } = {}): number {
-  const so: SpawnOptions = { cwd: opts.cwd, detached: true, windowsHide: true, stdio: "ignore" };
+export function spawnDetached(cmd: string, args: string[], opts: { cwd?: string; logFile?: string; env?: NodeJS.ProcessEnv } = {}): number {
+  const so: SpawnOptions = { cwd: opts.cwd, env: opts.env, detached: true, windowsHide: true, stdio: "ignore" };
+  let fd: number | undefined;
   if (opts.logFile) {
-    const fd = fs.openSync(opts.logFile, "a");
+    fd = fs.openSync(opts.logFile, "a");
     so.stdio = ["ignore", fd, fd];
   }
-  const child = spawn(cmd, args, so);
+  let child;
+  try {
+    child = spawn(cmd, args, so);
+  } finally {
+    // The child has its own copy; a long-lived parent (the MCP server) must not keep one per spawn.
+    if (fd !== undefined) fs.closeSync(fd);
+  }
   child.unref();
   if (!child.pid) throw new Error(`failed to start ${cmd}`);
   return child.pid;

@@ -1,4 +1,6 @@
+import { randomBytes, randomUUID } from "node:crypto";
 import fs from "node:fs";
+import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { backendFor, type Backend, type GuestStatus } from "./backends/index.ts";
@@ -6,8 +8,8 @@ import type { Viewer } from "./backends/types.ts";
 import { guestArm64Brew, guestHomebrew, guestMsvc, guestWorkdir, homebrewProvisionEnv, loadConfig, readRawConfig, writeConfig, type GuestConfig } from "./core/config.ts";
 import { macArm64Image, runnerHomebrew } from "./core/runner-images.ts";
 import { checkSizing, requirements, type Sizing } from "./core/sizing.ts";
-import { assetsDir, paths } from "./core/paths.ts";
-import { kill, sleep } from "./core/proc.ts";
+import { assetsDir, cliEntry, ensureDir, paths } from "./core/paths.ts";
+import { isAlive, kill, sleep, spawnDetached } from "./core/proc.ts";
 import {
   ensureKey,
   freePort,
@@ -23,6 +25,7 @@ import {
   startForward,
   type Endpoint,
 } from "./core/ssh.ts";
+import { acquireLocks, lockHeld, LockTimeout } from "./core/locks.ts";
 import { loadState, updateState, type ForwardRecord } from "./core/state.ts";
 
 export interface Guest {
@@ -64,51 +67,200 @@ export async function status(name?: string): Promise<(GuestStatus & { forwards?:
 }
 
 /**
- * Where the user can watch and use a running guest's screen: dockur's noVNC web viewer (the host port
- * Docker actually published, which differs from the 8006 in dockur's log when that port was taken), the
- * VNC display of a qemu guest, or Screen Sharing for tart. Includes the guest login osmatrix created,
- * as a file path rather than the password itself.
+ * Where the user can watch and use a running guest's screen, always in a browser and without a sign-in:
+ * dockur's own noVNC page (at the host port Docker actually published, which differs from the 8006 in
+ * dockur's log when that port was taken), or for qemu and tart guests osmatrix's viewer server, which
+ * bridges noVNC to the guest's VNC display. Guests log in automatically and don't lock their screen, so
+ * no credentials are involved or returned.
  */
 export async function viewer(name: string): Promise<GuestViewer> {
-  return viewerFor(getGuest(name), path.join(paths.guestDir(name), "credentials.json"));
+  const g = getGuest(name);
+  // viewerFor checks the guest's status; under the lock, its VNC address is rechecked (once).
+  return viewerFor(g, (n) => ensureViewerServer(n, async () => !!(await g.backend.vnc?.())));
 }
 
-export type GuestViewer = Viewer & { guest: string; login?: { user: string; passwordFile: string } };
+export type GuestViewer = Viewer & { guest: string };
 
-/** viewer() for a resolved guest; `credentialsFile` is where osmatrix keeps the account it created. */
-export async function viewerFor(g: Guest, credentialsFile: string): Promise<GuestViewer> {
+/** The guest has no VNC address yet (starting, or stopped). */
+export class DisplayNotUp extends Error {}
+
+const HOW = "Open it in a browser. It shows the guest's screen, already signed in, and only listens on this machine.";
+
+/** viewer() for a resolved guest; `serve` starts (or finds) the guest's viewer server and returns its URL. */
+export async function viewerFor(g: Guest, serve: (name: string) => Promise<string>): Promise<GuestViewer> {
   const name = g.cfg.name;
   if (g.cfg.backend === "ssh" || g.cfg.backend === "container") {
     throw new Error(`${name} is a${g.cfg.backend === "ssh" ? "n ssh" : " container"} guest without a display osmatrix manages`);
   }
-  const st = await g.backend.status();
-  if (st.state === "absent" || st.state === "stopped") throw new Error(`${name} is ${st.state}; start it first (env_up / \`osmatrix up ${name}\`)`);
-  let v: Viewer | undefined;
-  if (g.backend.viewer) v = await g.backend.viewer();
-  else if (st.ports?.web) {
-    v = { kind: "web", url: `http://127.0.0.1:${st.ports.web}`, how: "Open it in a browser (dockur's noVNC viewer); it only listens on this machine." };
-  } else {
-    const vnc = g.backend.vnc ? await g.backend.vnc() : undefined;
-    if (vnc) {
-      const url = `vnc://${vnc.host}:${vnc.port}`;
-      v = {
-        kind: "vnc",
-        url,
-        how: `Open it with a VNC client such as TigerVNC, RealVNC Viewer or Remmina (\`vncviewer ${vnc.host}::${vnc.port}\`); there is no password, and it only listens on this machine.`,
-      };
-    }
+  // dockur serves its own viewer, at the port status() reports. Other backends need no status() (for tart
+  // that's tart ip and an ssh probe): serve() checks their VNC address, which is what matters here.
+  if (g.cfg.backend === "dockur" || !g.backend.vnc) {
+    const st = await g.backend.status();
+    if (st.state === "absent" || st.state === "stopped") throw new Error(`${name} is ${st.state}; start it first (env_up / \`osmatrix up ${name}\`)`);
+    if (st.ports?.web) return { guest: name, kind: "web", url: `http://127.0.0.1:${st.ports.web}`, how: HOW };
+    if (!g.backend.vnc) throw new Error(`${name} has no display osmatrix can show`);
   }
-  if (!v) throw new Error(`${name} has no display osmatrix can show`);
-  // The user name comes from the same file as the password, not from cfg.user: setup-ssh can point ssh
-  // at another account, whose password osmatrix doesn't have.
-  let login: GuestViewer["login"];
   try {
-    const { username } = JSON.parse(fs.readFileSync(credentialsFile, "utf8")) as { username?: unknown };
-    if (typeof username === "string" && username) login = { user: username, passwordFile: credentialsFile };
-  } catch {
-    /* no account created by osmatrix (e.g. tart images bring their own) */
+    return { guest: name, kind: "web", url: await serve(name), how: HOW };
+  } catch (e) {
+    // No display: say so plainly when the guest is stopped or doesn't exist (status() only on this path).
+    if (e instanceof DisplayNotUp) {
+      const st = await g.backend.status();
+      if (st.state === "absent" || st.state === "stopped") throw new Error(`${name} is ${st.state}; start it first (env_up / \`osmatrix up ${name}\`)`);
+    }
+    throw e;
   }
-  return { guest: name, ...v, ...(login ? { login } : {}) };
+}
+
+/**
+ * Serializes starting and stopping a guest's viewer server across CLI and MCP processes, so concurrent
+ * callers share one server and none is left running untracked. With `busyAfterMs` (env_viewer), rather
+ * than wait out a long stop, snapshot or reset, it says the guest is busy.
+ */
+async function withViewerLock<T>(name: string, fn: () => Promise<T>, busyAfterMs?: number): Promise<T> {
+  let release: () => void;
+  try {
+    // env_viewer polls quickly for a short wait; stops and resets that wait out a long operation, slowly.
+    release = await acquireLocks([viewerLockKey(name)], viewerLockOwner(name), () => {}, busyAfterMs ? 100 : 1000, busyAfterMs);
+  } catch (e) {
+    if (e instanceof LockTimeout) throw new Error(`${name} is busy (being started, stopped, snapshotted or reset, or another viewer request); ask again in a moment`);
+    throw e;
+  }
+  try {
+    return await fn();
+  } finally {
+    release();
+  }
+}
+
+const viewerLockKey = (name: string) => `viewer:${name}`;
+const viewerLockOwner = (name: string) => ({ pid: process.pid, run: "viewer", repo: "", leg: name });
+
+/** How long env_viewer waits for whatever holds the guest's viewer lock before saying it's busy. */
+// Longer than a worst-case viewer start (3 tries of 20 s), so a concurrent env_viewer isn't told "busy"
+// just because another one is starting the server.
+const VIEWER_LOCK_WAIT_MS = 70_000;
+
+/** Whether something (a stop, snapshot, reset or viewer start) is working on the guest right now. */
+export const viewerLockHeld = (name: string) => lockHeld(viewerLockKey(name));
+
+/**
+ * The URL of the guest's viewer server, started in the background unless it is already running.
+ * `running` is rechecked under the lock: a guest being stopped meanwhile must not get a fresh server.
+ */
+export async function ensureViewerServer(name: string, running: () => Promise<boolean>): Promise<string> {
+  // All under the lock teardown takes too, so a server being stopped is never handed out.
+  return withViewerLock(name, async () => {
+    if (!(await running())) {
+      throw new DisplayNotUp(`${name}'s display isn't up yet (still starting); try again in a few seconds`);
+    }
+    return startViewerServer(name);
+  }, VIEWER_LOCK_WAIT_MS);
+}
+
+/**
+ * The guest's viewer server record. It lives in the guest's own directory rather than the shared state
+ * file, so the per-guest lock alone guards it.
+ */
+type ViewerRecord = { pid: number; port: number; id: string; token: string };
+const viewerFile = (name: string) => path.join(paths.guestDir(name), "viewer.json");
+
+/**
+ * For a viewer server exiting by itself: drop its record, if it's still its own. Under the lock, so a
+ * replacement published meanwhile isn't removed; best effort if the lock stays busy.
+ */
+export async function dropViewerRecord(name: string, id: string): Promise<void> {
+  await withViewerLock(
+    name,
+    async () => {
+      if (viewerRecord(name)?.id === id) fs.rmSync(viewerFile(name), { force: true });
+    },
+    30_000,
+  ).catch(() => undefined);
+}
+
+export function viewerRecord(name: string): ViewerRecord | undefined {
+  try {
+    return JSON.parse(fs.readFileSync(viewerFile(name), "utf8")) as ViewerRecord;
+  } catch {
+    return undefined;
+  }
+}
+
+/** The page's URL: the bridge token rides in the fragment, which browsers never send to the server. */
+const viewerUrl = (r: ViewerRecord) => `http://127.0.0.1:${r.port}/#t=${r.token}`;
+
+async function startViewerServer(name: string): Promise<string> {
+  const cur = viewerRecord(name);
+  // Generous: a server busy relaying a heavy screen can be slow to answer, and replacing it cuts its page.
+  if (cur && isAlive(cur.pid) && (await isViewer(cur.port, cur.id, cur.token, 5000))) return viewerUrl(cur);
+  // Not answering as our server (crashed, wedged, or the pid is another process's after a reboot): drop the
+  // record without signalling anything. A server of ours that is merely slow exits by itself once it sees
+  // its record gone (see `osmatrix _viewer`).
+  fs.rmSync(viewerFile(name), { force: true });
+  let lastErr: Error | undefined;
+  const log = path.join(ensureDir(paths.guestDir(name)), "viewer.log");
+  fs.writeFileSync(log, ""); // this server's log only
+  // A free port can be taken before the server binds it; try a few.
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const port = await freePort();
+    const id = randomUUID();
+    const token = randomBytes(24).toString("base64url");
+    const pid = spawnDetached(process.execPath, [cliEntry(), "_viewer", name, "--port", String(port)], {
+      logFile: log,
+      // Both through the environment, not argv, which other local users can list: the id proves the
+      // server that answers is this one, the token gates its bridge.
+      env: { ...process.env, OSMATRIX_VIEWER_ID: id, OSMATRIX_VIEWER_TOKEN: token },
+    });
+    // Up to 20 s: a cold node start on a host busy booting a VM can be slow.
+    for (let i = 0; i < 200 && isAlive(pid); i++) {
+      // Whatever answers must be this server: another program may have taken the port first.
+      if (await isViewer(port, id, token)) {
+        const rec: ViewerRecord = { pid, port, id, token };
+        fs.writeFileSync(viewerFile(name), JSON.stringify(rec), { mode: 0o600 });
+        return viewerUrl(rec);
+      }
+      await sleep(100);
+    }
+    kill(pid);
+    lastErr = new Error(`the viewer server didn't start; see ${log}`);
+  }
+  throw lastErr!;
+}
+
+/** Whether the viewer server started with this id (and token) answers on the port. */
+function isViewer(port: number, id: string, token: string, timeoutMs = 1000): Promise<boolean> {
+  return new Promise((resolve) => {
+    const req = http.get({ host: "127.0.0.1", port, path: `/status?t=${encodeURIComponent(token)}`, timeout: timeoutMs }, (res) => {
+      res.resume();
+      resolve(res.headers["x-osmatrix-viewer"] === id);
+    });
+    req.on("timeout", () => req.destroy());
+    req.on("error", () => resolve(false));
+  });
+}
+
+/** Stop the guest's viewer server, if any. */
+export function stopViewer(name: string): Promise<void> {
+  return withViewerLock(name, () => killViewer(name));
+}
+
+/**
+ * Stop the guest's viewer server, then run `fn` (the backend stopping the guest) under the same lock,
+ * so no env_viewer call starts a new server while the guest is going down.
+ */
+function withViewerStopped<T>(name: string, fn: () => Promise<T>): Promise<T> {
+  return withViewerLock(name, async () => {
+    await killViewer(name);
+    return fn();
+  });
+}
+
+async function killViewer(name: string): Promise<void> {
+  const v = viewerRecord(name);
+  // Only signal the pid while its server still answers with our id; a stale record's pid may be reused.
+  if (v && isAlive(v.pid) && (await isViewer(v.port, v.id, v.token))) kill(v.pid);
+  fs.rmSync(viewerFile(name), { force: true });
 }
 
 /** Without boot history, how long an installed guest may take before a quiet boot counts as hung. */
@@ -253,9 +405,9 @@ export async function configure(name: string, change: Sizing, opts: { apply?: bo
   const fresh = getGuest(name);
   if (st.state !== "absent" && st.state !== "stopped") {
     await unforward(name, undefined, true);
-    await fresh.backend.down();
+    await withViewerLock(name, () => fresh.backend.down());
   }
-  await fresh.backend.up();
+  await withViewerLock(name, () => fresh.backend.up());
   const status = await waitReady(fresh, opts.waitSec ?? 900);
   return { ...base, applied: status.state === "ready" ? "applied; the guest restarted with the new sizing" : `restarted, but not ready yet (${status.state})`, status };
 }
@@ -263,28 +415,45 @@ export async function configure(name: string, change: Sizing, opts: { apply?: bo
 export async function down(name: string): Promise<GuestStatus> {
   const g = getGuest(name);
   await unforward(name, undefined, true);
-  await g.backend.down();
+  await withViewerStopped(name, () => g.backend.down());
   return g.backend.status();
 }
 
 export async function snapshot(name: string): Promise<GuestStatus> {
   const g = getGuest(name);
   await unforward(name, undefined, true);
-  await g.backend.snapshot();
+  await snapshotGuest(g);
   return g.backend.status();
+}
+
+/**
+ * The backend's snapshot, under the guest's viewer lock. Backends that stop the guest for the copy and
+ * start it again keep the viewer (its page reconnects); one left stopped (tart) loses it, as with down.
+ */
+export function snapshotGuest(g: Guest): Promise<void> {
+  const name = g.cfg.name;
+  return withViewerLock(name, async () => {
+    await g.backend.snapshot();
+    if (!(await g.backend.vnc?.().catch(() => undefined))) {
+      const st = await g.backend.status();
+      if (st.state === "absent" || st.state === "stopped") await killViewer(name);
+    }
+  });
 }
 
 export async function reset(name: string, waitSec = 0): Promise<GuestStatus> {
   const g = getGuest(name);
   await unforward(name, undefined, true);
-  await g.backend.reset();
+  // Under the viewer lock, so no viewer is started for the guest mid-reset; a running one stays and its
+  // page reconnects to the new run.
+  await withViewerLock(name, () => g.backend.reset());
   return waitSec > 0 ? waitReady(g, waitSec) : g.backend.status();
 }
 
 export async function destroy(name: string): Promise<void> {
   const g = getGuest(name);
   await unforward(name, undefined, true);
-  await g.backend.destroy();
+  await withViewerStopped(name, () => g.backend.destroy());
 }
 
 /** Endpoint for a guest that must already be reachable. */

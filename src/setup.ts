@@ -9,7 +9,7 @@ import { loadConfig, readRawConfig, writeConfig } from "./core/config.ts";
 import { assetsDir, cliEntry, ensureDir, paths } from "./core/paths.ts";
 import { isAlive, run, sleep, spawnDetached } from "./core/proc.ts";
 import { ensureKey, sshExec } from "./core/ssh.ts";
-import { getGuest, macProvisionPlan, readyEndpoint, waitReady, type Guest } from "./env.ts";
+import { getGuest, macProvisionPlan, readyEndpoint, snapshotGuest, waitReady, type Guest } from "./env.ts";
 import { input, screenBrightness } from "./gui.ts";
 
 /**
@@ -105,7 +105,7 @@ export async function setup(name: string, opts: SetupOptions = {}): Promise<Gues
     if (st.state !== "ready") throw new Error(`guest not ready after setup: ${st.state} ${st.detail ?? ""}`);
     if (!st.hasSnapshot) {
       phase("saving golden snapshot");
-      await g.backend.snapshot();
+      await snapshotGuest(g);
       await waitReady(g, 600);
     }
     writeState(name, { phase: "done", done: true });
