@@ -69,8 +69,15 @@ export async function status(name?: string): Promise<(GuestStatus & { forwards?:
  * VNC display of a qemu guest, or Screen Sharing for tart. Includes the guest login osmatrix created,
  * as a file path rather than the password itself.
  */
-export async function viewer(name: string): Promise<Viewer & { guest: string; login?: { user: string; passwordFile: string } }> {
-  const g = getGuest(name);
+export async function viewer(name: string): Promise<GuestViewer> {
+  return viewerFor(getGuest(name), path.join(paths.guestDir(name), "credentials.json"));
+}
+
+export type GuestViewer = Viewer & { guest: string; login?: { user: string; passwordFile: string } };
+
+/** viewer() for a resolved guest; `credentialsFile` is where osmatrix keeps the account it created. */
+export async function viewerFor(g: Guest, credentialsFile: string): Promise<GuestViewer> {
+  const name = g.cfg.name;
   if (g.cfg.backend === "ssh" || g.cfg.backend === "container") {
     throw new Error(`${name} is a${g.cfg.backend === "ssh" ? "n ssh" : " container"} guest without a display osmatrix manages`);
   }
@@ -92,8 +99,15 @@ export async function viewer(name: string): Promise<Viewer & { guest: string; lo
     }
   }
   if (!v) throw new Error(`${name} has no display osmatrix can show`);
-  const passwordFile = path.join(paths.guestDir(name), "credentials.json");
-  const login = fs.existsSync(passwordFile) ? { user: g.cfg.user ?? (JSON.parse(fs.readFileSync(passwordFile, "utf8")) as { username: string }).username, passwordFile } : undefined;
+  // The user name comes from the same file as the password, not from cfg.user: setup-ssh can point ssh
+  // at another account, whose password osmatrix doesn't have.
+  let login: GuestViewer["login"];
+  try {
+    const { username } = JSON.parse(fs.readFileSync(credentialsFile, "utf8")) as { username?: unknown };
+    if (typeof username === "string" && username) login = { user: username, passwordFile: credentialsFile };
+  } catch {
+    /* no account created by osmatrix (e.g. tart images bring their own) */
+  }
   return { guest: name, ...v, ...(login ? { login } : {}) };
 }
 
