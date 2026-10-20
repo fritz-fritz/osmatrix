@@ -146,9 +146,10 @@ program
       if (connected) lastBrowser = now;
       else if (now - lastBrowser > 60 * 60_000) return false;
       // ...or once the guest has had no display for two minutes (stopped outside osmatrix, crashed). A
-      // connected browser, or a reset or snapshot holding the guest's viewer lock, counts as a display;
-      // otherwise ask the backend, which runs tools, so only every 30 s.
-      if (connected || env.viewerLockHeld(g)) lastDisplay = now;
+      // reset or snapshot holding the guest's viewer lock counts as a display; otherwise ask the backend
+      // (bounded; it runs tools) every 30 s, also with a browser connected: a stalled connection can
+      // outlive its guest.
+      if (env.viewerLockHeld(g)) lastDisplay = now;
       else if (now - lastProbe >= 30_000) {
         lastProbe = now;
         if (await target().catch(() => undefined)) lastDisplay = now;

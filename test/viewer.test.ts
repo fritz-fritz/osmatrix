@@ -5,7 +5,7 @@ import WebSocket from "ws";
 import type { Backend, GuestStatus } from "../src/backends/types.ts";
 import type { GuestConfig } from "../src/core/config.ts";
 import { desEncrypt, vncAuthResponse } from "../src/core/rfb.ts";
-import { viewerFor, type Guest } from "../src/env.ts";
+import { DisplayNotUp, viewerFor, type Guest } from "../src/env.ts";
 import { closeReason, viewerServer, type VncTarget } from "../src/viewer.ts";
 
 function guest(cfg: Partial<GuestConfig>, status: Partial<GuestStatus>, extra: Partial<Backend> = {}): Guest {
@@ -391,4 +391,14 @@ test("viewer server: /status tells the page why the bridge failed, and only with
     server.close();
     vnc.close();
   }
+});
+
+test("viewer: a qemu or tart guest without a display is told to start it when it's stopped, else to retry", async () => {
+  const notUp = async (): Promise<string> => {
+    throw new DisplayNotUp("g's display isn't up yet (still starting); try again in a few seconds");
+  };
+  const vnc = { vnc: async () => undefined };
+  await assert.rejects(viewerFor(guest({ backend: "qemu" }, { state: "stopped" }, vnc), notUp), /g is stopped; start it first/);
+  await assert.rejects(viewerFor(guest({ backend: "tart", os: "macos" }, { state: "absent" }, vnc), notUp), /g is absent; start it first/);
+  await assert.rejects(viewerFor(guest({ backend: "qemu" }, { state: "booting" }, vnc), notUp), /isn't up yet/);
 });

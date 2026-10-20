@@ -81,6 +81,9 @@ export async function viewer(name: string): Promise<GuestViewer> {
 
 export type GuestViewer = Viewer & { guest: string };
 
+/** The guest has no VNC address yet (starting, or stopped). */
+export class DisplayNotUp extends Error {}
+
 const HOW = "Open it in a browser. It shows the guest's screen, already signed in, and only listens on this machine.";
 
 /** viewer() for a resolved guest; `serve` starts (or finds) the guest's viewer server and returns its URL. */
@@ -97,7 +100,16 @@ export async function viewerFor(g: Guest, serve: (name: string) => Promise<strin
     if (st.ports?.web) return { guest: name, kind: "web", url: `http://127.0.0.1:${st.ports.web}`, how: HOW };
     if (!g.backend.vnc) throw new Error(`${name} has no display osmatrix can show`);
   }
-  return { guest: name, kind: "web", url: await serve(name), how: HOW };
+  try {
+    return { guest: name, kind: "web", url: await serve(name), how: HOW };
+  } catch (e) {
+    // No display: say so plainly when the guest is stopped or doesn't exist (status() only on this path).
+    if (e instanceof DisplayNotUp) {
+      const st = await g.backend.status();
+      if (st.state === "absent" || st.state === "stopped") throw new Error(`${name} is ${st.state}; start it first (env_up / \`osmatrix up ${name}\`)`);
+    }
+    throw e;
+  }
 }
 
 /**
@@ -125,7 +137,9 @@ const viewerLockKey = (name: string) => `viewer:${name}`;
 const viewerLockOwner = (name: string) => ({ pid: process.pid, run: "viewer", repo: "", leg: name });
 
 /** How long env_viewer waits for whatever holds the guest's viewer lock before saying it's busy. */
-const VIEWER_LOCK_WAIT_MS = 10_000;
+// Longer than a worst-case viewer start (3 tries of 20 s), so a concurrent env_viewer isn't told "busy"
+// just because another one is starting the server.
+const VIEWER_LOCK_WAIT_MS = 70_000;
 
 /** Whether something (a stop, snapshot, reset or viewer start) is working on the guest right now. */
 export const viewerLockHeld = (name: string) => lockHeld(viewerLockKey(name));
@@ -140,7 +154,7 @@ export async function ensureViewerServer(name: string, running: () => Promise<bo
   if (cur && isAlive(cur.pid) && (await isViewer(cur.port, cur.id, 5000)) && (await running())) return viewerUrl(cur);
   return withViewerLock(name, async () => {
     if (!(await running())) {
-      throw new Error(`${name}'s display isn't up yet (still starting, or it stopped); try again in a few seconds, or start it (env_up / \`osmatrix up ${name}\`)`);
+      throw new DisplayNotUp(`${name}'s display isn't up yet (still starting); try again in a few seconds`);
     }
     return startViewerServer(name);
   }, VIEWER_LOCK_WAIT_MS);

@@ -56,7 +56,8 @@ export class TartBackend implements Backend {
   }
 
   private async list(): Promise<{ Name: string; State: string }[]> {
-    const r = await run(this.tart(), ["list", "--format", "json"]);
+    // Bounded: the viewer and its keep-alive call this repeatedly, and a hung tart must not pile up.
+    const r = await run(this.tart(), ["list", "--format", "json"], { timeoutMs: 15_000 });
     return r.code === 0 ? JSON.parse(r.stdout) : [];
   }
 
