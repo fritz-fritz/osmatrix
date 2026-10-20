@@ -4,6 +4,7 @@ import { backendFor } from "../backends/index.ts";
 import { ContainerBackend } from "../backends/container.ts";
 import { dockerBin, dockerHasKvm, imageExists } from "../backends/docker.ts";
 import { parityImageTag, runnerRust } from "../backends/linux-image.ts";
+import { qemuBinary } from "../backends/qemu.ts";
 import { DEFAULT_LINUX_IMAGE, loadConfig, type GuestConfig } from "./config.ts";
 import { ensureDir, paths } from "./paths.ts";
 import { run, which } from "./proc.ts";
@@ -72,7 +73,9 @@ export async function doctor(): Promise<DoctorReport> {
     git: await version(which("git"), ["--version"]),
     act: null,
     tart: process.platform === "darwin" ? await version(which("tart"), ["--version"]) : null,
-    "qemu-system-aarch64": await version(which("qemu-system-aarch64"), ["--version"]),
+    // Found where the qemu backend finds them, including the QEMU for Windows installer's folder.
+    "qemu-system-aarch64": await version(qemuBinary("qemu-system-aarch64"), ["--version"]),
+    "qemu-system-x86_64": await version(qemuBinary("qemu-system-x86_64"), ["--version"]),
   };
   const act = await actReport(cfg);
   tools.act =

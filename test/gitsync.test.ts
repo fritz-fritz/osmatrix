@@ -288,6 +288,55 @@ test("a host cache that lost its basis starts over", async () => {
   assert.equal(s2.commit, s1.commit);
 });
 
+test("a linked worktree becomes a self-contained clone for host legs", async () => {
+  const main = makeRepo("linked-main");
+  fs.writeFileSync(path.join(main, "a.txt"), "a\n");
+  fs.writeFileSync(path.join(main, "b.txt"), "b\n");
+  git(main, ["add", "-A"]);
+  commit(main, "first");
+  git(main, ["remote", "add", "origin", "https://github.com/acme/widget.git"]);
+  assert.equal(await gs.gitDirOutsideWorkTree(main), false);
+  assert.equal(await gs.gitDirOutsideWorkTree(path.join(main, "..")), false);
+
+  const wt = path.join(root, "linked-wt");
+  git(main, ["worktree", "add", "-q", "-b", "agent", wt]);
+  assert.equal(await gs.gitDirOutsideWorkTree(wt), true);
+  fs.writeFileSync(path.join(wt, "a.txt"), "changed\n");
+  fs.writeFileSync(path.join(wt, "new.txt"), "untracked\n");
+  git(wt, ["add", "b.txt"]);
+  const head = git(wt, ["rev-parse", "HEAD"]).trim();
+  const statusBefore = status(wt);
+
+  const clone = path.join(root, "linked-clone");
+  await gs.cloneWorktree(wt, clone);
+  assert.ok(fs.statSync(path.join(clone, ".git")).isDirectory());
+  assert.equal(fs.existsSync(path.join(clone, ".git", "objects", "info", "alternates")), false);
+  assert.equal(git(clone, ["rev-parse", "HEAD"]).trim(), head);
+  assert.equal(git(clone, ["symbolic-ref", "HEAD"]).trim(), "refs/heads/agent");
+  assert.equal(git(clone, ["config", "remote.origin.url"]).trim(), "https://github.com/acme/widget.git");
+  assert.equal(fs.readFileSync(path.join(clone, "a.txt"), "utf8"), "changed\n");
+  assert.equal(fs.readFileSync(path.join(clone, "new.txt"), "utf8"), "untracked\n");
+  assert.deepEqual(status(clone), statusBefore);
+  assert.equal(git(clone, ["for-each-ref", "refs/osmatrix"]), "");
+  // Nothing in the clone reaches back into the main repository.
+  git(clone, ["fsck", "--no-progress"]);
+  assert.equal(git(main, ["status", "--porcelain"]), "");
+
+  // Concurrent host legs share the cache; each clone gets its own snapshot and leaves no ref behind.
+  fs.writeFileSync(path.join(wt, "b.txt"), "b2\n");
+  const clones = ["linked-c1", "linked-c2", "linked-c3"].map((n) => path.join(root, n));
+  await Promise.all(clones.map((c) => gs.cloneWorktree(wt, c)));
+  for (const c of clones) assert.equal(fs.readFileSync(path.join(c, "b.txt"), "utf8"), "b2\n");
+  const cache = snapshotCache(wt, "host");
+  assert.equal(git(cache, ["--git-dir", cache, "for-each-ref", "--format=%(refname)", "refs/osmatrix/"]).trim(), SNAPSHOT_REF);
+
+  // A repository without an origin stays without one.
+  git(main, ["remote", "remove", "origin"]);
+  const bare = path.join(root, "linked-clone-noorigin");
+  await gs.cloneWorktree(wt, bare);
+  assert.equal(gStatus(bare, ["config", "remote.origin.url"]), 1);
+});
+
 test("repositories a checkout can't reproduce fall back to copying", async () => {
   const plain = path.join(root, "plain");
   fs.mkdirSync(plain);

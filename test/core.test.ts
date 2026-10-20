@@ -1,10 +1,22 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
-import { ActJsonParser, VC_TOOLS_PROBE, actDifferenceHints, commonActArgs, guestLegDir, macToolCacheCmd, msvcMissing, powershell, pwshHomePath, removeCmd } from "../src/ci/run.ts";
+import {
+  ActJsonParser,
+  VC_TOOLS_PROBE,
+  actDifferenceHints,
+  commonActArgs,
+  guestCancelCmd,
+  guestLegDir,
+  macToolCacheCmd,
+  msvcMissing,
+  powershell,
+  pwshHomePath,
+  removeCmd,
+} from "../src/ci/run.ts";
 import {
   DEFAULT_HOMEBREW,
   defaultConfig,
@@ -37,7 +49,7 @@ test("pwsh quoting and command lines", () => {
 
 test("default guests per host", () => {
   assert.deepEqual(Object.keys(defaultGuests("darwin", "arm64")).sort(), ["macos", "ubuntu", "windows"]);
-  assert.deepEqual(Object.keys(defaultGuests("darwin", "x64")).sort(), ["macos", "ubuntu"]);
+  assert.deepEqual(Object.keys(defaultGuests("darwin", "x64")).sort(), ["macos", "ubuntu", "windows"]);
   assert.equal(defaultGuests("darwin", "arm64").macos.backend, "tart");
   assert.deepEqual(Object.keys(defaultGuests("linux", "x64")).sort(), ["macos", "ubuntu", "windows"]);
   assert.deepEqual(Object.keys(defaultGuests("win32", "x64")).sort(), ["macos", "ubuntu", "windows"]);
@@ -154,6 +166,50 @@ test("VM legs keep their own files next to the work tree and pass a derived work
   const ps = removeCmd({ shell: "pwsh" }, own.run);
   assert.match(ps, /if \(Test-Path -LiteralPath \$p\) \{ Remove-Item -Recurse -Force -ErrorAction Stop -LiteralPath \$p \}/);
   assert.ok(!ps.includes("SilentlyContinue"));
+});
+
+test("cancelling a VM leg stops the run's act process trees in the guest, and only those", { skip: process.platform === "win32" }, async () => {
+  const run = "20261018T101010-cd34";
+  const alive = (pid: number) => {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  // Stand-ins for act: a shell whose command line names the run's directory (as --artifact-server-path
+  // does), with a child that doesn't; and the same for another run, which must survive.
+  const start = (id: string) => {
+    const p = spawn("sh", ["-c", `sleep 300 & echo $!; wait; : ../.osmatrix/${id}/leg/artifacts`], { stdio: ["ignore", "pipe", "ignore"] });
+    return new Promise<{ sh: number; child: number }>((res) => p.stdout.once("data", (d: Buffer) => res({ sh: p.pid!, child: Number(String(d).trim()) })));
+  };
+  const ours = await start(run);
+  const other = await start("20261018T101010-ffff");
+  try {
+    const cmd = guestCancelCmd({ shell: "posix" }, run);
+    // The pattern is split, so the shell running the command doesn't find itself.
+    assert.ok(!cmd.includes(`.osmatrix/${run}/`));
+    const r = spawnSync("sh", ["-c", cmd], { encoding: "utf8", timeout: 30_000 });
+    assert.equal(r.status, 0, r.stderr);
+    await new Promise((res) => setTimeout(res, 200));
+    assert.equal(alive(ours.sh), false);
+    assert.equal(alive(ours.child), false);
+    assert.equal(alive(other.sh), true);
+    assert.equal(alive(other.child), true);
+  } finally {
+    for (const pid of [ours.child, ours.sh, other.child, other.sh]) {
+      try {
+        process.kill(pid, "SIGKILL");
+      } catch {
+        /* gone */
+      }
+    }
+  }
+  const ps = guestCancelCmd({ shell: "pwsh" }, run);
+  assert.ok(!ps.includes(`.osmatrix/${run}/`));
+  assert.match(ps, /\$_\.ProcessId -ne \$PID -and \$_\.CommandLine -like \$pat/);
+  assert.match(ps, /taskkill\.exe \/PID \$_\.ProcessId \/T \/F/);
 });
 
 test("macOS tool cache check repairs only what isn't owned, writable and searchable, and reports a failed repair", { skip: process.platform === "win32" }, () => {

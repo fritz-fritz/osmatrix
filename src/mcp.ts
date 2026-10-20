@@ -3,7 +3,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import fs from "node:fs";
 import path from "node:path";
 import { z } from "zod";
-import { ciLogs, ciPlan, ciRun, ciStatus } from "./ci/run.ts";
+import { ciCancel, ciLogs, ciPlan, ciRun, ciStatus } from "./ci/run.ts";
 import { doctor } from "./core/host.ts";
 import { pkgRoot } from "./core/paths.ts";
 import * as env from "./env.ts";
@@ -74,6 +74,7 @@ export const TOOL_ANNOTATIONS: Record<string, { title: string; readOnlyHint: boo
   ci_run: { title: "Run CI legs locally", readOnlyHint: false, destructiveHint: true, openWorldHint: true },
   ci_status: { title: "Show CI run status", readOnlyHint: true, destructiveHint: false, openWorldHint: false },
   ci_logs: { title: "Read CI leg logs", readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+  ci_cancel: { title: "Cancel a local CI run", readOnlyHint: false, destructiveHint: true, openWorldHint: false },
 };
 
 export async function startMcp(): Promise<void> {
@@ -301,7 +302,7 @@ export async function startMcp(): Promise<void> {
 
   register(
     "env_screenshot",
-    { description: "Screenshot a VM guest's display (dockur guests). Useful during OS setup or for GUI testing.", inputSchema: { guest } },
+    { description: "Screenshot a VM guest's display (dockur and qemu guests). Useful during OS setup or for GUI testing.", inputSchema: { guest } },
     safe(async ({ guest }) => {
       const s = await screenshot(guest);
       return {
@@ -367,6 +368,10 @@ export async function startMcp(): Promise<void> {
           .describe('Event payload for act, e.g. {"ref": "refs/tags/v1.2.3"} to simulate pushing a release tag'),
         secret_file: z.string().optional(),
         timeout_minutes: z.number().int().min(1).max(360).optional(),
+        replace: z
+          .boolean()
+          .optional()
+          .describe("Cancel runs of this repo still running any of the same workflows first (like concurrency: cancel-in-progress), e.g. when re-running after a fix"),
       },
     },
     safe(async (a) => {
@@ -379,6 +384,7 @@ export async function startMcp(): Promise<void> {
         eventPayload: a.event_payload,
         secretFile: a.secret_file,
         timeoutMin: a.timeout_minutes,
+        cancelPrevious: a.replace,
       });
       return text({
         id: s.id,
@@ -406,6 +412,16 @@ export async function startMcp(): Promise<void> {
       inputSchema: { repo, leg: z.string(), run: z.string().optional(), tail: z.number().int().min(1).max(5000).optional(), grep: z.string().optional() },
     },
     safe(async (a) => text(untrusted(`ci log ${a.leg}`, ciLogs(a.repo ?? process.cwd(), a.leg, { run: a.run, tail: a.tail, grep: a.grep })))),
+  );
+
+  register(
+    "ci_cancel",
+    {
+      description:
+        "Stop a CI run (default: the latest one still running in repo) and clean up after it: act's job and service containers, networks and volumes on the host, act and its processes in guests, and the per-run files there. Pending legs don't start; unfinished legs end `cancelled` and the run `done` with `cancelled: true`. Guests stay up for the next ci_run. Takes up to a minute or so.",
+      inputSchema: { repo, run: z.string().optional() },
+    },
+    safe(async (a) => text(await ciCancel(a.repo ?? process.cwd(), a.run))),
   );
 
   await server.connect(new StdioServerTransport());
