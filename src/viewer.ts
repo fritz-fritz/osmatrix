@@ -259,6 +259,8 @@ export async function serveViewer(title: string, port: number, opts: ViewerOptio
     server.once("error", reject);
     server.listen(port, "127.0.0.1", resolve);
   });
+  // Once listening, an error accepting a connection (e.g. out of file descriptors) is logged, not fatal.
+  server.on("error", (e) => console.error(`viewer server: ${e.message}`));
   for (;;) {
     await new Promise((r) => setTimeout(r, 5000));
     let keep = true;

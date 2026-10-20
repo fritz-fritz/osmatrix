@@ -125,11 +125,14 @@ program
   .requiredOption("--port <n>", "port to listen on (127.0.0.1)", int)
   .requiredOption("--id <id>", "identifies this server to the osmatrix process that started it")
   .action(action(async (g: string, o: { port: number; id: string }) => {
+    const token = process.env.OSMATRIX_VIEWER_TOKEN ?? "";
+    // Not passed on to the tools the backend runs (tart list and the like).
+    delete process.env.OSMATRIX_VIEWER_TOKEN;
     const guest = env.getGuest(g);
     const target = async () => (guest.backend.vnc ? guest.backend.vnc() : undefined);
     const started = Date.now();
     let lastDisplay = started;
-    await serveViewer(`osmatrix: ${g}`, o.port, { id: o.id, token: process.env.OSMATRIX_VIEWER_TOKEN ?? "" }, target, async () => {
+    await serveViewer(`osmatrix: ${g}`, o.port, { id: o.id, token }, target, async () => {
       // Exit once osmatrix no longer records this server (stopped, or replaced), or once the guest has had
       // no display for a while (stopped outside osmatrix, crashed).
       const rec = env.viewerRecord(g);
