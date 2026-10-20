@@ -132,7 +132,7 @@ export async function bridge(ws: WebSocket, target: VncTarget): Promise<void> {
   ws.on("error", () => ws.terminate());
   const fail = (e: unknown) => {
     vnc?.destroy();
-    if (!closed) ws.close(1011, String((e as Error)?.message ?? e).slice(0, 120));
+    if (!closed) ws.close(1011, closeReason(String((e as Error)?.message ?? e)));
   };
   try {
     const t = await target();
@@ -184,6 +184,16 @@ export async function bridge(ws: WebSocket, target: VncTarget): Promise<void> {
   } catch (e) {
     fail(e);
   }
+}
+
+/** A WebSocket close reason: at most 123 UTF-8 bytes, cut between code points. */
+export function closeReason(msg: string): string {
+  let out = "";
+  for (const ch of msg) {
+    if (Buffer.byteLength(out + ch) > 123) break;
+    out += ch;
+  }
+  return out;
 }
 
 /** The `osmatrix _viewer` process: serve until killed. */

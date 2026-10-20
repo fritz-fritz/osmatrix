@@ -130,7 +130,8 @@ export function viewerRecord(name: string): ViewerRecord | undefined {
 async function startViewerServer(name: string): Promise<number> {
   const cur = viewerRecord(name);
   if (cur && isAlive(cur.pid) && (await isViewer(cur.port, cur.id))) return cur.port;
-  if (cur) killViewer(name);
+  // Not our server any more (it crashed, or the host rebooted and the pid may be another process's): forget it.
+  fs.rmSync(viewerFile(name), { force: true });
   let lastErr: Error | undefined;
   // A free port can be taken before the server binds it; try a few.
   for (let attempt = 0; attempt < 3; attempt++) {
@@ -166,13 +167,12 @@ function isViewer(port: number, id: string): Promise<boolean> {
 
 /** Stop the guest's viewer server, if any. */
 export function stopViewer(name: string): Promise<void> {
-  return withViewerLock(name, async () => killViewer(name));
-}
-
-function killViewer(name: string): void {
-  const v = viewerRecord(name);
-  if (v && isAlive(v.pid)) kill(v.pid);
-  fs.rmSync(viewerFile(name), { force: true });
+  return withViewerLock(name, async () => {
+    const v = viewerRecord(name);
+    // Only signal the pid while its server still answers with our id; a stale record's pid may be reused.
+    if (v && isAlive(v.pid) && (await isViewer(v.port, v.id))) kill(v.pid);
+    fs.rmSync(viewerFile(name), { force: true });
+  });
 }
 
 /** Without boot history, how long an installed guest may take before a quiet boot counts as hung. */

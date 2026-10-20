@@ -37,7 +37,7 @@ test("viewer server: concurrent callers for two guests each share one server, an
   assert.equal(env.viewerRecord("mac2"), undefined);
 });
 
-test("viewer server: a port answered by some other program isn't taken for the viewer", async () => {
+test("viewer server: a port answered by some other program isn't taken for the viewer, and its pid isn't signalled", async () => {
   const decoy = http.createServer((_req, res) => res.end("not osmatrix"));
   await new Promise<void>((r) => decoy.listen(0, "127.0.0.1", r));
   const decoyPort = (decoy.address() as net.AddressInfo).port;
@@ -48,7 +48,8 @@ test("viewer server: a port answered by some other program isn't taken for the v
     fs.writeFileSync(path.join(home, "guests", "mac", "viewer.json"), JSON.stringify({ pid: dummy.pid, port: decoyPort, id: "stale" }));
     const port = await env.ensureViewerServer("mac");
     assert.notEqual(port, decoyPort);
-    assert.ok(await stopped(dummy.pid!), "the stale record's process was stopped");
+    assert.ok(isAlive(dummy.pid!), "a stale record's pid may be another program's: it is left alone");
+    dummy.kill();
     const rec = env.viewerRecord("mac")!;
     assert.equal(rec.port, port);
     await env.stopViewer("mac");
@@ -56,4 +57,14 @@ test("viewer server: a port answered by some other program isn't taken for the v
   } finally {
     decoy.close();
   }
+});
+
+test("viewer server: stopping with a stale record leaves the recorded pid alone", async () => {
+  const { spawn } = await import("node:child_process");
+  const dummy = spawn(process.execPath, ["-e", "setTimeout(() => {}, 60000)"], { stdio: "ignore" });
+  fs.writeFileSync(path.join(home, "guests", "mac2", "viewer.json"), JSON.stringify({ pid: dummy.pid, port: 1, id: "stale" }));
+  await env.stopViewer("mac2");
+  assert.ok(isAlive(dummy.pid!));
+  assert.equal(env.viewerRecord("mac2"), undefined);
+  dummy.kill();
 });

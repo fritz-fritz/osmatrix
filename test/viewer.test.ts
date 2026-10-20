@@ -6,7 +6,7 @@ import type { Backend, GuestStatus } from "../src/backends/types.ts";
 import type { GuestConfig } from "../src/core/config.ts";
 import { desEncrypt, vncAuthResponse } from "../src/core/rfb.ts";
 import { viewerFor, type Guest } from "../src/env.ts";
-import { viewerServer, type VncTarget } from "../src/viewer.ts";
+import { closeReason, viewerServer, type VncTarget } from "../src/viewer.ts";
 
 function guest(cfg: Partial<GuestConfig>, status: Partial<GuestStatus>, extra: Partial<Backend> = {}): Guest {
   const full = { name: "g", os: "windows", backend: "dockur", ...cfg } as GuestConfig;
@@ -254,4 +254,11 @@ test("viewer bridge: a browser leaving mid-handshake closes the guest connection
     server.close();
     silent.close();
   }
+});
+
+test("viewer bridge: close reasons fit WebSocket's 123 bytes without splitting a character", () => {
+  const r = closeReason("认证失败".repeat(20));
+  assert.ok(Buffer.byteLength(r) <= 123);
+  assert.equal(r, "认证失败".repeat(20).slice(0, 41));
+  assert.equal(closeReason("short"), "short");
 });
