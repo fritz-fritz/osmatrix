@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { ensureDir, paths } from "./paths.ts";
@@ -16,6 +16,8 @@ export interface LockOwner {
 /** Holders refresh their lock files this often; a lock not refreshed for STALE_MS is abandoned. */
 const HEARTBEAT_MS = 15_000;
 const STALE_MS = 120_000;
+/** An unreadable lock file younger than this may still be being written by its holder. */
+const INIT_GRACE_MS = 5_000;
 
 /**
  * Keys starting with "host:" guard resources shared by every install on this host (see
@@ -32,8 +34,12 @@ function lockFile(key: string): string {
 /** A holder is live while its process exists and it keeps the file fresh (a reused pid doesn't). */
 function isLive(file: string, owner: LockOwner | undefined): boolean {
   if (!owner || !isAlive(owner.pid)) return false;
+  return isFresh(file, STALE_MS);
+}
+
+function isFresh(file: string, ms: number): boolean {
   try {
-    return Date.now() - fs.statSync(file).mtimeMs < STALE_MS;
+    return Date.now() - fs.statSync(file).mtimeMs < ms;
   } catch {
     return false;
   }
@@ -53,19 +59,45 @@ function readOwner(file: string): { raw: string; owner?: LockOwner } | undefined
   }
 }
 
+/**
+ * Create file with content unless it exists, so that nobody ever sees it without its content: written
+ * to a private file first, then hard-linked into place, which fails if file exists. (Creating file with
+ * "wx" and then writing it would let another process read it empty in between, take it for an abandoned
+ * lock, delete it and take the lock too.) Where hard links aren't supported, falls back to "wx".
+ */
+function publish(file: string, content: string): boolean {
+  const tmp = `${file}.${process.pid}-${randomBytes(4).toString("hex")}.tmp`;
+  fs.writeFileSync(tmp, content, { flag: "wx" });
+  try {
+    fs.linkSync(tmp, file);
+    return true;
+  } catch (e) {
+    const code = (e as NodeJS.ErrnoException).code;
+    if (code === "EEXIST") return false;
+    if (code !== "EPERM" && code !== "ENOTSUP" && code !== "ENOSYS" && code !== "EXDEV") throw e;
+  } finally {
+    fs.rmSync(tmp, { force: true });
+  }
+  try {
+    fs.writeFileSync(file, content, { flag: "wx" });
+    return true;
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "EEXIST") return false;
+    throw e;
+  }
+}
+
 /** One attempt: take the lock, or return its live holder. Locks of dead processes are reclaimed. */
 export function tryLock(key: string, owner: LockOwner): { ok: true } | { ok: false; holder: LockOwner } {
   const file = lockFile(key);
   for (;;) {
-    try {
-      fs.writeFileSync(file, JSON.stringify({ ...owner, since: new Date().toISOString() }), { flag: "wx" });
-      return { ok: true };
-    } catch (e) {
-      if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
-    }
+    if (publish(file, JSON.stringify({ ...owner, since: new Date().toISOString() }))) return { ok: true };
     const cur = readOwner(file);
     if (!cur) continue; // released between our attempts
     if (isLive(file, cur.owner)) return { ok: false, holder: cur.owner! };
+    // An unreadable lock that was just created is most likely still being written (by an osmatrix that
+    // didn't publish locks atomically): give its holder time to finish rather than taking it over.
+    if (!cur.owner && isFresh(file, INIT_GRACE_MS)) return { ok: false, holder: { pid: 0, run: "(starting)", repo: "", leg: "(starting)" } };
     // Stale (holder died or stopped refreshing) or unreadable. Only remove it if nobody replaced it meanwhile.
     if (readOwner(file)?.raw === cur.raw) fs.rmSync(file, { force: true });
   }
