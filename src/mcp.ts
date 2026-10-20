@@ -55,7 +55,8 @@ export const TOOL_ANNOTATIONS: Record<string, { title: string; readOnlyHint: boo
   // Posts to github.com as the user (gh): outward-facing, so clients should confirm it.
   host_report_file: { title: "File a compatibility report on GitHub", readOnlyHint: false, destructiveHint: false, openWorldHint: true },
   env_status: { title: "Show guest status", readOnlyHint: true, destructiveHint: false, openWorldHint: false },
-  env_viewer: { title: "Show where to view a guest's screen", readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+  // Starts a background viewer server for qemu and tart guests.
+  env_viewer: { title: "Show where to view a guest's screen", readOnlyHint: false, destructiveHint: false, openWorldHint: false },
   env_setup: { title: "Set up a guest OS", readOnlyHint: false, destructiveHint: true, openWorldHint: true },
   env_up: { title: "Start a guest", readOnlyHint: false, destructiveHint: false, openWorldHint: false },
   env_down: { title: "Stop a guest", readOnlyHint: false, destructiveHint: true, openWorldHint: false },

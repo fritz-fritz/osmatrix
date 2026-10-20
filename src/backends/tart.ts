@@ -76,7 +76,9 @@ export class TartBackend implements Backend {
     const log = path.join(ensureDir(paths.guestDir(this.cfg.name)), "tart-run.log");
     // Virtualization.framework's own VNC server (on 127.0.0.1, with a password made up for this run) shows
     // the screen from boot, with no macOS account involved; vnc() reads its address from the log.
-    fs.writeFileSync(log, "");
+    // The log carries tart's VNC password for this run: readable by this user only.
+    fs.writeFileSync(log, "", { mode: 0o600 });
+    fs.chmodSync(log, 0o600);
     const pid = spawnDetached(this.tart(), ["run", "--no-graphics", "--vnc-experimental", this.vm], { logFile: log });
     updateState((s) => {
       s.pids[this.cfg.name] = pid;

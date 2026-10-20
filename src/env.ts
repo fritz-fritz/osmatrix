@@ -74,7 +74,7 @@ export async function status(name?: string): Promise<(GuestStatus & { forwards?:
  * no credentials are involved or returned.
  */
 export async function viewer(name: string): Promise<GuestViewer> {
-  return viewerFor(getGuest(name), ensureViewerServer);
+  return viewerFor(getGuest(name), (n) => ensureViewerServer(n));
 }
 
 export type GuestViewer = Viewer & { guest: string };
@@ -107,9 +107,20 @@ async function withViewerLock<T>(name: string, fn: () => Promise<T>): Promise<T>
   }
 }
 
-/** The port of the guest's viewer server, started in the background unless it is already running. */
-export function ensureViewerServer(name: string): Promise<number> {
-  return withViewerLock(name, () => startViewerServer(name));
+/**
+ * The port of the guest's viewer server, started in the background unless it is already running.
+ * `running` is rechecked under the lock: a guest being stopped meanwhile must not get a fresh server.
+ */
+export function ensureViewerServer(name: string, running: () => Promise<boolean> = () => guestRunning(name)): Promise<number> {
+  return withViewerLock(name, async () => {
+    if (!(await running())) throw new Error(`${name} isn't running; start it first (env_up / \`osmatrix up ${name}\`)`);
+    return startViewerServer(name);
+  });
+}
+
+async function guestRunning(name: string): Promise<boolean> {
+  const st = await getGuest(name).backend.status();
+  return st.state !== "absent" && st.state !== "stopped";
 }
 
 /**
@@ -167,12 +178,25 @@ function isViewer(port: number, id: string): Promise<boolean> {
 
 /** Stop the guest's viewer server, if any. */
 export function stopViewer(name: string): Promise<void> {
+  return withViewerLock(name, () => killViewer(name));
+}
+
+/**
+ * Stop the guest's viewer server, then run `fn` (the backend stopping the guest) under the same lock,
+ * so no env_viewer call starts a new server while the guest is going down.
+ */
+function withViewerStopped<T>(name: string, fn: () => Promise<T>): Promise<T> {
   return withViewerLock(name, async () => {
-    const v = viewerRecord(name);
-    // Only signal the pid while its server still answers with our id; a stale record's pid may be reused.
-    if (v && isAlive(v.pid) && (await isViewer(v.port, v.id))) kill(v.pid);
-    fs.rmSync(viewerFile(name), { force: true });
+    await killViewer(name);
+    return fn();
   });
+}
+
+async function killViewer(name: string): Promise<void> {
+  const v = viewerRecord(name);
+  // Only signal the pid while its server still answers with our id; a stale record's pid may be reused.
+  if (v && isAlive(v.pid) && (await isViewer(v.port, v.id))) kill(v.pid);
+  fs.rmSync(viewerFile(name), { force: true });
 }
 
 /** Without boot history, how long an installed guest may take before a quiet boot counts as hung. */
@@ -327,16 +351,14 @@ export async function configure(name: string, change: Sizing, opts: { apply?: bo
 export async function down(name: string): Promise<GuestStatus> {
   const g = getGuest(name);
   await unforward(name, undefined, true);
-  await stopViewer(name);
-  await g.backend.down();
+  await withViewerStopped(name, () => g.backend.down());
   return g.backend.status();
 }
 
 export async function snapshot(name: string): Promise<GuestStatus> {
   const g = getGuest(name);
   await unforward(name, undefined, true);
-  await stopViewer(name);
-  await g.backend.snapshot();
+  await withViewerStopped(name, () => g.backend.snapshot());
   return g.backend.status();
 }
 
@@ -350,8 +372,7 @@ export async function reset(name: string, waitSec = 0): Promise<GuestStatus> {
 export async function destroy(name: string): Promise<void> {
   const g = getGuest(name);
   await unforward(name, undefined, true);
-  await stopViewer(name);
-  await g.backend.destroy();
+  await withViewerStopped(name, () => g.backend.destroy());
 }
 
 /** Endpoint for a guest that must already be reachable. */
