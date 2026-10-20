@@ -1,5 +1,5 @@
 import os from "node:os";
-import { guestMsvc, type GuestConfig } from "./config.ts";
+import { guestMsvc, windowsArch, type GuestConfig } from "./config.ts";
 
 /** Resource needs of a guest. Sizes are GiB. */
 export interface Requirements {
@@ -33,7 +33,8 @@ export function requirements(g: Pick<GuestConfig, "os" | "backend" | "image" | "
     return { cpus: { min: 1, recommended: 2 }, memoryGB: { min: 2, recommended: 4 }, note: "An existing machine; osmatrix does not size it." };
   }
   if (g.os === "windows") {
-    const arm = /windows-arm/.test(g.image ?? "");
+    // The qemu backend picks the image for the host's CPU when none is configured; dockur's default is x64.
+    const arm = g.backend === "qemu" ? windowsArch(g) === "aarch64" : /windows-arm/.test(g.image ?? "");
     // The MSVC Build Tools C++ workload with the Windows SDK takes about 8G once installed.
     const msvc = guestMsvc(g) ? MSVC_GB : 0;
     return {

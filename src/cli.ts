@@ -3,7 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { Command, InvalidArgumentError, Option } from "commander";
 import YAML from "yaml";
-import { ciLogs, ciPlan, ciRun, ciStatus, listRuns, worker } from "./ci/run.ts";
+import { ciCancel, ciLogs, ciPlan, ciRun, ciStatus, listRuns, worker } from "./ci/run.ts";
 import { ALL_GUEST_TARGETS, defaultTargets, ensureAct } from "./core/act.ts";
 import { defaultConfig, readRawConfig, writeConfig, loadConfig } from "./core/config.ts";
 import { doctor } from "./core/host.ts";
@@ -279,7 +279,7 @@ program
 
 program
   .command("screenshot <guest>")
-  .description("Save a PNG of the guest display (dockur guests)")
+  .description("Save a PNG of the guest display (dockur and qemu guests)")
   .option("-o, --output <file>", "output file", "screenshot.png")
   .action(
     action(async (g: string, o: { output: string }) => {
@@ -361,10 +361,15 @@ filterOpts(ci.command("run").description("Run legs (in the background unless --w
   .option("--event-file <file>", "event payload JSON for act, e.g. {\"ref\":\"refs/tags/v1.2.3\"}")
   .option("--secret-file <file>", "KEY=value secrets file (default .osmatrix/secrets or .secrets)")
   .option("--timeout <minutes>", "per-leg timeout", int)
+  .option("--cancel-previous", "first cancel runs of this repo still running any of the same workflows")
   .action(
-    action(async (o: FilterCli & { wait?: boolean; event?: string; eventFile?: string; secretFile?: string; timeout?: number }) => {
+    action(async (o: FilterCli & { wait?: boolean; event?: string; eventFile?: string; secretFile?: string; timeout?: number; cancelPrevious?: boolean }) => {
       const eventPayload = o.eventFile ? JSON.parse(fs.readFileSync(o.eventFile, "utf8")) : undefined;
-      const s = await ciRun(o.repo, { ...toFilter(o), event: o.event, eventPayload, secretFile: o.secretFile, timeoutMin: o.timeout }, !!o.wait);
+      const s = await ciRun(
+        o.repo,
+        { ...toFilter(o), event: o.event, eventPayload, secretFile: o.secretFile, timeoutMin: o.timeout, cancelPrevious: o.cancelPrevious },
+        !!o.wait,
+      );
       if (o.wait && (s.counts.failure || s.counts.error)) process.exitCode = 1;
       return summarize(s);
     }),
@@ -378,6 +383,11 @@ ci.command("status [run]")
     const s = ciStatus(o.repo, run);
     return o.full || program.opts().json ? s : summarize(s);
   }));
+
+ci.command("cancel [run]")
+  .description("Stop a run (default: the latest running one) and remove its act containers; guests stay up")
+  .option("--repo <dir>", "repository directory", ".")
+  .action(action(async (run: string | undefined, o: { repo: string }) => summarize(await ciCancel(o.repo, run))));
 
 ci.command("logs <leg>")
   .description("Show a leg's log")
@@ -400,6 +410,7 @@ function summarize(s: ReturnType<typeof ciStatus>) {
   return {
     id: s.id,
     state: s.state,
+    ...(s.cancelled ? { cancelled: true } : {}),
     counts: Object.fromEntries(Object.entries(s.counts).filter(([, n]) => n)),
     legs: s.legs.map((l) => ({
       id: l.id,

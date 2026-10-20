@@ -21,8 +21,8 @@ Claude Code / Cursor / Codex
   ├─ skills (SKILL.md ×3): when and how
   └─ MCP server (osmatrix mcp, stdio) ─┐
 human / scripts ── osmatrix CLI ───────┴─ core ─┬─ ubuntu  : act runner image + sshd (container)
-                                               ├─ windows : dockur/windows VM (KVM) | QEMU+HVF (Apple Silicon)
-                                               ├─ macos   : dockur/macos VM (KVM) | tart (Apple Silicon)
+                                               ├─ windows : dockur/windows VM (KVM) | host QEMU (Macs, Windows on ARM)
+                                               ├─ macos   : dockur/macos VM (KVM) | host QEMU (Intel Macs) | tart (Apple Silicon)
                                                └─ any     : existing machine over ssh
 ```
 
@@ -43,7 +43,7 @@ Requirements:
 
 - Node.js 22.18+ with npm.
 - Docker.
-- KVM for the Windows/macOS VMs; on Apple Silicon, QEMU for Windows and tart for macOS (see the [compatibility matrix](#compatibility-matrix)).
+- KVM for the Windows/macOS VMs; on Macs and Windows on ARM, QEMU for Windows; on Apple Silicon, tart for macOS (see the [compatibility matrix](#compatibility-matrix)).
 
 The plugin adds three skills, so an agent loads only the guidance a task needs:
 
@@ -90,17 +90,22 @@ Options:
 | Linux x86_64 + KVM | ✅ container | ✅ dockur: Windows Server 2025 | ✅\* dockur: macOS 15 (Intel) |
 | Linux arm64 + KVM | 🧪 container | 🧪 dockur: Windows 11 on ARM | ❌ |
 | Windows 11 x86_64 + Docker Desktop (WSL2 with nested virtualization) | 🧪 container | 🧪 dockur: Windows Server 2025 | 🧪\* dockur: macOS 15 (Intel), best effort |
-| Windows 11 arm64 | 🧪 container | ❌¹ | ❌ |
+| Windows 11 arm64 | 🧪 container | 🧪 QEMU + Windows Hypervisor Platform: Windows 11 on ARM | ❌ |
 | macOS Apple Silicon | 🧪 container | 🧪 QEMU + Hypervisor.framework: Windows 11 on ARM | 🧪\* tart |
-| macOS Intel | 🧪 container | ❌ | ❌ |
+| macOS Intel | 🧪 container | 🧪 QEMU + Hypervisor.framework: Windows Server 2025 | 🧪\* QEMU + Hypervisor.framework: macOS 15 (Intel) |
 
 - ✅ supported and tested. 🧪 supported by the code but not yet tested on that kind of host (CI covers install, the MCP server and planning on Windows and macOS, but GitHub's runners can't start guests there); please tell us how it went with a [compatibility report](https://github.com/fritz-fritz/osmatrix/issues/new?template=compatibility.yml). `osmatrix report <guest> --outcome works|partly|fails` fills one in (sanitized, sends nothing), `osmatrix report-file <draft>` files it with your `gh` login, and agents offer to file one, with your consent, when a result differs from this matrix (an untested combination either way, or a tested one that fails). ❌ not possible on that host.
 - Any cell marked ❌ can still be served by an `ssh` guest: an existing machine you can reach over ssh (see [Configuration](#configuration)).
-- \* **macOS guests are licensed only on Apple hardware.** Apple's [macOS Software License Agreement](https://www.apple.com/legal/sla/) permits macOS virtual machines only on Apple-branded computers, so only the Apple Silicon row is within the licence. On other hosts the dockur macOS guest works technically, but running it is outside Apple's terms; osmatrix asks you to accept the licence before installing it (below).
-- ¹ dockur needs KVM inside Docker, which Docker Desktop on Windows on ARM doesn't provide.
-- macOS guests on arm64 Linux or Windows hosts aren't possible: Apple Silicon macOS only virtualizes on Apple hardware, and the Intel macOS image is x86_64-only (emulating it is 14–27x slower than KVM in our measurements).
+- \* **macOS guests are licensed only on Apple hardware.** Apple's [macOS Software License Agreement](https://www.apple.com/legal/sla/) permits macOS virtual machines only on Apple-branded computers, so only the Mac rows are within the licence. On other hosts the dockur macOS guest works technically, but running it is outside Apple's terms; osmatrix asks you to accept the licence before installing it (below).
+- macOS guests on arm64 Linux or Windows hosts aren't possible: Apple Silicon macOS only boots on the virtual machine Apple's Virtualization.framework provides (QEMU's copy of it, `vmapple`, needs macOS's own frameworks too), and the Intel macOS image is x86_64-only (emulating it is 14–27x slower than KVM in our measurements).
+- On Intel Macs, the macOS guest is dockur's Intel macOS (OpenCore and the recovery image, prepared once with dockur's `macos` image in Docker), run by the Mac's own QEMU (`brew install qemu`) with Hypervisor.framework.
 
-On Apple Silicon, the Windows guest runs on the Mac's own QEMU (`brew install qemu`) with Hypervisor.framework. Docker is still needed once: setup runs dockur's `windows-arm` image to download Windows 11 on ARM and build the unattended install media, then boots them with the host's QEMU. The guest is Windows on ARM, so x64-only tools run under Windows' own emulation; osmatrix installs native ARM64 builds of PowerShell, Git, Node.js, Python and act.
+On hosts whose Docker has no KVM, the Windows guest runs on the host's own QEMU instead of dockur's container:
+
+- **Macs** use Hypervisor.framework (`brew install qemu`): Windows 11 on ARM on Apple Silicon, Windows Server 2025 on Intel.
+- **Windows on ARM** uses the Windows Hypervisor Platform: install [QEMU 11 or later](https://qemu.weilnetz.de/aarch64/) (its default folder, `C:\Program Files\qemu`, is found without PATH) and turn on the Windows feature "Windows Hypervisor Platform".
+
+Docker is still needed once: setup runs dockur's image (`windows-arm` or `windows`) to download Windows and build the unattended install media, then boots them with the host's QEMU. A Windows on ARM guest runs x64-only tools under Windows' own emulation; osmatrix installs native ARM64 builds of PowerShell, Git, Node.js, Python and act.
 
 Run `osmatrix doctor` to see what this host can do. It also needs an OpenSSH client and `tar`, both built into current Windows, macOS and Linux. You don't need to install act: osmatrix builds its own (see [act](#act)).
 
@@ -128,7 +133,7 @@ osmatrix configure windows --memory 12G --cpus 6          # takes effect at the 
 osmatrix configure windows --disk 96G --apply             # dockur VMs only: restart now; the partition grows to fill the disk
 ```
 
-`disk` applies to dockur VMs (Windows and macOS on Linux/Windows hosts); tart and the Apple Silicon QEMU guest keep their image's disk size. Disks can only grow. After a disk grows, osmatrix extends the system partition on the next boot. On Windows that removes the Recovery partition that sits after C:, and Windows RE moves onto C:.
+`disk` applies to dockur VMs (Windows and macOS on Linux/Windows hosts); tart and the QEMU guests keep their image's disk size. Disks can only grow. After a disk grows, osmatrix extends the system partition on the next boot. On Windows that removes the Recovery partition that sits after C:, and Windows RE moves onto C:.
 
 ### Devcontainers, Codespaces and remote Docker
 
@@ -170,8 +175,8 @@ How each guest gets there:
 
 - **ubuntu**: a container built from the same image as Linux CI legs (see [Configuration](#configuration)) with sshd added.
 - **windows**: dockur downloads Windows Server 2025 (evaluation) from Microsoft and installs it unattended. [`provision.ps1`](assets/oem/windows/provision.ps1) installs PowerShell 7, Git, Node LTS, Python, stock act (used only when osmatrix's [patched act](#act) isn't) and the MSVC Build Tools with the Windows SDK ([`msvc.ps1`](assets/oem/windows/msvc.ps1), which checks the installer's Microsoft signature before running it), then enables sshd. Like GitHub's image, it enables Git symlinks and Developer Mode (so symlinks can be created) and leaves `core.autocrlf` at Git for Windows' default (`true`). Its log is at `C:\OEM\provision.log`.
-- **macos (dockur)**:
-  1. osmatrix boots macOS Recovery. It drives Recovery's Terminal through the VNC display and a small [command bridge](assets/macos/bridge.py) inside the container, erases the disk, and runs `startosinstall --agreetolicense`.
+- **macos (dockur, or QEMU on Intel Macs)**:
+  1. osmatrix boots macOS Recovery. It drives Recovery's Terminal through the VNC display and a small command bridge, erases the disk, and runs `startosinstall --agreetolicense`. The bridge runs [inside dockur's container](assets/macos/bridge.py), or for QEMU in osmatrix itself on the host's loopback, behind a random URL that only the guest is told.
   2. After the install it boots Recovery again and runs [`configure.sh`](assets/macos/configure.sh) on the new system. That creates the `osmatrix` admin user with the SSH key, Remote Login, passwordless sudo and auto-login, and skips Setup Assistant.
   3. Finally [`macos.sh`](assets/provision/macos.sh) installs the Xcode command-line tools, Node, Python, act and Homebrew, and creates `/Users/runner/hostedtoolcache`, where the macOS packages behind `actions/setup-python` and similar actions install on GitHub's runners.
 
@@ -194,6 +199,7 @@ osmatrix ci plan                          # legs, targets, warnings; runs nothin
 osmatrix ci run --only windows -m node=22 # background run; poll with:
 osmatrix ci status
 osmatrix ci logs test-windows --tail 100
+osmatrix ci cancel                        # stop the latest running run and remove its act containers
 osmatrix ci run --wait                    # foreground, exit code reflects the result
 ```
 

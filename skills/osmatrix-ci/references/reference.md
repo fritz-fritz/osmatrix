@@ -7,9 +7,10 @@ Every command accepts `--json`. Exit code is non-zero on errors (for `ci run --w
 | MCP tool | CLI |
 |---|---|
 | `ci_plan` | `osmatrix ci plan [--repo dir] [-W wf] [-j job] [--only t...] [-m k=v...]` |
-| `ci_run` | `osmatrix ci run [same filters] [--wait] [--event e] [--event-file payload.json] [--secret-file f] [--timeout min]` |
+| `ci_run` | `osmatrix ci run [same filters] [--wait] [--event e] [--event-file payload.json] [--secret-file f] [--timeout min] [--cancel-previous]` (MCP: `replace`) |
 | `ci_status` | `osmatrix ci status [runId] [--repo dir] [--full]` |
 | `ci_logs` | `osmatrix ci logs <leg> [--run id] [--tail n] [--grep re]` |
+| `ci_cancel` | `osmatrix ci cancel [runId] [--repo dir]` |
 | `env_status` | `osmatrix status [guest]` |
 | `env_exec` | `osmatrix exec <guest> [--cwd dir] [--timeout sec] [--background] -- <command...>` |
 

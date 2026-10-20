@@ -97,6 +97,18 @@ export const DEFAULT_LABELS: Record<OsFamily, string[]> = {
   macos: ["macos-*", "macos", "macOS"],
 };
 
+export type GuestArch = "aarch64" | "x86_64";
+
+/** A Windows guest's dockur image; without one configured, the image that runs natively on this host's CPU. */
+export function windowsImage(g: Pick<GuestConfig, "image">, arch: string = process.arch): string {
+  return g.image ?? (arch === "arm64" ? "dockurr/windows-arm" : "dockurr/windows");
+}
+
+/** A Windows guest's CPU follows its image: dockurr/windows-arm is Windows on ARM, dockurr/windows x64. */
+export function windowsArch(g: Pick<GuestConfig, "image">, arch: string = process.arch): GuestArch {
+  return /windows-arm/.test(windowsImage(g, arch)) ? "aarch64" : "x86_64";
+}
+
 export function defaultShell(o: OsFamily): Shell {
   return o === "windows" ? "pwsh" : "posix";
 }
@@ -106,22 +118,23 @@ export function defaultGuests(platform = process.platform, arch = process.arch):
   const g: Record<string, GuestConfig> = {
     ubuntu: { name: "ubuntu", os: "linux", backend: "container", image: DEFAULT_LINUX_IMAGE, ssh_port: 2221, user: "root" },
   };
-  if (platform === "darwin") {
-    if (arch === "arm64") {
-      // Windows 11 on ARM with the host's QEMU and Hypervisor.framework (tart only runs macOS and Linux).
-      g.windows = {
-        name: "windows",
-        os: "windows",
-        backend: "qemu",
-        image: "dockurr/windows-arm",
-        version: "11",
-        cpus: 4,
-        memory: "8G",
-        disk: "64G",
-        ssh_port: 2222,
-        vnc_port: 5901,
-      };
-    }
+  // Hosts whose Docker has no KVM run Windows on their own QEMU: Macs (Hypervisor.framework) and
+  // Windows on ARM (the Windows Hypervisor Platform). The guest matches the host CPU.
+  const qemu = platform === "darwin" || (platform === "win32" && arch === "arm64");
+  g.windows = {
+    name: "windows",
+    os: "windows",
+    backend: qemu ? "qemu" : "dockur",
+    image: arch === "arm64" ? "dockurr/windows-arm" : "dockurr/windows",
+    version: arch === "arm64" ? "11" : "2025",
+    cpus: 4,
+    memory: "8G",
+    disk: "64G",
+    ssh_port: 2222,
+    ...(qemu ? {} : { web_port: 8006 }),
+    vnc_port: 5901,
+  };
+  if (platform === "darwin" && arch === "arm64") {
     g.macos = {
       name: "macos",
       os: "macos",
@@ -133,31 +146,20 @@ export function defaultGuests(platform = process.platform, arch = process.arch):
     };
     return g;
   }
-  g.windows = {
-    name: "windows",
-    os: "windows",
-    backend: "dockur",
-    image: arch === "arm64" ? "dockurr/windows-arm" : "dockurr/windows",
-    version: arch === "arm64" ? "11" : "2025",
-    cpus: 4,
-    memory: "8G",
-    disk: "64G",
-    ssh_port: 2222,
-    web_port: 8006,
-    vnc_port: 5901,
-  };
+  // Intel macOS: dockur's image, run by dockur's container where Docker has KVM and by the host's QEMU
+  // (Hypervisor.framework) on Intel Macs.
   if (arch !== "arm64") {
     g.macos = {
       name: "macos",
       os: "macos",
-      backend: "dockur",
+      backend: platform === "darwin" ? "qemu" : "dockur",
       image: "dockurr/macos",
       version: "15",
       cpus: 4,
       memory: "8G",
       disk: "64G",
       ssh_port: 2223,
-      web_port: 8007,
+      ...(platform === "darwin" ? {} : { web_port: 8007 }),
       vnc_port: 5902,
       homebrew: { ...DEFAULT_HOMEBREW },
     };
