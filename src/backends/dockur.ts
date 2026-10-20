@@ -270,7 +270,12 @@ export class DockurBackend implements Backend {
    */
   private async shutdownMac(): Promise<void> {
     const running = async () => (await containerState(this.container)) === "running";
-    if (await running()) await shutdownMacOverSsh(await this.endpoint(), running);
+    try {
+      // endpoint() can fail too (ensureKey runs ssh-keygen); this step is optional, the stop below isn't.
+      if (await running()) await shutdownMacOverSsh(await this.endpoint(), running);
+    } catch {
+      /* fall through to compose stop */
+    }
   }
 
   async snapshot(): Promise<void> {

@@ -96,10 +96,11 @@ export class TartBackend implements Backend {
    */
   async down(): Promise<void> {
     const running = async () => (await this.list()).some((v) => v.Name === this.vm && v.State === "running");
-    if (this.cfg.os === "macos" && (await running())) {
-      // No address yet (still booting): nothing to shut down over ssh.
-      const ep = await this.endpoint().catch(() => undefined);
-      if (ep) await shutdownMacOverSsh(ep, running);
+    try {
+      // Optional: no address yet (still booting), no key or no ssh all fall through to tart stop.
+      if (this.cfg.os === "macos" && (await running())) await shutdownMacOverSsh(await this.endpoint(), running);
+    } catch {
+      /* fall through to tart stop */
     }
     await run(this.tart(), ["stop", this.vm], { timeoutMs: 3 * 60_000 });
   }
