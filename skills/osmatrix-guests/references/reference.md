@@ -18,6 +18,7 @@ Every command accepts `--json`. Exit code is non-zero on errors (for `exec`, the
 | `env_forward` | `osmatrix forward <guest> <guestPort>[:<hostPort>]` · `osmatrix forward <guest> --reverse <hostPort>[:<guestPort>]` |
 | `env_forwards` | `osmatrix forwards [guest]` |
 | `env_unforward` | `osmatrix unforward <guest> [port] [--all]` |
+| `env_viewer` | `osmatrix viewer <guest>` |
 | `env_screenshot` | `osmatrix screenshot <guest> -o shot.png` |
 | `env_input` | `osmatrix input <guest> [--click x,y] [--text "..."] [--keys enter ctrl+a]` |
 

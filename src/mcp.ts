@@ -55,6 +55,7 @@ export const TOOL_ANNOTATIONS: Record<string, { title: string; readOnlyHint: boo
   // Posts to github.com as the user (gh): outward-facing, so clients should confirm it.
   host_report_file: { title: "File a compatibility report on GitHub", readOnlyHint: false, destructiveHint: false, openWorldHint: true },
   env_status: { title: "Show guest status", readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+  env_viewer: { title: "Show where to view a guest's screen", readOnlyHint: true, destructiveHint: false, openWorldHint: false },
   env_setup: { title: "Set up a guest OS", readOnlyHint: false, destructiveHint: true, openWorldHint: true },
   env_up: { title: "Start a guest", readOnlyHint: false, destructiveHint: false, openWorldHint: false },
   env_down: { title: "Stop a guest", readOnlyHint: false, destructiveHint: true, openWorldHint: false },
@@ -139,6 +140,16 @@ export async function startMcp(): Promise<void> {
       inputSchema: { guest: guest.optional() },
     },
     safe(async ({ guest }) => text(await env.status(guest))),
+  );
+
+  register(
+    "env_viewer",
+    {
+      description:
+        "The URL where the user can watch and use a running VM guest's screen: dockur's web viewer (http://127.0.0.1:<port>, open in a browser), a qemu guest's VNC display (vnc://127.0.0.1:<port>) or a tart guest's Screen Sharing address, with how to open it and the guest login (user and the file holding its password). Give the user the URL and the `how` text whenever they want to see, watch or click around in a guest, or a setup or GUI step needs a human look. Ports change across restarts; call this again rather than reusing an old URL.",
+      inputSchema: { guest },
+    },
+    safe(async ({ guest }) => text(await env.viewer(guest))),
   );
 
   register(
