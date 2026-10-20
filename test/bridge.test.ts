@@ -42,3 +42,35 @@ test("bridge /file/ only serves regular files directly inside files/", { skip: !
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("HostBridge: runs one command through the guest's polling loop, only under its token", async () => {
+  const { HostBridge } = await import("../src/core/bridge.ts");
+  const b = new HostBridge();
+  await b.start();
+  try {
+    const base = b.url("127.0.0.1");
+    const root = `http://127.0.0.1:${b.port}`;
+    assert.equal(b.alive(), false);
+    assert.equal((await fetch(`${base}/next`)).status, 204, "no command queued");
+    assert.equal(b.alive(), true);
+    const out = b.run("echo hi", 5);
+    // Another local process without the token can't take the command or answer it.
+    assert.equal((await fetch(`${root}/next`)).status, 404);
+    assert.equal((await fetch(`${root}/result`, { method: "POST", body: "forged" })).status, 404);
+    const next = await fetch(`${base}/next`);
+    assert.equal(await next.text(), "echo hi");
+    assert.equal((await fetch(`${base}/next`)).status, 204, "a command is handed out once");
+    await fetch(`${base}/result`, { method: "POST", body: "hi\n[rc=0]\n" });
+    assert.equal(await out, "hi\n[rc=0]\n");
+
+    const dir = mkdtempSync(path.join(tmpdir(), "osmatrix-hostbridge-"));
+    writeFileSync(path.join(dir, "configure.sh"), "echo ok\n");
+    b.serveFile("configure.sh", path.join(dir, "configure.sh"));
+    assert.equal(await (await fetch(`${base}/file/configure.sh`)).text(), "echo ok\n");
+    assert.equal((await fetch(`${base}/file/..%2Fsecret`)).status, 404, "only files offered by name");
+    rmSync(dir, { recursive: true, force: true });
+    await assert.rejects(b.run("sleep 9", 0.2), /timeout/);
+  } finally {
+    b.stop();
+  }
+});

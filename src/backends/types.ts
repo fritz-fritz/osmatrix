@@ -70,3 +70,32 @@ export interface Viewer {
   /** How to open it, in the user's terms. */
   how: string;
 }
+
+/**
+ * What the unattended macOS install (Recovery -> startosinstall -> Recovery -> ssh, in setup.ts) needs
+ * from an Intel macOS VM: dockur's container or the host's QEMU.
+ */
+export interface MacInstallVm {
+  credentials(): { username: string; password: string };
+  /** True once ssh has worked at least once. */
+  everReady(): boolean;
+  /** Start the VM afresh (stopping it hard first if it runs), with or without OpenCore's boot menu. */
+  boot(opts: { picker: boolean }): Promise<void>;
+  /** Recent firmware and serial console output (OpenCore logs there). */
+  console(): Promise<string>;
+  /** Number of times OpenCore has started since the VM was booted. */
+  bootCount(): Promise<number>;
+  /** Total bytes the VM has read and written (a progress signal while installing). */
+  ioBytes(): Promise<number>;
+  /** Hard reset; the installer occasionally hangs. */
+  powerCycle(): Promise<void>;
+  /** Start the command bridge's server side (see assets/macos/bridge.py). */
+  bridgeStart(): Promise<void>;
+  /** The bridge's base URL as the guest reaches it, as a shell expression for the guest to evaluate. */
+  bridgeUrl(): string;
+  bridgeAlive(): Promise<boolean>;
+  /** Run a command in the guest through the bridge; the output ends with "[rc=N]". */
+  bridgeRun(cmd: string, timeoutSec: number): Promise<string>;
+  /** Offer a host file to the guest at <bridge URL>/file/<name>. */
+  bridgeFile(name: string, localPath: string): Promise<void>;
+}
