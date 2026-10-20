@@ -2,23 +2,31 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import net from "node:net";
 import path from "node:path";
-import { guestShell, windowsOemOptions, type GuestConfig } from "../core/config.ts";
+import { guestShell, windowsArch, windowsImage, windowsOemOptions, type GuestArch, type GuestConfig } from "../core/config.ts";
 import { assetsDir, ensureDir, paths } from "../core/paths.ts";
-import { isAlive, kill, run, sleep, spawnDetached, which } from "../core/proc.ts";
+import { isAlive, run, sleep, spawnDetached, which } from "../core/proc.ts";
 import { canBind, ensureKey, freePort, sshProbe, type Endpoint } from "../core/ssh.ts";
 import { dockerBin } from "./docker.ts";
 import type { Backend, GuestStatus, Support } from "./types.ts";
 
-export type Accel = "hvf" | "kvm" | "tcg";
+export type Accel = "hvf" | "kvm" | "whpx" | "tcg";
+export type { GuestArch };
 
-/** The accelerator the host's native QEMU can use for an aarch64 guest. */
-export function defaultAccel(platform = process.platform, arch = process.arch, hasKvm = fs.existsSync("/dev/kvm")): Accel {
-  if (platform === "darwin" && arch === "arm64") return "hvf";
-  if (platform === "linux" && arch === "arm64" && hasKvm) return "kvm";
+/**
+ * The accelerator the host's native QEMU can use for a guest of this architecture: the host's
+ * hypervisor (Hypervisor.framework, KVM or the Windows Hypervisor Platform) when guest and host CPU
+ * match, software emulation otherwise.
+ */
+export function defaultAccel(guest: GuestArch, platform = process.platform, arch = process.arch, hasKvm = fs.existsSync("/dev/kvm")): Accel {
+  if ((guest === "aarch64" ? "arm64" : "x64") !== arch) return "tcg";
+  if (platform === "darwin") return "hvf";
+  if (platform === "win32") return "whpx";
+  if (platform === "linux" && hasKvm) return "kvm";
   return "tcg";
 }
 
 export interface QemuArgsInput {
+  arch: GuestArch;
   accel: Accel;
   platform: NodeJS.Platform;
   cpus: number;
@@ -30,7 +38,8 @@ export interface QemuArgsInput {
   sshPort: number;
   /** VNC display number (port 5900 + display), bound to 127.0.0.1. */
   vncDisplay: number;
-  monitorSocket: string;
+  /** QEMU's human monitor: a unix socket path, or a loopback TCP port (Windows hosts). */
+  monitor: string | number;
   /** Firmware/serial console output (the install boot watches it for the "Press any key" prompt). */
   serialLog: string;
   pidFile: string;
@@ -38,29 +47,32 @@ export interface QemuArgsInput {
 }
 
 /**
- * QEMU arguments for a Windows on ARM guest, following what dockur/windows-arm runs inside its
- * container, but with host-side user networking (ssh forwarded to 127.0.0.1) and the host's accelerator.
+ * QEMU arguments for a Windows guest, following what dockur runs inside its container (dockurr/windows
+ * on a q35 machine, dockurr/windows-arm on virt), but with host-side user networking (ssh forwarded to
+ * 127.0.0.1) and the host's accelerator.
  */
 export function qemuArgs(o: QemuArgsInput): string[] {
-  const cpu = o.accel === "tcg" ? "cortex-a76" : "host";
-  const accel = o.accel === "tcg" ? "tcg,thread=multi" : o.accel;
-  // O_DIRECT (cache=none) and Linux native AIO don't exist on macOS.
+  const x86 = o.arch === "x86_64";
+  // O_DIRECT (cache=none) and Linux native AIO don't exist on macOS or Windows.
   const diskCache = o.platform === "linux" ? "cache=none,aio=native" : "cache=writeback";
+  const monitor = typeof o.monitor === "number" ? `tcp:127.0.0.1:${o.monitor}` : `unix:${o.monitor}`;
   const args = [
     "-nodefaults",
-    "-machine", "type=virt,secure=off,gic-version=max,msi=gicv2m,dump-guest-core=off",
-    "-accel", accel,
-    "-cpu", cpu,
+    "-machine", x86 ? "type=q35,smm=off,vmport=off,dump-guest-core=off,hpet=off" : `type=virt,secure=off,gic-version=${o.accel === "whpx" ? "3" : "max"},msi=gicv2m,dump-guest-core=off`,
+    "-accel", o.accel === "tcg" ? "tcg,thread=multi" : o.accel,
+    "-cpu", cpuModel(o.arch, o.accel),
+    ...(o.accel === "kvm" && x86 ? ["-global", "kvm-pit.lost_tick_policy=discard"] : []),
     "-smp", `${o.cpus},sockets=1,cores=${o.cpus},threads=1`,
     "-m", o.memory.replace(/i?B$/i, ""),
     "-name", "Windows,process=osmatrix-windows",
     "-pidfile", o.pidFile,
     "-display", `vnc=127.0.0.1:${o.vncDisplay}`,
-    "-device", "ramfb",
-    "-monitor", `unix:${o.monitorSocket},server=on,wait=off`,
+    "-device", x86 ? "virtio-vga" : "ramfb",
+    "-monitor", `${monitor},server=on,wait=off`,
     "-serial", `file:${o.serialLog}`,
     "-device", "qemu-xhci,id=xhci,p2=7,p3=7",
-    "-device", "usb-kbd",
+    // q35 has a PS/2 keyboard; virt has none.
+    ...(x86 ? [] : ["-device", "usb-kbd"]),
     "-device", "usb-tablet",
     "-netdev", `user,id=hostnet0,hostfwd=tcp:127.0.0.1:${o.sshPort}-:22`,
     "-device", `virtio-net-pci,id=net0,netdev=hostnet0,romfile=,mac=${o.mac}`,
@@ -70,31 +82,47 @@ export function qemuArgs(o: QemuArgsInput): string[] {
     "-device", "scsi-hd,drive=data3,bus=data3.0,channel=0,scsi-id=0,lun=0,rotation_rate=1,bootindex=3",
   ];
   if (o.installMedia) {
+    args.push("-drive", `file=${o.installMedia.iso},id=boot,format=raw,cache=unsafe,readonly=on,media=cdrom,if=none`);
+    // A SATA CD drive on q35, as dockur attaches it; virt has no SATA.
+    if (x86) args.push("-device", "ich9-ahci,id=ahciboot,addr=0x5", "-device", "ide-cd,drive=boot,bus=ahciboot.0,bootindex=9");
+    else args.push("-device", "usb-storage,drive=boot,bootindex=9,removable=on");
     args.push(
-      "-drive", `file=${o.installMedia.iso},id=boot,format=raw,cache=unsafe,readonly=on,media=cdrom,if=none`,
-      "-device", "usb-storage,drive=boot,bootindex=9,removable=on",
       "-drive", `file=${o.installMedia.setup},id=setup,format=raw,cache=unsafe,media=disk,if=none`,
       "-device", "usb-storage,drive=setup,removable=on",
     );
   }
+  args.push("-rtc", "base=localtime");
+  // As in dockur/windows: no sleep states (they don't resume reliably in a VM) and a hardware RNG.
+  if (x86) args.push("-global", "ICH9-LPC.disable_s3=1", "-global", "ICH9-LPC.disable_s4=1");
   args.push(
-    "-rtc", "base=localtime",
     "-drive", `file=${path.join(o.storage, "windows.rom")},if=pflash,unit=0,format=raw,readonly=on`,
     "-drive", `file=${path.join(o.storage, "windows.vars")},if=pflash,unit=1,format=raw`,
-    "-fw_cfg", "name=opt/org.tianocore/UninstallMemAttrProtocol,string=y",
   );
+  if (x86) args.push("-object", "rng-builtin,id=objrng0", "-device", "virtio-rng-pci,rng=objrng0,id=rng0,bus=pcie.0");
+  args.push("-fw_cfg", "name=opt/org.tianocore/UninstallMemAttrProtocol,string=y");
   return args;
+}
+
+/** The host CPU under a hypervisor (with Hyper-V enlightenments on KVM, as dockur does); a recent model under emulation. */
+function cpuModel(arch: GuestArch, accel: Accel): string {
+  if (accel === "tcg") return arch === "x86_64" ? "max" : "cortex-a76";
+  if (accel === "kvm" && arch === "x86_64") return "host,kvm=on,l3-cache=on,+hypervisor,migratable=no,-vmx,+invtsc,hv_passthrough";
+  return "host";
 }
 
 interface Runtime {
   ssh: number;
   vnc: number;
+  /** Monitor port on Windows hosts, which use TCP instead of a unix socket. */
+  monitor?: number;
 }
 
 /**
- * Windows on ARM guests run by the host's own QEMU: Hypervisor.framework on Apple Silicon Macs, KVM on
- * arm64 Linux, software emulation elsewhere. Install media are prepared once by running dockur's
- * scripts in a container (dockurr/windows-arm), so the unattended install matches the dockur backend.
+ * Windows guests run by the host's own QEMU: Windows on ARM with Hypervisor.framework on Apple Silicon
+ * Macs, KVM on arm64 Linux or the Windows Hypervisor Platform on Windows on ARM; x64 Windows with
+ * Hypervisor.framework on Intel Macs; software emulation elsewhere. Install media are prepared once by
+ * running dockur's scripts in a container (dockurr/windows or dockurr/windows-arm), so the unattended
+ * install matches the dockur backend.
  */
 export class QemuBackend implements Backend {
   readonly cfg: GuestConfig;
@@ -127,14 +155,20 @@ export class QemuBackend implements Backend {
     return path.join(this.dir, ".installed");
   }
   private get image() {
-    return this.cfg.image ?? "dockurr/windows-arm";
+    return windowsImage(this.cfg);
+  }
+  private get arch(): GuestArch {
+    return windowsArch(this.cfg);
   }
   private get accel(): Accel {
-    return (this.cfg.accel as Accel | undefined) ?? defaultAccel();
+    return (this.cfg.accel as Accel | undefined) ?? defaultAccel(this.arch);
+  }
+  private get qemuName() {
+    return `qemu-system-${this.arch}`;
   }
 
   private qemuBin(): string | undefined {
-    return which("qemu-system-aarch64");
+    return qemuBinary(this.qemuName);
   }
 
   credentials(): { username: string; password: string } {
@@ -167,9 +201,11 @@ export class QemuBackend implements Backend {
   }
 
   async supported(): Promise<Support> {
-    if (this.cfg.os !== "windows") return { ok: false, reason: "the qemu backend runs Windows on ARM guests only" };
+    if (this.cfg.os !== "windows") return { ok: false, reason: "the qemu backend runs Windows guests only" };
     if (!this.qemuBin()) {
-      return { ok: false, reason: `qemu-system-aarch64 not found (${process.platform === "darwin" ? "brew install qemu" : "install your distribution's QEMU aarch64 package"})` };
+      const install =
+        process.platform === "darwin" ? "brew install qemu" : process.platform === "win32" ? "install QEMU 11 or later from https://qemu.weilnetz.de" : `install your distribution's QEMU ${this.arch} package`;
+      return { ok: false, reason: `${this.qemuName} not found (${install})` };
     }
     if (!this.prepared() && !dockerOk()) return { ok: false, reason: "Docker is needed once, to prepare the Windows install media with dockur" };
     return { ok: true };
@@ -207,8 +243,7 @@ export class QemuBackend implements Backend {
     const { publicKey } = await ensureKey();
     fs.writeFileSync(path.join(oem, "authorized_keys"), publicKey + "\r\n");
     fs.writeFileSync(path.join(oem, "options.json"), JSON.stringify(windowsOemOptions(this.cfg)));
-    const prep = path.join(this.dir, "prep.sh");
-    fs.copyFileSync(path.join(assetsDir, "qemu", "prep.sh"), prep);
+    const prep = writePrepScript(this.dir);
     const c = this.credentials();
     const r = await run(
       dockerBin(),
@@ -261,10 +296,13 @@ export class QemuBackend implements Backend {
     if (!this.prepared()) await this.prepare();
     const ssh = await freePort(this.cfg.ssh_port ?? 2222);
     const vnc = await freeVncPort(this.cfg.vnc_port ?? 5901);
+    // QEMU for Windows has no unix-socket monitor; use a loopback TCP port there.
+    const monitorPort = process.platform === "win32" ? await freePort(ssh + 1) : undefined;
     fs.rmSync(this.monitorSocket, { force: true });
     fs.rmSync(this.serialLog, { force: true });
     const media = this.installMedia();
     const args = qemuArgs({
+      arch: this.arch,
       accel: this.accel,
       platform: process.platform,
       cpus: this.cfg.cpus ?? 4,
@@ -273,12 +311,12 @@ export class QemuBackend implements Backend {
       installMedia: media,
       sshPort: ssh,
       vncDisplay: vnc - 5900,
-      monitorSocket: this.monitorSocket,
+      monitor: monitorPort ?? this.monitorSocket,
       serialLog: this.serialLog,
       pidFile: this.pidFile,
       mac: this.mac(),
     });
-    fs.writeFileSync(this.runtimeFile, JSON.stringify({ ssh, vnc } satisfies Runtime));
+    fs.writeFileSync(this.runtimeFile, JSON.stringify({ ssh, vnc, ...(monitorPort ? { monitor: monitorPort } : {}) } satisfies Runtime));
     const log = path.join(this.dir, "qemu.log");
     fs.writeFileSync(log, `${qemu} ${args.join(" ")}\n`);
     const child = spawnDetached(qemu, args, { logFile: log });
@@ -290,18 +328,24 @@ export class QemuBackend implements Backend {
     if (media) await this.pressBootKey();
   }
 
+  /** Where QEMU's monitor listens: the TCP port on Windows hosts, else the unix socket. */
+  private get monitor(): string | number {
+    return this.runtime()?.monitor ?? this.monitorSocket;
+  }
+
   /**
    * The Windows ISO's boot loader waits a few seconds for "Press any key to boot from CD or DVD" and
    * otherwise gives up. The prompt only shows on the display, so like dockur, press Enter a few times
-   * as soon as the firmware starts the USB install media (or if the prompt does reach the serial log).
+   * as soon as the firmware starts the install media (USB on virt, the SATA DVD on q35), or if the
+   * prompt does reach the serial log.
    */
   private async pressBootKey(): Promise<void> {
     const deadline = Date.now() + 5 * 60_000;
     while (Date.now() < deadline && this.pid()) {
       const out = fs.existsSync(this.serialLog) ? fs.readFileSync(this.serialLog, "latin1") : "";
-      if (out.includes("Press any key to boot from") || /starting Boot\d+ "[^"]*USB/.test(out)) {
+      if (out.includes("Press any key to boot from") || /starting Boot\d+ "[^"]*(USB|DVD-ROM)/.test(out)) {
         for (let i = 0; i < 6; i++) {
-          await monitorCommand(this.monitorSocket, "sendkey ret 100").catch(() => undefined);
+          await monitorCommand(this.monitor, "sendkey ret 100").catch(() => undefined);
           await sleep(250);
         }
         return;
@@ -314,10 +358,10 @@ export class QemuBackend implements Backend {
   async down(): Promise<void> {
     const pid = this.pid();
     if (!pid) return;
-    await monitorCommand(this.monitorSocket, "system_powerdown").catch(() => undefined);
+    await monitorCommand(this.monitor, "system_powerdown").catch(() => undefined);
     const deadline = Date.now() + 120_000;
     while (isAlive(pid) && Date.now() < deadline) await sleep(1000);
-    if (isAlive(pid)) kill(pid);
+    await stopProcess(pid);
     fs.rmSync(this.runtimeFile, { force: true });
   }
 
@@ -381,18 +425,58 @@ function dockerOk(): boolean {
   }
 }
 
-/** Copy-on-write clone where the filesystem supports it (APFS, btrfs, XFS), else a sparse copy. */
+/**
+ * End a QEMU process that hasn't exited by itself: SIGTERM, then SIGKILL, and wait until it is gone, so
+ * the next start doesn't find it still running (and leave it, thinking the guest is up).
+ */
+export async function stopProcess(pid: number): Promise<void> {
+  for (const signal of ["SIGTERM", "SIGKILL"] as const) {
+    if (!isAlive(pid)) return;
+    try {
+      process.kill(pid, signal);
+    } catch {
+      return;
+    }
+    for (let i = 0; i < 40 && isAlive(pid); i++) await sleep(250);
+  }
+  if (isAlive(pid)) throw new Error(`qemu (pid ${pid}) did not exit`);
+}
+
+/**
+ * Copy prep.sh next to a guest for the dockur container, with LF line endings: a Windows checkout with
+ * core.autocrlf gives it CRLF, which bash in the Linux container fails on.
+ */
+export function writePrepScript(dir: string): string {
+  const prep = path.join(dir, "prep.sh");
+  fs.writeFileSync(prep, fs.readFileSync(path.join(assetsDir, "qemu", "prep.sh"), "utf8").replace(/\r\n/g, "\n"));
+  return prep;
+}
+
+/** QEMU on PATH, or in the QEMU for Windows installer's default folder. */
+export function qemuBinary(name: string): string | undefined {
+  const found = which(name);
+  if (found || process.platform !== "win32") return found;
+  const p = path.join(process.env.ProgramFiles ?? "C:\\Program Files", "qemu", `${name}.exe`);
+  return fs.existsSync(p) ? p : undefined;
+}
+
+/** Copy-on-write clone where the filesystem supports it (APFS, btrfs, XFS, ReFS), else a sparse copy. */
 async function cloneFile(from: string, to: string): Promise<void> {
   fs.rmSync(to, { force: true });
+  if (process.platform === "win32") {
+    fs.copyFileSync(from, to, fs.constants.COPYFILE_FICLONE);
+    return;
+  }
   const args = process.platform === "darwin" ? ["-c", from, to] : ["--reflink=auto", "--sparse=always", from, to];
   const r = await run("cp", args, { timeoutMs: 60 * 60_000 });
   if (r.code !== 0) fs.copyFileSync(from, to);
 }
 
-/** Send one command to QEMU's human monitor over its unix socket. */
-function monitorCommand(socket: string, cmd: string): Promise<void> {
+/** Send one command to QEMU's human monitor over its unix socket or loopback TCP port. */
+function monitorCommand(monitor: string | number, cmd: string): Promise<void> {
   return new Promise((resolve, reject) => {
-    const s = net.createConnection(socket, () => {
+    const target: net.NetConnectOpts = typeof monitor === "number" ? { host: "127.0.0.1", port: monitor } : { path: monitor };
+    const s = net.createConnection(target, () => {
       s.write(cmd + "\n");
       setTimeout(() => {
         s.end();

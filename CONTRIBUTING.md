@@ -15,7 +15,7 @@ osmatrix is MIT-licensed, and its copyright is held by "osmatrix contributors". 
 
 ## Development setup
 
-You need Node.js 22.18 or later and Docker. Running Windows or macOS guests also needs KVM (Linux, or Windows with WSL2) or an Apple Silicon Mac. For `npm run codeql`, also install the CodeQL CLI. The recommended way is GitHub's `gh` extension, which keeps it up to date (steps under [Checks before you push](#checks-before-you-push)):
+You need Node.js 22.18 or later and Docker. Running Windows or macOS guests also needs KVM (Linux, or Windows with WSL2), a Mac, or QEMU on Windows on ARM (see the compatibility matrix in the README). For `npm run codeql`, also install the CodeQL CLI. The recommended way is GitHub's `gh` extension, which keeps it up to date (steps under [Checks before you push](#checks-before-you-push)):
 
 ```bash
 gh extension install github/gh-codeql && gh codeql set-version latest && gh codeql install-stub ~/.local/bin/
