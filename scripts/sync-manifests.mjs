@@ -6,8 +6,8 @@
 import { access, readdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { DEFAULT_LINUX_IMAGE, DEFAULT_HOMEBREW } from "../src/core/config.ts";
-import { PATCHED_ACT_VERSION } from "../src/core/pins.ts";
+// pins.ts only: it has no imports, so this runs where no dependencies are installed (CI's plugins job).
+import { DEFAULT_HOMEBREW, DEFAULT_LINUX_IMAGE, PATCHED_ACT_VERSION } from "../src/core/pins.ts";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const manifests = [".claude-plugin/plugin.json", ".cursor-plugin/plugin.json", "plugin.json"];
