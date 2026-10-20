@@ -331,3 +331,24 @@ test("viewer bridge: a slow browser pauses the guest's output instead of queuein
     flood.close();
   }
 });
+
+test("viewer server: a client resetting a rejected upgrade doesn't take the server down", async () => {
+  const { server, port } = await listen(async () => undefined);
+  try {
+    for (let i = 0; i < 5; i++) {
+      await new Promise<void>((resolve) => {
+        const sock = net.connect({ host: "127.0.0.1", port }, () =>
+          sock.write(`GET /websockify?t=wrong HTTP/1.1\r\nHost: 127.0.0.1:${port}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n`),
+        );
+        sock.on("error", () => {});
+        // Reset as soon as anything comes back (or straight away), while the server may still be writing.
+        sock.once("data", () => (sock.resetAndDestroy(), resolve()));
+        setTimeout(() => (sock.resetAndDestroy(), resolve()), 200);
+      });
+    }
+    await new Promise((r) => setTimeout(r, 100));
+    assert.equal((await fetch(`http://127.0.0.1:${port}/`)).status, 200, "still serving");
+  } finally {
+    server.close();
+  }
+});

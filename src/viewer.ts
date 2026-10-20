@@ -135,6 +135,9 @@ export function viewerServer(title: string, target: VncTarget, opts: ViewerOptio
   });
   const wss = new WebSocketServer({ noServer: true });
   server.on("upgrade", (req, socket, head) => {
+    // Node's HTTP error handling no longer covers an upgraded socket: a client resetting it (after a
+    // 403, say) must not crash the server.
+    socket.on("error", () => socket.destroy());
     const port = (server.address() as net.AddressInfo).port;
     const url = requestUrl(req);
     if (!sameOrigin(req, port) || url?.pathname !== "/websockify" || !tokenMatches(url.searchParams.get("t"), opts.token)) {
