@@ -69,7 +69,7 @@ function sameOrigin(req: http.IncomingMessage, port: number): boolean {
   }
 }
 
-export function viewerServer(title: string, target: VncTarget): http.Server {
+export function viewerServer(title: string, target: VncTarget, id = ""): http.Server {
   const server = http.createServer((req, res) => {
     const port = (server.address() as net.AddressInfo).port;
     if (!sameOrigin(req, port) || req.method !== "GET") {
@@ -89,6 +89,8 @@ export function viewerServer(title: string, target: VncTarget): http.Server {
           "cache-control": "no-store",
           "content-security-policy": "frame-ancestors 'none'",
           "x-frame-options": "DENY",
+          // Lets osmatrix tell its own server from another program that took the port.
+          "x-osmatrix-viewer": id,
         })
         .end(page(title));
       return;
@@ -185,8 +187,8 @@ export async function bridge(ws: WebSocket, target: VncTarget): Promise<void> {
 }
 
 /** The `osmatrix _viewer` process: serve until killed. */
-export async function serveViewer(title: string, port: number, target: VncTarget): Promise<void> {
-  const server = viewerServer(title, target);
+export async function serveViewer(title: string, port: number, id: string, target: VncTarget): Promise<void> {
+  const server = viewerServer(title, target, id);
   await new Promise<void>((resolve, reject) => {
     server.once("error", reject);
     server.listen(port, "127.0.0.1", resolve);

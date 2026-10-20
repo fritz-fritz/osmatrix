@@ -123,9 +123,10 @@ program
 program
   .command("_viewer <guest>", { hidden: true })
   .requiredOption("--port <n>", "port to listen on (127.0.0.1)", int)
-  .action(action(async (g: string, o: { port: number }) => {
+  .requiredOption("--id <id>", "identifies this server to the osmatrix process that started it")
+  .action(action(async (g: string, o: { port: number; id: string }) => {
     const guest = env.getGuest(g);
-    await serveViewer(`osmatrix: ${g}`, o.port, async () => (guest.backend.vnc ? guest.backend.vnc() : undefined));
+    await serveViewer(`osmatrix: ${g}`, o.port, o.id, async () => (guest.backend.vnc ? guest.backend.vnc() : undefined));
   }));
 
 program

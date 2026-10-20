@@ -1,5 +1,6 @@
+import { randomUUID } from "node:crypto";
 import fs from "node:fs";
-import net from "node:net";
+import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { backendFor, type Backend, type GuestStatus } from "./backends/index.ts";
@@ -111,21 +112,36 @@ export function ensureViewerServer(name: string): Promise<number> {
   return withViewerLock(name, () => startViewerServer(name));
 }
 
+/**
+ * The guest's viewer server record. It lives in the guest's own directory rather than the shared state
+ * file, so the per-guest lock alone guards it.
+ */
+type ViewerRecord = { pid: number; port: number; id: string };
+const viewerFile = (name: string) => path.join(paths.guestDir(name), "viewer.json");
+
+export function viewerRecord(name: string): ViewerRecord | undefined {
+  try {
+    return JSON.parse(fs.readFileSync(viewerFile(name), "utf8")) as ViewerRecord;
+  } catch {
+    return undefined;
+  }
+}
+
 async function startViewerServer(name: string): Promise<number> {
-  const cur = loadState().viewers[name];
-  if (cur && (await listening(cur.port))) return cur.port;
+  const cur = viewerRecord(name);
+  if (cur && isAlive(cur.pid) && (await isViewer(cur.port, cur.id))) return cur.port;
   if (cur) killViewer(name);
   let lastErr: Error | undefined;
   // A free port can be taken before the server binds it; try a few.
   for (let attempt = 0; attempt < 3; attempt++) {
     const port = await freePort();
+    const id = randomUUID();
     const log = path.join(ensureDir(paths.guestDir(name)), "viewer.log");
-    const pid = spawnDetached(process.execPath, [cliEntry(), "_viewer", name, "--port", String(port)], { logFile: log });
+    const pid = spawnDetached(process.execPath, [cliEntry(), "_viewer", name, "--port", String(port), "--id", id], { logFile: log });
     for (let i = 0; i < 50 && isAlive(pid); i++) {
-      if (await listening(port)) {
-        updateState((s) => {
-          s.viewers[name] = { pid, port };
-        });
+      // Whatever answers must be this server: another program may have taken the port first.
+      if (await isViewer(port, id)) {
+        fs.writeFileSync(viewerFile(name), JSON.stringify({ pid, port, id } satisfies ViewerRecord));
         return port;
       }
       await sleep(100);
@@ -136,13 +152,15 @@ async function startViewerServer(name: string): Promise<number> {
   throw lastErr!;
 }
 
-function listening(port: number): Promise<boolean> {
+/** Whether the viewer server started with this id answers on the port. */
+function isViewer(port: number, id: string): Promise<boolean> {
   return new Promise((resolve) => {
-    const s = net.connect({ host: "127.0.0.1", port });
-    s.setTimeout(1000, () => s.destroy());
-    s.once("connect", () => (s.destroy(), resolve(true)));
-    s.once("error", () => resolve(false));
-    s.once("close", () => resolve(false));
+    const req = http.get({ host: "127.0.0.1", port, path: "/", timeout: 1000 }, (res) => {
+      res.resume();
+      resolve(res.headers["x-osmatrix-viewer"] === id);
+    });
+    req.on("timeout", () => req.destroy());
+    req.on("error", () => resolve(false));
   });
 }
 
@@ -152,11 +170,9 @@ export function stopViewer(name: string): Promise<void> {
 }
 
 function killViewer(name: string): void {
-  updateState((s) => {
-    const v = s.viewers[name];
-    if (v) kill(v.pid);
-    delete s.viewers[name];
-  });
+  const v = viewerRecord(name);
+  if (v && isAlive(v.pid)) kill(v.pid);
+  fs.rmSync(viewerFile(name), { force: true });
 }
 
 /** Without boot history, how long an installed guest may take before a quiet boot counts as hung. */

@@ -17,12 +17,10 @@ export interface State {
   forwards: ForwardRecord[];
   /** Background processes owned by a guest (e.g. tart run). */
   pids: Record<string, number>;
-  /** A guest's browser viewer server (`osmatrix _viewer`), for guests without a web viewer of their own. */
-  viewers: Record<string, { pid: number; port: number }>;
 }
 
 export function loadState(): State {
-  let s: State = { forwards: [], pids: {}, viewers: {} };
+  let s: State = { forwards: [], pids: {} };
   try {
     s = { ...s, ...JSON.parse(fs.readFileSync(paths.stateFile, "utf8")) };
   } catch {
@@ -31,7 +29,6 @@ export function loadState(): State {
   // Drop records whose process has died.
   s.forwards = s.forwards.filter((f) => isAlive(f.pid));
   for (const [k, pid] of Object.entries(s.pids)) if (!isAlive(pid)) delete s.pids[k];
-  for (const [k, v] of Object.entries(s.viewers)) if (!isAlive(v.pid)) delete s.viewers[k];
   return s;
 }
 
