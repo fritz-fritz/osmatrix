@@ -1,6 +1,8 @@
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { guestShell, type GuestConfig } from "../core/config.ts";
+import { acquireLocks } from "../core/locks.ts";
 import { ensureDir, paths, resourcePrefix } from "../core/paths.ts";
 import { run, runOk, spawnDetached, which } from "../core/proc.ts";
 import { ensureKey, shutdownMacOverSsh, sshProbe, type Endpoint } from "../core/ssh.ts";
@@ -49,6 +51,10 @@ export class TartBackend implements Backend {
     return b;
   }
 
+  private async isRunning(): Promise<boolean> {
+    return (await this.list()).some((v) => v.Name === this.vm && v.State === "running");
+  }
+
   private async list(): Promise<{ Name: string; State: string }[]> {
     const r = await run(this.tart(), ["list", "--format", "json"]);
     return r.code === 0 ? JSON.parse(r.stdout) : [];
@@ -82,7 +88,21 @@ export class TartBackend implements Backend {
     return { ...base, state: p === "ok" ? "ready" : p === "auth" ? "needs-ssh-setup" : "booting" };
   }
 
+  /**
+   * Serialized per guest: two concurrent ups would both see the VM stopped, and the second would truncate
+   * the first run's log (its VNC address) and record a `tart run` that exits at once.
+   */
   async up(): Promise<void> {
+    const owner = { pid: process.pid, run: "tart-up", repo: "", leg: this.cfg.name };
+    const release = await acquireLocks([`tart-up:${this.cfg.name}`], owner, () => {}, 500);
+    try {
+      await this.start();
+    } finally {
+      release();
+    }
+  }
+
+  private async start(): Promise<void> {
     const vms = await this.list();
     const me = vms.find((v) => v.Name === this.vm);
     if (!me) {
@@ -129,7 +149,7 @@ export class TartBackend implements Backend {
    * cleanly; `tart stop` then handles whatever is still running.
    */
   async down(): Promise<void> {
-    const running = async () => (await this.list()).some((v) => v.Name === this.vm && v.State === "running");
+    const running = () => this.isRunning();
     try {
       // Optional: no address yet (still booting), no key or no ssh all fall through to tart stop.
       if (this.cfg.os === "macos" && (await running())) await shutdownMacOverSsh(await this.endpoint(), running);
@@ -168,7 +188,7 @@ export class TartBackend implements Backend {
    * may belong to something else by now.
    */
   async vnc(): Promise<{ host: string; port: number; password: string } | undefined> {
-    if (!(await this.list()).some((v) => v.Name === this.vm && v.State === "running")) return undefined;
+    if (!(await this.isRunning())) return undefined;
     // Running, but not started by an `up` that turned tart's VNC server on: an older osmatrix, `tart run`
     // by hand, or a tart without --vnc-experimental.
     if (!fs.existsSync(this.vncRunFile)) throw new Error(RESTART_FOR_VNC(this.cfg.name));
@@ -179,9 +199,14 @@ export class TartBackend implements Backend {
     }
     let log: string;
     try {
+      // A log from before the host last booted is stale whatever its pid now belongs to.
+      if (fs.statSync(this.runLog).mtimeMs < Date.now() - os.uptime() * 1000) {
+        throw new Error(`${this.cfg.name} is running, but not from osmatrix's \`tart run\` (it was started before the host's last boot); restart it (env_down, then env_up) to view or screenshot it`);
+      }
       log = fs.readFileSync(this.runLog, "utf8");
-    } catch {
-      return undefined;
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+      throw e;
     }
     const m = [...log.matchAll(/vnc:\/\/:([^@\s]*)@([^:/\s]+):(\d+)/g)].pop();
     if (!m) return undefined; // tart hasn't printed the address yet

@@ -89,10 +89,14 @@ export async function viewerFor(g: Guest, serve: (name: string) => Promise<strin
   if (g.cfg.backend === "ssh" || g.cfg.backend === "container") {
     throw new Error(`${name} is a${g.cfg.backend === "ssh" ? "n ssh" : " container"} guest without a display osmatrix manages`);
   }
-  const st = await g.backend.status();
-  if (st.state === "absent" || st.state === "stopped") throw new Error(`${name} is ${st.state}; start it first (env_up / \`osmatrix up ${name}\`)`);
-  if (st.ports?.web) return { guest: name, kind: "web", url: `http://127.0.0.1:${st.ports.web}`, how: HOW };
-  if (!g.backend.vnc) throw new Error(`${name} has no display osmatrix can show`);
+  // dockur serves its own viewer, at the port status() reports. Other backends need no status() (for tart
+  // that's tart ip and an ssh probe): serve() checks their VNC address, which is what matters here.
+  if (g.cfg.backend === "dockur" || !g.backend.vnc) {
+    const st = await g.backend.status();
+    if (st.state === "absent" || st.state === "stopped") throw new Error(`${name} is ${st.state}; start it first (env_up / \`osmatrix up ${name}\`)`);
+    if (st.ports?.web) return { guest: name, kind: "web", url: `http://127.0.0.1:${st.ports.web}`, how: HOW };
+    if (!g.backend.vnc) throw new Error(`${name} has no display osmatrix can show`);
+  }
   return { guest: name, kind: "web", url: await serve(name), how: HOW };
 }
 
@@ -181,7 +185,8 @@ async function startViewerServer(name: string): Promise<string> {
       logFile: log,
       env: { ...process.env, OSMATRIX_VIEWER_TOKEN: token },
     });
-    for (let i = 0; i < 50 && isAlive(pid); i++) {
+    // Up to 20 s: a cold node start on a host busy booting a VM can be slow.
+    for (let i = 0; i < 200 && isAlive(pid); i++) {
       // Whatever answers must be this server: another program may have taken the port first.
       if (await isViewer(port, id)) {
         const rec: ViewerRecord = { pid, port, id, token };

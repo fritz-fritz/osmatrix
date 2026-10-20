@@ -187,8 +187,10 @@ export async function bridge(ws: WebSocket, target: VncTarget): Promise<void> {
   });
   ws.on("error", () => ws.terminate());
   const fail = (e: unknown) => {
-    lastFailure = String((e as Error)?.message ?? e);
     vnc?.destroy();
+    // A browser that left (reload, retry) closed this connection itself: nothing to report.
+    if (closed) return;
+    lastFailure = String((e as Error)?.message ?? e);
     if (!closed) ws.close(1011, closeReason(String((e as Error)?.message ?? e)));
   };
   try {

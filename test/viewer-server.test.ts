@@ -104,6 +104,13 @@ test("tart: the VNC address comes from the running VM's run started with it, the
   setPid(process.pid);
   running = false;
   assert.equal(await tart.vnc(), undefined);
+  // A log from before the host's last boot: stale, whatever process has the old pid now.
+  running = true;
+  setPid(process.pid);
+  const bootedAt = Date.now() - os.uptime() * 1000;
+  fs.utimesSync(path.join(dir, "tart-run.log"), new Date(bootedAt - 60_000), new Date(bootedAt - 60_000));
+  await assert.rejects(tart.vnc(), /before the host's last boot/);
+  fs.utimesSync(path.join(dir, "tart-run.log"), new Date(), new Date());
   // Running, but started without tart's VNC server: say to restart it.
   running = true;
   fs.rmSync(path.join(dir, "tart-run.vnc"));
