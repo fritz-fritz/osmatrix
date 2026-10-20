@@ -37,8 +37,7 @@ The repository is a plugin marketplace for each client, and its root is the plug
 | Claude Code | `/plugin marketplace add fritz-fritz/osmatrix`, then `/plugin install osmatrix@fritztech` |
 | Codex / ChatGPT | `codex plugin marketplace add fritz-fritz/osmatrix`, then enable **osmatrix** under Plugins |
 | Cursor | **Dashboard → Plugins → Team Marketplaces → Add Marketplace → Import from Repo** |
-| Skills only, any agent (via [skills.sh](https://skills.sh)) | `npx skills add fritz-fritz/osmatrix -s '*'` (all four skills; without `-s '*'` it asks which) |
-| Skills only, pinned to a project's dependency | `npm i -D osmatrix` then `npx skills experimental_sync -y`: links all four skills from the installed package, so they follow its version |
+| Skills only, any agent (via [skills.sh](https://skills.sh)) | `npx skills add fritz-fritz/osmatrix` |
 
 Requirements:
 
