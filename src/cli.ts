@@ -155,7 +155,7 @@ program
         if (await target().catch(() => undefined)) lastDisplay = now;
       }
       return now - lastDisplay < 120_000;
-    });
+    }, () => env.dropViewerRecord(g, id)); // a record left behind could vouch for a reused pid
   }));
 
 program

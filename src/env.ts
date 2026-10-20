@@ -151,7 +151,7 @@ export const viewerLockHeld = (name: string) => lockHeld(viewerLockKey(name));
 export async function ensureViewerServer(name: string, running: () => Promise<boolean>): Promise<string> {
   // A healthy server answers without the lock, so a slow probe never makes other callers wait for it.
   const cur = viewerRecord(name);
-  if (cur && isAlive(cur.pid) && (await isViewer(cur.port, cur.id, 5000)) && (await running())) return viewerUrl(cur);
+  if (cur && isAlive(cur.pid) && (await isViewer(cur.port, cur.id, cur.token, 5000)) && (await running())) return viewerUrl(cur);
   return withViewerLock(name, async () => {
     if (!(await running())) {
       throw new DisplayNotUp(`${name}'s display isn't up yet (still starting); try again in a few seconds`);
@@ -167,6 +167,11 @@ export async function ensureViewerServer(name: string, running: () => Promise<bo
 type ViewerRecord = { pid: number; port: number; id: string; token: string };
 const viewerFile = (name: string) => path.join(paths.guestDir(name), "viewer.json");
 
+/** For a viewer server exiting by itself: drop its record, if it's still its own. */
+export function dropViewerRecord(name: string, id: string): void {
+  if (viewerRecord(name)?.id === id) fs.rmSync(viewerFile(name), { force: true });
+}
+
 export function viewerRecord(name: string): ViewerRecord | undefined {
   try {
     return JSON.parse(fs.readFileSync(viewerFile(name), "utf8")) as ViewerRecord;
@@ -181,7 +186,7 @@ const viewerUrl = (r: ViewerRecord) => `http://127.0.0.1:${r.port}/#t=${r.token}
 async function startViewerServer(name: string): Promise<string> {
   const cur = viewerRecord(name);
   // Rechecked under the lock (it may have been replaced meanwhile); the generous probe already ran outside.
-  if (cur && isAlive(cur.pid) && (await isViewer(cur.port, cur.id))) return viewerUrl(cur);
+  if (cur && isAlive(cur.pid) && (await isViewer(cur.port, cur.id, cur.token))) return viewerUrl(cur);
   // Not answering as our server (crashed, wedged, or the pid is another process's after a reboot): drop the
   // record without signalling anything. A server of ours that is merely slow exits by itself once it sees
   // its record gone (see `osmatrix _viewer`).
@@ -203,7 +208,7 @@ async function startViewerServer(name: string): Promise<string> {
     // Up to 20 s: a cold node start on a host busy booting a VM can be slow.
     for (let i = 0; i < 200 && isAlive(pid); i++) {
       // Whatever answers must be this server: another program may have taken the port first.
-      if (await isViewer(port, id)) {
+      if (await isViewer(port, id, token)) {
         const rec: ViewerRecord = { pid, port, id, token };
         fs.writeFileSync(viewerFile(name), JSON.stringify(rec), { mode: 0o600 });
         return viewerUrl(rec);
@@ -216,10 +221,10 @@ async function startViewerServer(name: string): Promise<string> {
   throw lastErr!;
 }
 
-/** Whether the viewer server started with this id answers on the port. */
-function isViewer(port: number, id: string, timeoutMs = 1000): Promise<boolean> {
+/** Whether the viewer server started with this id (and token) answers on the port. */
+function isViewer(port: number, id: string, token: string, timeoutMs = 1000): Promise<boolean> {
   return new Promise((resolve) => {
-    const req = http.get({ host: "127.0.0.1", port, path: "/", timeout: timeoutMs }, (res) => {
+    const req = http.get({ host: "127.0.0.1", port, path: `/status?t=${encodeURIComponent(token)}`, timeout: timeoutMs }, (res) => {
       res.resume();
       resolve(res.headers["x-osmatrix-viewer"] === id);
     });
@@ -247,7 +252,7 @@ function withViewerStopped<T>(name: string, fn: () => Promise<T>): Promise<T> {
 async function killViewer(name: string): Promise<void> {
   const v = viewerRecord(name);
   // Only signal the pid while its server still answers with our id; a stale record's pid may be reused.
-  if (v && isAlive(v.pid) && (await isViewer(v.port, v.id))) kill(v.pid);
+  if (v && isAlive(v.pid) && (await isViewer(v.port, v.id, v.token))) kill(v.pid);
   fs.rmSync(viewerFile(name), { force: true });
 }
 

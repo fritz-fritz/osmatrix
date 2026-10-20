@@ -6,7 +6,7 @@ import { acquireLocks } from "../core/locks.ts";
 import { ensureDir, paths, resourcePrefix } from "../core/paths.ts";
 import { isAlive, run, runOk, sleep, spawnDetached, which } from "../core/proc.ts";
 import { ensureKey, shutdownMacOverSsh, sshProbe, type Endpoint } from "../core/ssh.ts";
-import { loadState, updateState } from "../core/state.ts";
+import { updateState } from "../core/state.ts";
 import type { Backend, GuestStatus, Support } from "./types.ts";
 import { sizeMiB } from "../core/sizing.ts";
 
@@ -132,6 +132,9 @@ export class TartBackend implements Backend {
     updateState((s) => {
       s.pids[this.cfg.name] = pid;
     });
+    // The run's pid also goes in this guest's own marker: the shared state file can lose an entry to a
+    // concurrent update from another process, and vnc() must not depend on it.
+    if (vnc) fs.writeFileSync(this.vncRunFile, String(pid));
     // Hold the up lock until tart lists the VM as running (or the run has died): until then a second up
     // would still see it stopped.
     for (let i = 0; i < 120 && isAlive(pid) && !(await this.isRunning()); i++) await sleep(500);
@@ -196,9 +199,12 @@ export class TartBackend implements Backend {
     // Running, but not started by an `up` that turned tart's VNC server on: an older osmatrix, `tart run`
     // by hand, or a tart without --vnc-experimental.
     if (!fs.existsSync(this.vncRunFile)) throw new Error(RESTART_FOR_VNC(this.cfg.name));
+    // An empty marker: up() is between marking the run and spawning it.
+    const runPid = parseInt(fs.readFileSync(this.vncRunFile, "utf8").trim(), 10);
+    if (Number.isNaN(runPid)) return undefined;
     // Running, but our `tart run` has exited: the VM is going down, or was started again outside osmatrix.
     // Either way the log's address is stale.
-    if (!loadState().pids[this.cfg.name]) {
+    if (!isAlive(runPid)) {
       throw new Error(`${this.cfg.name} is running, but not from osmatrix's \`tart run\` (it may be shutting down); if it stays up, restart it (env_down, then env_up) to view or screenshot it`);
     }
     let log: string;

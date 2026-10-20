@@ -81,39 +81,37 @@ test("viewer server: a guest that isn't running gets no server", async () => {
 
 test("tart: the VNC address comes from the running VM's run started with it, the latest one in the log", async () => {
   const { TartBackend } = await import("../src/backends/tart.ts");
-  const { updateState } = await import("../src/core/state.ts");
   const dir = path.join(home, "guests", "mac");
+  const marker = path.join(dir, "tart-run.vnc");
   const tart = new TartBackend({ name: "mac", os: "macos", backend: "tart" } as never);
   let running = true;
   // No tart here: stand in for `tart list`.
   Object.assign(tart, { list: async () => [{ Name: (tart as unknown as { vm: string }).vm, State: running ? "running" : "stopped" }] });
   fs.writeFileSync(path.join(dir, "tart-run.log"), "VNC server is running at vnc://:old@127.0.0.1:1\nVNC server is running at vnc://:new%25pw@127.0.0.1:5999\n");
-  const setPid = (pid?: number) =>
-    updateState((s) => {
-      if (pid) s.pids.mac = pid;
-      else delete s.pids.mac;
-    });
-  setPid(process.pid);
-  fs.writeFileSync(path.join(dir, "tart-run.vnc"), "");
+  // The marker holds our live `tart run`'s pid (here, this process's).
+  fs.writeFileSync(marker, String(process.pid));
   assert.deepEqual(await tart.vnc(), { host: "127.0.0.1", port: 5999, password: "new%pw" });
+  // Empty marker: up() hasn't spawned the run yet.
+  fs.writeFileSync(marker, "");
+  assert.equal(await tart.vnc(), undefined);
   // Our `tart run` gone while tart still lists the VM (going down, or started again by hand): the log's
   // address is stale, and if it stays up it needs a restart.
-  setPid();
+  const { spawnSync } = await import("node:child_process");
+  const dead = spawnSync(process.execPath, ["-e", "process.stdout.write(String(process.pid))"]).stdout.toString();
+  fs.writeFileSync(marker, dead);
   await assert.rejects(tart.vnc(), /not from osmatrix's `tart run`/);
-  // VM not running (e.g. after a reboot, whatever process has the old pid): nothing.
-  setPid(process.pid);
+  // VM not running: nothing.
+  fs.writeFileSync(marker, String(process.pid));
   running = false;
   assert.equal(await tart.vnc(), undefined);
   // A log from before the host's last boot: stale, whatever process has the old pid now.
   running = true;
-  setPid(process.pid);
   const bootedAt = Date.now() - os.uptime() * 1000;
   fs.utimesSync(path.join(dir, "tart-run.log"), new Date(bootedAt - 60_000), new Date(bootedAt - 60_000));
   await assert.rejects(tart.vnc(), /before the host's last boot/);
   fs.utimesSync(path.join(dir, "tart-run.log"), new Date(), new Date());
   // Running, but started without tart's VNC server: say to restart it.
-  running = true;
-  fs.rmSync(path.join(dir, "tart-run.vnc"));
+  fs.rmSync(marker);
   await assert.rejects(tart.vnc(), /restart it/);
-  setPid();
 });
+

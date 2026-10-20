@@ -123,7 +123,11 @@ export function viewerServer(title: string, target: VncTarget, opts: ViewerOptio
         res.writeHead(403).end();
         return;
       }
-      res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" }).end(JSON.stringify({ error: lastFailure }));
+      // The id answers only to holders of the token: it lets osmatrix tell its own server from another
+      // program on the port, so no one else may learn it.
+      res
+        .writeHead(200, { "content-type": "application/json", "cache-control": "no-store", "x-osmatrix-viewer": opts.id ?? "" })
+        .end(JSON.stringify({ error: lastFailure }));
       return;
     }
     if (p === "/") {
@@ -134,8 +138,7 @@ export function viewerServer(title: string, target: VncTarget, opts: ViewerOptio
           "cache-control": "no-store",
           "content-security-policy": "frame-ancestors 'none'",
           "x-frame-options": "DENY",
-          // Lets osmatrix tell its own server from another program that took the port.
-          "x-osmatrix-viewer": opts.id ?? "",
+
         })
         .end(page(title));
       return;
@@ -293,6 +296,7 @@ export async function serveViewer(
   opts: ViewerOptions,
   target: VncTarget,
   keepAlive: (connected: boolean) => Promise<boolean>,
+  onExit?: () => Promise<void> | void,
 ): Promise<void> {
   const server = viewerServer(title, target, opts);
   await new Promise<void>((resolve, reject) => {
@@ -309,6 +313,9 @@ export async function serveViewer(
     } catch {
       /* keep serving */
     }
-    if (!keep) process.exit(0);
+    if (!keep) {
+      await onExit?.();
+      process.exit(0);
+    }
   }
 }

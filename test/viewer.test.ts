@@ -402,3 +402,16 @@ test("viewer: a qemu or tart guest without a display is told to start it when it
   await assert.rejects(viewerFor(guest({ backend: "tart", os: "macos" }, { state: "absent" }, vnc), notUp), /g is absent; start it first/);
   await assert.rejects(viewerFor(guest({ backend: "qemu" }, { state: "booting" }, vnc), notUp), /isn't up yet/);
 });
+
+test("viewer server: its id answers only to holders of the token", async () => {
+  const server = viewerServer("test", async () => undefined, { token: TOKEN, id: "secret-id" });
+  await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+  const port = (server.address() as net.AddressInfo).port;
+  try {
+    assert.equal((await fetch(`http://127.0.0.1:${port}/`)).headers.get("x-osmatrix-viewer"), null);
+    assert.equal((await fetch(`http://127.0.0.1:${port}/status`)).status, 403);
+    assert.equal((await fetch(`http://127.0.0.1:${port}/status?t=${TOKEN}`)).headers.get("x-osmatrix-viewer"), "secret-id");
+  } finally {
+    server.close();
+  }
+});
