@@ -24,6 +24,7 @@ import {
   startForward,
   type Endpoint,
 } from "./core/ssh.ts";
+import { acquireLocks } from "./core/locks.ts";
 import { loadState, updateState, type ForwardRecord } from "./core/state.ts";
 
 export interface Guest {
@@ -92,11 +93,28 @@ export async function viewerFor(g: Guest, serve: (name: string) => Promise<numbe
   return { guest: name, kind: "web", url: `http://127.0.0.1:${await serve(name)}`, how: HOW };
 }
 
+/**
+ * Serializes starting and stopping a guest's viewer server across CLI and MCP processes, so concurrent
+ * callers share one server and none is left running untracked.
+ */
+async function withViewerLock<T>(name: string, fn: () => Promise<T>): Promise<T> {
+  const release = await acquireLocks([`viewer:${name}`], { pid: process.pid, run: "viewer", repo: "", leg: name }, () => {}, 100);
+  try {
+    return await fn();
+  } finally {
+    release();
+  }
+}
+
 /** The port of the guest's viewer server, started in the background unless it is already running. */
-export async function ensureViewerServer(name: string): Promise<number> {
+export function ensureViewerServer(name: string): Promise<number> {
+  return withViewerLock(name, () => startViewerServer(name));
+}
+
+async function startViewerServer(name: string): Promise<number> {
   const cur = loadState().viewers[name];
   if (cur && (await listening(cur.port))) return cur.port;
-  if (cur) stopViewer(name);
+  if (cur) killViewer(name);
   let lastErr: Error | undefined;
   // A free port can be taken before the server binds it; try a few.
   for (let attempt = 0; attempt < 3; attempt++) {
@@ -129,7 +147,11 @@ function listening(port: number): Promise<boolean> {
 }
 
 /** Stop the guest's viewer server, if any. */
-export function stopViewer(name: string): void {
+export function stopViewer(name: string): Promise<void> {
+  return withViewerLock(name, async () => killViewer(name));
+}
+
+function killViewer(name: string): void {
   updateState((s) => {
     const v = s.viewers[name];
     if (v) kill(v.pid);
@@ -289,7 +311,7 @@ export async function configure(name: string, change: Sizing, opts: { apply?: bo
 export async function down(name: string): Promise<GuestStatus> {
   const g = getGuest(name);
   await unforward(name, undefined, true);
-  stopViewer(name);
+  await stopViewer(name);
   await g.backend.down();
   return g.backend.status();
 }
@@ -297,7 +319,7 @@ export async function down(name: string): Promise<GuestStatus> {
 export async function snapshot(name: string): Promise<GuestStatus> {
   const g = getGuest(name);
   await unforward(name, undefined, true);
-  stopViewer(name);
+  await stopViewer(name);
   await g.backend.snapshot();
   return g.backend.status();
 }
@@ -312,7 +334,7 @@ export async function reset(name: string, waitSec = 0): Promise<GuestStatus> {
 export async function destroy(name: string): Promise<void> {
   const g = getGuest(name);
   await unforward(name, undefined, true);
-  stopViewer(name);
+  await stopViewer(name);
   await g.backend.destroy();
 }
 

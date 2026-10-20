@@ -201,3 +201,57 @@ test("viewer server: other sites can't open the bridge or read the page", async 
     vnc.close();
   }
 });
+
+/** Send a raw HTTP request line and return the status code. */
+function rawStatus(port: number, request: string): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const sock = net.connect({ host: "127.0.0.1", port }, () => sock.write(request));
+    sock.once("data", (d) => (resolve(parseInt(d.toString().split(" ")[1], 10)), sock.destroy()));
+    sock.once("error", reject);
+  });
+}
+
+test("viewer server: malformed request targets get 400 and don't take the server down", async () => {
+  const { server, port } = await listen(async () => undefined);
+  try {
+    assert.equal(await rawStatus(port, `GET //[ HTTP/1.1\r\nHost: 127.0.0.1:${port}\r\nConnection: close\r\n\r\n`), 400);
+    const upgrade = `GET //[ HTTP/1.1\r\nHost: 127.0.0.1:${port}\r\nOrigin: http://127.0.0.1:${port}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n`;
+    assert.equal(await rawStatus(port, upgrade), 403);
+    assert.equal((await fetch(`http://127.0.0.1:${port}/`)).status, 200, "still serving");
+  } finally {
+    server.close();
+  }
+});
+
+test("viewer server: the page can't be framed by another site", async () => {
+  const { server, port } = await listen(async () => undefined);
+  try {
+    const r = await fetch(`http://127.0.0.1:${port}/`);
+    assert.equal(r.headers.get("content-security-policy"), "frame-ancestors 'none'");
+    assert.equal(r.headers.get("x-frame-options"), "DENY");
+  } finally {
+    server.close();
+  }
+});
+
+test("viewer bridge: a browser leaving mid-handshake closes the guest connection", async () => {
+  let guestClosed!: () => void;
+  const closedP = new Promise<void>((r) => (guestClosed = r));
+  // A guest that accepts the connection and never speaks.
+  const silent = net.createServer((sock) => {
+    sock.on("close", guestClosed);
+    sock.on("error", () => {});
+  });
+  await new Promise<void>((r) => silent.listen(0, "127.0.0.1", r));
+  const { server, port } = await listen(async () => ({ host: "127.0.0.1", port: (silent.address() as net.AddressInfo).port }));
+  try {
+    const ws = new WebSocket(`ws://127.0.0.1:${port}/websockify`, { origin: `http://127.0.0.1:${port}` });
+    await new Promise((r) => ws.once("open", r));
+    await new Promise((r) => setTimeout(r, 100));
+    ws.terminate();
+    await closedP;
+  } finally {
+    server.close();
+    silent.close();
+  }
+});
