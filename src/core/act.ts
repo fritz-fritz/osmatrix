@@ -6,6 +6,7 @@ import { dockerBin } from "../backends/docker.ts";
 import { loadConfig, windowsArch, type Config, type GuestConfig, type OsFamily } from "./config.ts";
 import { acquireLocks } from "./locks.ts";
 import { assetsDir, ensureDir, paths, resourcePrefix } from "./paths.ts";
+import { PATCHED_ACT_VERSION } from "./pins.ts";
 import { run, runOk, which } from "./proc.ts";
 
 /*
@@ -19,8 +20,7 @@ import { run, runOk, which } from "./proc.ts";
  * the patch fixes, and a run shouldn't depend on what happens to be installed.
  */
 
-/** The act release the patch applies to. */
-export const PATCHED_ACT_VERSION = "v0.2.89";
+export { PATCHED_ACT_VERSION };
 /** GitHub's source archive of the tag; its sha256 is pinned so a changed archive is refused. */
 export const ACT_SOURCE = {
   url: `https://codeload.github.com/nektos/act/tar.gz/refs/tags/${PATCHED_ACT_VERSION}`,

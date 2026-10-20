@@ -38,6 +38,8 @@ Set `OSMATRIX_HOME=/some/dir` to keep experiments apart from your real guests: c
 
 osmatrix builds act from source with `assets/act/act-v0.2.89-osmatrix.patch` (see `src/core/act.ts`). To change it, apply it to the v0.2.89 source with `git apply`, edit, run `gofmt`, and write the result back with `git diff` (keep the header text). Any change to the patch, the Go image or the build script changes the build's cache key, so the next run rebuilds act and pushes it to guests again. Check it with `node src/cli.ts install-act --all-targets` and `node src/cli.ts ci run --repo fixtures/act-compat --only linux --job <job> --wait` for each of `file-commands`, `docker-action` and `download`. Moving to a newer act means a new source sha256 and patch in `act.ts`.
 
+Versions the docs repeat are pinned in code: act in `src/core/pins.ts`, the Linux act image and Intel Homebrew in `src/core/config.ts`, Node in `package.json`'s `engines`, osmatrix's own in `package.json`. Bump the pin and run `npm run sync`, which stamps README, CONTRIBUTING and the skills; CI's `npm run validate` fails on drift.
+
 ## Checks before you push
 
 | Script | What it runs |

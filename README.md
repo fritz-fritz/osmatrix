@@ -71,7 +71,7 @@ osmatrix install-agents        # optional: register MCP server + skills with Cla
 - **Cursor**: `~/.cursor/mcp.json`, plus the shared `~/.agents/skills/osmatrix-*`.
 - **Codex**: `~/.codex/config.toml` `[mcp_servers.osmatrix]`, plus the shared `~/.agents/skills/osmatrix-*`.
 
-A single `osmatrix` skill installed by an earlier version is removed, so it doesn't trigger next to the new ones.
+Skill directories an earlier osmatrix created under those names (the single `osmatrix` skill of 0.1, say) are replaced; a directory osmatrix didn't create is left alone and reported.
 
 Options:
 

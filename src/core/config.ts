@@ -2,6 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
 import { ensureDir, paths } from "./paths.ts";
+import { PATCHED_ACT_VERSION } from "./pins.ts";
 
 export type OsFamily = "linux" | "windows" | "macos";
 export type BackendKind = "container" | "dockur" | "tart" | "qemu" | "ssh";
@@ -74,7 +75,8 @@ export interface Config {
   guests: Record<string, GuestConfig>;
 }
 
-export const DEFAULT_ACT_VERSION = "v0.2.89";
+/** The patched act, unless config says otherwise (see pins.ts). */
+export const DEFAULT_ACT_VERSION = PATCHED_ACT_VERSION;
 export const DEFAULT_LINUX_IMAGE = "catthehacker/ubuntu:act-24.04";
 
 /**
