@@ -79,25 +79,33 @@ test("viewer server: a guest that isn't running gets no server", async () => {
   assert.equal(env.viewerRecord("mac"), undefined);
 });
 
-test("tart: the VNC address comes from the live run started with it, the latest one in the log", async () => {
+test("tart: the VNC address comes from the running VM's run started with it, the latest one in the log", async () => {
   const { TartBackend } = await import("../src/backends/tart.ts");
   const { updateState } = await import("../src/core/state.ts");
   const dir = path.join(home, "guests", "mac");
   const tart = new TartBackend({ name: "mac", os: "macos", backend: "tart" } as never);
+  let running = true;
+  // No tart here: stand in for `tart list`.
+  Object.assign(tart, { list: async () => [{ Name: (tart as unknown as { vm: string }).vm, State: running ? "running" : "stopped" }] });
   fs.writeFileSync(path.join(dir, "tart-run.log"), "VNC server is running at vnc://:old@127.0.0.1:1\nVNC server is running at vnc://:new%25pw@127.0.0.1:5999\n");
-  updateState((s) => {
-    s.pids.mac = process.pid;
-  });
-  fs.writeFileSync(path.join(dir, "tart-run.vnc"), String(process.pid));
+  const setPid = (pid?: number) =>
+    updateState((s) => {
+      if (pid) s.pids.mac = pid;
+      else delete s.pids.mac;
+    });
+  setPid(process.pid);
+  fs.writeFileSync(path.join(dir, "tart-run.vnc"), "");
   assert.deepEqual(await tart.vnc(), { host: "127.0.0.1", port: 5999, password: "new%pw" });
-  // A run osmatrix didn't start with the VNC server: asks tart whether the VM runs (no tart here, so it throws).
-  fs.writeFileSync(path.join(dir, "tart-run.vnc"), "1");
-  await assert.rejects(tart.vnc());
-  // While up() is starting the run, there's simply no address yet.
-  fs.writeFileSync(path.join(dir, "tart-run.vnc"), "starting");
+  // Our `tart run` gone while tart still lists the VM: going down, the log's address is stale.
+  setPid();
   assert.equal(await tart.vnc(), undefined);
-  updateState((s) => {
-    delete s.pids.mac;
-  });
+  // VM not running (e.g. after a reboot, whatever process has the old pid): nothing.
+  setPid(process.pid);
+  running = false;
+  assert.equal(await tart.vnc(), undefined);
+  // Running, but started without tart's VNC server: say to restart it.
+  running = true;
   fs.rmSync(path.join(dir, "tart-run.vnc"));
+  await assert.rejects(tart.vnc(), /restart it/);
+  setPid();
 });

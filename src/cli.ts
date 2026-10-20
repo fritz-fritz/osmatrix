@@ -134,7 +134,8 @@ program
       // no display for a while (stopped outside osmatrix, crashed).
       const rec = env.viewerRecord(g);
       if (rec ? rec.id !== o.id : Date.now() - started > 30_000) return false;
-      if (await target().catch(() => undefined)) lastDisplay = Date.now();
+      // A reset or snapshot in progress (it holds the guest's viewer lock) counts as the display being there.
+      if (env.viewerLockHeld(g) || (await target().catch(() => undefined))) lastDisplay = Date.now();
       return Date.now() - lastDisplay < 120_000;
     });
   }));

@@ -81,12 +81,23 @@ export function unlock(key: string, owner: LockOwner): void {
  * Take every key, waiting while another live process holds one. Keys are taken in sorted order so two
  * runs needing overlapping sets can't deadlock. Returns the release function.
  */
+/** acquireLocks gave up after its timeout. */
+export class LockTimeout extends Error {}
+
+/** Whether a live holder has the lock. */
+export function lockHeld(key: string): boolean {
+  const file = lockFile(key);
+  return isLive(file, readOwner(file)?.owner);
+}
+
 export async function acquireLocks(
   keys: string[],
   owner: LockOwner,
   onWait: (key: string, holder: LockOwner) => void,
   pollMs = 2000,
+  timeoutMs?: number,
 ): Promise<() => void> {
+  const deadline = timeoutMs === undefined ? undefined : Date.now() + timeoutMs;
   const held: string[] = [];
   const heartbeat = setInterval(() => {
     const now = new Date();
@@ -106,6 +117,7 @@ export async function acquireLocks(
         const id = `${r.holder.pid}/${r.holder.run}/${r.holder.leg}`;
         if (id !== lastHolder) onWait(key, r.holder);
         lastHolder = id;
+        if (deadline !== undefined && Date.now() > deadline) throw new LockTimeout(`${key} is held by ${id}`);
         await new Promise((res) => setTimeout(res, pollMs));
       }
       held.push(key);

@@ -9,7 +9,10 @@ import type { Backend, GuestStatus, Support } from "./types.ts";
 import { sizeMiB } from "../core/sizing.ts";
 
 const RESTART_FOR_VNC = (name: string) =>
-  `${name} was started without tart's VNC server (by an older osmatrix, or outside osmatrix); restart it (env_down, then env_up) to view or screenshot it`;
+  `${name} was started without tart's VNC server (by an older osmatrix, outside osmatrix, or with a tart that lacks --vnc-experimental: update tart); restart it (env_down, then env_up) to view or screenshot it`;
+
+/** Whether this tart has `run --vnc-experimental`; looked up once per process. */
+let vncFlag: Promise<boolean> | undefined;
 
 /** macOS (or Linux) VMs on Apple Silicon via cirruslabs/tart (Virtualization.framework). */
 export class TartBackend implements Backend {
@@ -24,10 +27,14 @@ export class TartBackend implements Backend {
   private get golden() {
     return `${resourcePrefix}-${this.cfg.name}-golden`;
   }
-  /** The pid of the `tart run` started with its VNC server, so vnc() can tell it from an older run. */
+  /** Present while the guest's runs start with tart's VNC server, so vnc() can tell them from older ones. */
   private get vncRunFile() {
     return path.join(paths.guestDir(this.cfg.name), "tart-run.vnc");
   }
+  private supportsVnc(): Promise<boolean> {
+    return (vncFlag ??= run(this.tart(), ["run", "--help"]).then((r) => /--vnc-experimental/.test(r.stdout + r.stderr)));
+  }
+
   private tart(): string {
     const b = which("tart");
     if (!b) throw new Error("tart not found (brew install cirruslabs/cli/tart)");
@@ -85,14 +92,16 @@ export class TartBackend implements Backend {
     // the screen from boot, with no macOS account involved; vnc() reads its address from the log.
     // The log carries tart's VNC password for this run: readable by this user only.
     fs.writeFileSync(log, "", { mode: 0o600 });
-    // Marked before the VM shows as running, so vnc() never takes this run for one without a VNC server.
-    fs.writeFileSync(this.vncRunFile, "starting");
     fs.chmodSync(log, 0o600);
-    const pid = spawnDetached(this.tart(), ["run", "--no-graphics", "--vnc-experimental", this.vm], { logFile: log });
+    // An older tart without the flag still boots the guest, just without a display osmatrix can show.
+    const vnc = await this.supportsVnc();
+    // Marked before the VM shows as running, so vnc() never takes this run for one without a VNC server.
+    if (vnc) fs.writeFileSync(this.vncRunFile, "");
+    else fs.rmSync(this.vncRunFile, { force: true });
+    const pid = spawnDetached(this.tart(), ["run", "--no-graphics", ...(vnc ? ["--vnc-experimental"] : []), this.vm], { logFile: log });
     updateState((s) => {
       s.pids[this.cfg.name] = pid;
     });
-    fs.writeFileSync(this.vncRunFile, String(pid));
   }
 
   async authorizeKey(): Promise<boolean> {
@@ -147,19 +156,12 @@ export class TartBackend implements Backend {
    * may belong to something else by now.
    */
   async vnc(): Promise<{ host: string; port: number; password: string } | undefined> {
-    const pid = loadState().pids[this.cfg.name];
-    let vncPid: string | undefined;
-    try {
-      vncPid = fs.readFileSync(this.vncRunFile, "utf8").trim();
-    } catch {
-      /* none */
-    }
-    if (vncPid === "starting") return undefined; // up() is starting it
-    if (!pid || vncPid !== String(pid)) {
-      // Running, but not from an `up` that started tart's VNC server (an older osmatrix, or `tart run` by hand).
-      if ((await this.list()).some((v) => v.Name === this.vm && v.State === "running")) throw new Error(RESTART_FOR_VNC(this.cfg.name));
-      return undefined;
-    }
+    if (!(await this.list()).some((v) => v.Name === this.vm && v.State === "running")) return undefined;
+    // Running, but not started by an `up` that turned tart's VNC server on: an older osmatrix, `tart run`
+    // by hand, or a tart without --vnc-experimental.
+    if (!fs.existsSync(this.vncRunFile)) throw new Error(RESTART_FOR_VNC(this.cfg.name));
+    // Our `tart run` has exited (the VM is going down) or isn't ours: its log's address is stale.
+    if (!loadState().pids[this.cfg.name]) return undefined;
     let log: string;
     try {
       log = fs.readFileSync(path.join(paths.guestDir(this.cfg.name), "tart-run.log"), "utf8");

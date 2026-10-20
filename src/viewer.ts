@@ -181,10 +181,15 @@ export async function bridge(ws: WebSocket, target: VncTarget): Promise<void> {
     let need = 12;
     let step: "version" | "security" | "relay" = "version";
     // A guest that stops reading: hold the browser's input back rather than queue it without limit.
+    let inputHeld = false;
     const toGuest = (data: Buffer) => {
-      if (!sock.write(data)) {
+      if (!sock.write(data) && !inputHeld) {
+        inputHeld = true;
         ws.pause();
-        sock.once("drain", () => ws.resume());
+        sock.once("drain", () => {
+          inputHeld = false;
+          ws.resume();
+        });
       }
     };
     const onMessage = (data: Buffer) => {
@@ -206,18 +211,14 @@ export async function bridge(ws: WebSocket, target: VncTarget): Promise<void> {
           step = "relay";
           const rest = reader.detach();
           if (rest.length) ws.send(rest);
+          // A slow browser: hold the guest's output back rather than queue it without limit, and let
+          // the sends' completions resume it once the queue has drained.
+          const sent = () => {
+            if (!closed && sock.isPaused() && ws.bufferedAmount < LOW_WATER) sock.resume();
+          };
           sock.on("data", (d: Buffer) => {
-            ws.send(d);
-            // A slow browser: hold the guest's output back rather than queue it without limit.
-            if (ws.bufferedAmount > HIGH_WATER && !sock.isPaused()) {
-              sock.pause();
-              const poll = setInterval(() => {
-                if (closed || ws.bufferedAmount < LOW_WATER) {
-                  clearInterval(poll);
-                  if (!closed) sock.resume();
-                }
-              }, 50);
-            }
+            ws.send(d, sent);
+            if (ws.bufferedAmount > HIGH_WATER) sock.pause();
           });
           sock.resume();
         }

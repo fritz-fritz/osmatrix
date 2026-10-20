@@ -25,7 +25,7 @@ import {
   startForward,
   type Endpoint,
 } from "./core/ssh.ts";
-import { acquireLocks, tryLock, unlock } from "./core/locks.ts";
+import { acquireLocks, lockHeld, LockTimeout } from "./core/locks.ts";
 import { loadState, updateState, type ForwardRecord } from "./core/state.ts";
 
 export interface Guest {
@@ -101,7 +101,7 @@ export async function viewerFor(g: Guest, serve: (name: string) => Promise<strin
  * callers share one server and none is left running untracked.
  */
 async function withViewerLock<T>(name: string, fn: () => Promise<T>): Promise<T> {
-  const release = await acquireLocks([`viewer:${name}`], viewerLockOwner(name), () => {}, 100);
+  const release = await acquireLocks([viewerLockKey(name)], viewerLockOwner(name), () => {}, 100);
   try {
     return await fn();
   } finally {
@@ -109,26 +109,30 @@ async function withViewerLock<T>(name: string, fn: () => Promise<T>): Promise<T>
   }
 }
 
+const viewerLockKey = (name: string) => `viewer:${name}`;
 const viewerLockOwner = (name: string) => ({ pid: process.pid, run: "viewer", repo: "", leg: name });
 
-/** How long env_viewer waits for a stop, snapshot or reset of the guest before saying it's busy. */
+/** How long env_viewer waits for whatever holds the guest's viewer lock before saying it's busy. */
 const VIEWER_LOCK_WAIT_MS = 10_000;
 
 /** withViewerLock for env_viewer: rather than wait out a long stop, snapshot or reset, say the guest is busy. */
 async function withViewerLockOrBusy<T>(name: string, fn: () => Promise<T>): Promise<T> {
-  const key = `viewer:${name}`;
-  const owner = viewerLockOwner(name);
-  const deadline = Date.now() + VIEWER_LOCK_WAIT_MS;
-  while (!tryLock(key, owner).ok) {
-    if (Date.now() > deadline) throw new Error(`${name} is being stopped, snapshotted or reset; ask for its viewer again once that finishes`);
-    await sleep(100);
+  let release: () => void;
+  try {
+    release = await acquireLocks([viewerLockKey(name)], viewerLockOwner(name), () => {}, 100, VIEWER_LOCK_WAIT_MS);
+  } catch (e) {
+    if (e instanceof LockTimeout) throw new Error(`${name} is busy (being started, stopped, snapshotted or reset, or another viewer request); ask again in a moment`);
+    throw e;
   }
   try {
     return await fn();
   } finally {
-    unlock(key, owner);
+    release();
   }
 }
+
+/** Whether something (a stop, snapshot, reset or viewer start) is working on the guest right now. */
+export const viewerLockHeld = (name: string) => lockHeld(viewerLockKey(name));
 
 /**
  * The URL of the guest's viewer server, started in the background unless it is already running.
@@ -389,9 +393,23 @@ export async function down(name: string): Promise<GuestStatus> {
 export async function snapshot(name: string): Promise<GuestStatus> {
   const g = getGuest(name);
   await unforward(name, undefined, true);
-  // Backends that stop the guest for the copy start it again, so the viewer stays (its page reconnects).
-  await withViewerLock(name, () => g.backend.snapshot());
+  await snapshotGuest(g);
   return g.backend.status();
+}
+
+/**
+ * The backend's snapshot, under the guest's viewer lock. Backends that stop the guest for the copy and
+ * start it again keep the viewer (its page reconnects); one left stopped (tart) loses it, as with down.
+ */
+export function snapshotGuest(g: Guest): Promise<void> {
+  const name = g.cfg.name;
+  return withViewerLock(name, async () => {
+    await g.backend.snapshot();
+    if (!(await g.backend.vnc?.().catch(() => undefined))) {
+      const st = await g.backend.status();
+      if (st.state === "absent" || st.state === "stopped") await killViewer(name);
+    }
+  });
 }
 
 export async function reset(name: string, waitSec = 0): Promise<GuestStatus> {
