@@ -123,22 +123,25 @@ program
 program
   .command("_viewer <guest>", { hidden: true })
   .requiredOption("--port <n>", "port to listen on (127.0.0.1)", int)
-  .requiredOption("--id <id>", "identifies this server to the osmatrix process that started it")
-  .action(action(async (g: string, o: { port: number; id: string }) => {
+  .action(action(async (g: string, o: { port: number }) => {
+    // From the osmatrix process that started this server, through the environment (not argv, which other
+    // local users can list); not passed on to the tools the backend runs (tart list and the like).
     const token = process.env.OSMATRIX_VIEWER_TOKEN ?? "";
-    // Not passed on to the tools the backend runs (tart list and the like).
+    const id = process.env.OSMATRIX_VIEWER_ID ?? "";
     delete process.env.OSMATRIX_VIEWER_TOKEN;
+    delete process.env.OSMATRIX_VIEWER_ID;
+    if (!token || !id) throw new Error("_viewer is started by osmatrix itself (env_viewer / osmatrix viewer)");
     const guest = env.getGuest(g);
     const target = async () => (guest.backend.vnc ? guest.backend.vnc() : undefined);
     const started = Date.now();
     let lastDisplay = started;
     let lastBrowser = started;
     let lastProbe = 0;
-    await serveViewer(`osmatrix: ${g}`, o.port, { id: o.id, token }, target, async (connected) => {
+    await serveViewer(`osmatrix: ${g}`, o.port, { id, token }, target, async (connected) => {
       const now = Date.now();
       // Exit once osmatrix no longer records this server (stopped, or replaced)...
       const rec = env.viewerRecord(g);
-      if (rec ? rec.id !== o.id : now - started > 30_000) return false;
+      if (rec ? rec.id !== id : now - started > 30_000) return false;
       // ...after an hour with no browser (env_viewer starts a new one when asked)...
       if (connected) lastBrowser = now;
       else if (now - lastBrowser > 60 * 60_000) return false;

@@ -179,11 +179,12 @@ async function startViewerServer(name: string): Promise<string> {
   for (let attempt = 0; attempt < 3; attempt++) {
     const port = await freePort();
     const id = randomUUID();
-    // The token goes through the environment, not argv, which other local users can list.
     const token = randomBytes(24).toString("base64url");
-    const pid = spawnDetached(process.execPath, [cliEntry(), "_viewer", name, "--port", String(port), "--id", id], {
+    const pid = spawnDetached(process.execPath, [cliEntry(), "_viewer", name, "--port", String(port)], {
       logFile: log,
-      env: { ...process.env, OSMATRIX_VIEWER_TOKEN: token },
+      // Both through the environment, not argv, which other local users can list: the id proves the
+      // server that answers is this one, the token gates its bridge.
+      env: { ...process.env, OSMATRIX_VIEWER_ID: id, OSMATRIX_VIEWER_TOKEN: token },
     });
     // Up to 20 s: a cold node start on a host busy booting a VM can be slow.
     for (let i = 0; i < 200 && isAlive(pid); i++) {

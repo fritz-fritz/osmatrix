@@ -4,7 +4,7 @@ import path from "node:path";
 import { guestShell, type GuestConfig } from "../core/config.ts";
 import { acquireLocks } from "../core/locks.ts";
 import { ensureDir, paths, resourcePrefix } from "../core/paths.ts";
-import { run, runOk, spawnDetached, which } from "../core/proc.ts";
+import { isAlive, run, runOk, sleep, spawnDetached, which } from "../core/proc.ts";
 import { ensureKey, shutdownMacOverSsh, sshProbe, type Endpoint } from "../core/ssh.ts";
 import { loadState, updateState } from "../core/state.ts";
 import type { Backend, GuestStatus, Support } from "./types.ts";
@@ -131,6 +131,9 @@ export class TartBackend implements Backend {
     updateState((s) => {
       s.pids[this.cfg.name] = pid;
     });
+    // Hold the up lock until tart lists the VM as running (or the run has died): until then a second up
+    // would still see it stopped.
+    for (let i = 0; i < 120 && isAlive(pid) && !(await this.isRunning()); i++) await sleep(500);
   }
 
   async authorizeKey(): Promise<boolean> {
