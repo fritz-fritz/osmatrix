@@ -231,7 +231,7 @@ export class QemuBackend implements Backend {
     }
     const detail = fs.existsSync(this.installedFile)
       ? `booting (accelerator: ${this.accel})`
-      : `installing and provisioning Windows (accelerator: ${this.accel}${this.accel === "tcg" ? ", software emulation: expect hours" : ", ~20-60 min"}). Watch with env_screenshot or a VNC viewer at ${urls.vnc}`;
+      : `installing and provisioning Windows (accelerator: ${this.accel}${this.accel === "tcg" ? ", software emulation: expect hours" : ", ~20-60 min"}). Watch in a browser with env_viewer, or with env_screenshot`;
     return { ...base, state: p === "auth" ? "needs-ssh-setup" : "booting", urls, ports, detail };
   }
 

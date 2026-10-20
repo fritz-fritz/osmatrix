@@ -146,7 +146,7 @@ export async function startMcp(): Promise<void> {
     "env_viewer",
     {
       description:
-        "The URL where the user can watch and use a running VM guest's screen: dockur's web viewer (http://127.0.0.1:<port>, open in a browser), a qemu guest's VNC display (vnc://127.0.0.1:<port>) or a tart guest's Screen Sharing address, and how to open it. No login is needed: guests sign in automatically and don't lock their screen. Give the user the URL and the `how` text whenever they want to see, watch or click around in a guest, or a setup or GUI step needs a human look. Ports change across restarts; call this again rather than reusing an old URL.",
+        "The URL where the user can watch and use a running VM guest's screen: a browser page (http://127.0.0.1:<port>) showing the guest's desktop: dockur's own noVNC page, or for qemu and tart guests one osmatrix serves. No login is needed: guests sign in automatically and don't lock their screen, and the page never asks for a password. Give the user the URL and the `how` text whenever they want to see, watch or click around in a guest, or a setup or GUI step needs a human look. Ports change across restarts; call this again rather than reusing an old URL.",
       inputSchema: { guest },
     },
     safe(async ({ guest }) => text(await env.viewer(guest))),
@@ -313,7 +313,7 @@ export async function startMcp(): Promise<void> {
 
   register(
     "env_screenshot",
-    { description: "Screenshot a VM guest's display (dockur and qemu guests). Useful during OS setup or for GUI testing.", inputSchema: { guest } },
+    { description: "Screenshot a VM guest's display (dockur, qemu and tart guests). Useful during OS setup or for GUI testing.", inputSchema: { guest } },
     safe(async ({ guest }) => {
       const s = await screenshot(guest);
       return {

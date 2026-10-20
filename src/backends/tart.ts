@@ -1,10 +1,11 @@
+import fs from "node:fs";
 import path from "node:path";
 import { guestShell, type GuestConfig } from "../core/config.ts";
 import { ensureDir, paths, resourcePrefix } from "../core/paths.ts";
 import { run, runOk, spawnDetached, which } from "../core/proc.ts";
 import { ensureKey, shutdownMacOverSsh, sshProbe, type Endpoint } from "../core/ssh.ts";
 import { updateState } from "../core/state.ts";
-import type { Backend, GuestStatus, Support, Viewer } from "./types.ts";
+import type { Backend, GuestStatus, Support } from "./types.ts";
 import { sizeMiB } from "../core/sizing.ts";
 
 /** macOS (or Linux) VMs on Apple Silicon via cirruslabs/tart (Virtualization.framework). */
@@ -73,7 +74,10 @@ export class TartBackend implements Backend {
     if (this.cfg.memory) set.push("--memory", String(sizeMiB(this.cfg.memory)));
     if (set.length > 2) await runOk(this.tart(), set);
     const log = path.join(ensureDir(paths.guestDir(this.cfg.name)), "tart-run.log");
-    const pid = spawnDetached(this.tart(), ["run", "--no-graphics", this.vm], { logFile: log });
+    // Virtualization.framework's own VNC server (on 127.0.0.1, with a password made up for this run) shows
+    // the screen from boot, with no macOS account involved; vnc() reads its address from the log.
+    fs.writeFileSync(log, "");
+    const pid = spawnDetached(this.tart(), ["run", "--no-graphics", "--vnc-experimental", this.vm], { logFile: log });
     updateState((s) => {
       s.pids[this.cfg.name] = pid;
     });
@@ -125,14 +129,17 @@ export class TartBackend implements Backend {
     await run(this.tart(), ["delete", this.golden]);
   }
 
-  /** tart runs headless; cirruslabs images have Screen Sharing on, reachable at the VM's own address. */
-  async viewer(): Promise<Viewer> {
-    const ip = (await runOk(this.tart(), ["ip", "--wait", "5", this.vm])).trim();
-    return {
-      kind: "vnc",
-      url: `vnc://${ip}`,
-      how: `Open it with Screen Sharing (\`open vnc://${ip}\`).`,
-    };
+  /** The VNC server `tart run --vnc-experimental` started; its password changes with every run. */
+  async vnc(): Promise<{ host: string; port: number; password: string } | undefined> {
+    let log: string;
+    try {
+      log = fs.readFileSync(path.join(paths.guestDir(this.cfg.name), "tart-run.log"), "utf8");
+    } catch {
+      return undefined;
+    }
+    const m = [...log.matchAll(/vnc:\/\/:([^@\s]*)@([\d.]+):(\d+)/g)].pop();
+    if (!m) return undefined;
+    return { host: m[2], port: parseInt(m[3], 10), password: decodeURIComponent(m[1]) };
   }
 
   async endpoint(): Promise<Endpoint> {

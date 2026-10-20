@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { backendFor, type Backend, type GuestStatus } from "./backends/index.ts";
@@ -6,8 +7,8 @@ import type { Viewer } from "./backends/types.ts";
 import { guestArm64Brew, guestHomebrew, guestMsvc, guestWorkdir, homebrewProvisionEnv, loadConfig, readRawConfig, writeConfig, type GuestConfig } from "./core/config.ts";
 import { macArm64Image, runnerHomebrew } from "./core/runner-images.ts";
 import { checkSizing, requirements, type Sizing } from "./core/sizing.ts";
-import { assetsDir, paths } from "./core/paths.ts";
-import { kill, sleep } from "./core/proc.ts";
+import { assetsDir, cliEntry, ensureDir, paths } from "./core/paths.ts";
+import { isAlive, kill, sleep, spawnDetached } from "./core/proc.ts";
 import {
   ensureKey,
   freePort,
@@ -64,42 +65,76 @@ export async function status(name?: string): Promise<(GuestStatus & { forwards?:
 }
 
 /**
- * Where the user can watch and use a running guest's screen: dockur's noVNC web viewer (the host port
- * Docker actually published, which differs from the 8006 in dockur's log when that port was taken), the
- * VNC display of a qemu guest, or Screen Sharing for tart. No login: guests auto-login and never lock
- * their screen, so the viewer opens on the desktop, and printing credentials would only expose them.
+ * Where the user can watch and use a running guest's screen, always in a browser and without a sign-in:
+ * dockur's own noVNC page (at the host port Docker actually published, which differs from the 8006 in
+ * dockur's log when that port was taken), or for qemu and tart guests osmatrix's viewer server, which
+ * bridges noVNC to the guest's VNC display. Guests log in automatically and don't lock their screen, so
+ * no credentials are involved or returned.
  */
 export async function viewer(name: string): Promise<GuestViewer> {
-  return viewerFor(getGuest(name));
+  return viewerFor(getGuest(name), ensureViewerServer);
 }
 
 export type GuestViewer = Viewer & { guest: string };
 
-/** viewer() for a resolved guest. */
-export async function viewerFor(g: Guest): Promise<GuestViewer> {
+const HOW = "Open it in a browser. It shows the guest's screen, already signed in, and only listens on this machine.";
+
+/** viewer() for a resolved guest; `serve` starts (or finds) the guest's viewer server and returns its port. */
+export async function viewerFor(g: Guest, serve: (name: string) => Promise<number>): Promise<GuestViewer> {
   const name = g.cfg.name;
   if (g.cfg.backend === "ssh" || g.cfg.backend === "container") {
     throw new Error(`${name} is a${g.cfg.backend === "ssh" ? "n ssh" : " container"} guest without a display osmatrix manages`);
   }
   const st = await g.backend.status();
   if (st.state === "absent" || st.state === "stopped") throw new Error(`${name} is ${st.state}; start it first (env_up / \`osmatrix up ${name}\`)`);
-  let v: Viewer | undefined;
-  if (g.backend.viewer) v = await g.backend.viewer();
-  else if (st.ports?.web) {
-    v = { kind: "web", url: `http://127.0.0.1:${st.ports.web}`, how: "Open it in a browser (dockur's noVNC viewer); it only listens on this machine." };
-  } else {
-    const vnc = g.backend.vnc ? await g.backend.vnc() : undefined;
-    if (vnc) {
-      const url = `vnc://${vnc.host}:${vnc.port}`;
-      v = {
-        kind: "vnc",
-        url,
-        how: `Open it with a VNC client such as TigerVNC, RealVNC Viewer or Remmina (\`vncviewer ${vnc.host}::${vnc.port}\`); there is no password, and it only listens on this machine.`,
-      };
+  if (st.ports?.web) return { guest: name, kind: "web", url: `http://127.0.0.1:${st.ports.web}`, how: HOW };
+  if (!g.backend.vnc || !(await g.backend.vnc())) throw new Error(`${name} has no display osmatrix can show`);
+  return { guest: name, kind: "web", url: `http://127.0.0.1:${await serve(name)}`, how: HOW };
+}
+
+/** The port of the guest's viewer server, started in the background unless it is already running. */
+export async function ensureViewerServer(name: string): Promise<number> {
+  const cur = loadState().viewers[name];
+  if (cur && (await listening(cur.port))) return cur.port;
+  if (cur) stopViewer(name);
+  let lastErr: Error | undefined;
+  // A free port can be taken before the server binds it; try a few.
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const port = await freePort();
+    const log = path.join(ensureDir(paths.guestDir(name)), "viewer.log");
+    const pid = spawnDetached(process.execPath, [cliEntry(), "_viewer", name, "--port", String(port)], { logFile: log });
+    for (let i = 0; i < 50 && isAlive(pid); i++) {
+      if (await listening(port)) {
+        updateState((s) => {
+          s.viewers[name] = { pid, port };
+        });
+        return port;
+      }
+      await sleep(100);
     }
+    kill(pid);
+    lastErr = new Error(`the viewer server didn't start; see ${log}`);
   }
-  if (!v) throw new Error(`${name} has no display osmatrix can show`);
-  return { guest: name, ...v };
+  throw lastErr!;
+}
+
+function listening(port: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const s = net.connect({ host: "127.0.0.1", port });
+    s.setTimeout(1000, () => s.destroy());
+    s.once("connect", () => (s.destroy(), resolve(true)));
+    s.once("error", () => resolve(false));
+    s.once("close", () => resolve(false));
+  });
+}
+
+/** Stop the guest's viewer server, if any. */
+export function stopViewer(name: string): void {
+  updateState((s) => {
+    const v = s.viewers[name];
+    if (v) kill(v.pid);
+    delete s.viewers[name];
+  });
 }
 
 /** Without boot history, how long an installed guest may take before a quiet boot counts as hung. */
@@ -254,6 +289,7 @@ export async function configure(name: string, change: Sizing, opts: { apply?: bo
 export async function down(name: string): Promise<GuestStatus> {
   const g = getGuest(name);
   await unforward(name, undefined, true);
+  stopViewer(name);
   await g.backend.down();
   return g.backend.status();
 }
@@ -261,6 +297,7 @@ export async function down(name: string): Promise<GuestStatus> {
 export async function snapshot(name: string): Promise<GuestStatus> {
   const g = getGuest(name);
   await unforward(name, undefined, true);
+  stopViewer(name);
   await g.backend.snapshot();
   return g.backend.status();
 }
@@ -275,6 +312,7 @@ export async function reset(name: string, waitSec = 0): Promise<GuestStatus> {
 export async function destroy(name: string): Promise<void> {
   const g = getGuest(name);
   await unforward(name, undefined, true);
+  stopViewer(name);
   await g.backend.destroy();
 }
 

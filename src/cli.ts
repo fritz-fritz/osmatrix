@@ -12,6 +12,7 @@ import { ensureKey } from "./core/ssh.ts";
 import * as env from "./env.ts";
 import { input, screenshot, type InputAction } from "./gui.ts";
 import { installAgents, type Agent } from "./install.ts";
+import { serveViewer } from "./viewer.ts";
 
 const program = new Command();
 const version = JSON.parse(fs.readFileSync(path.join(pkgRoot, "package.json"), "utf8")).version as string;
@@ -116,8 +117,16 @@ program
 
 program
   .command("viewer <guest>")
-  .description("Show where to watch and use a running guest's screen (web viewer or VNC URL)")
+  .description("Show the browser URL where you can watch and use a running guest's screen")
   .action(action((g: string) => env.viewer(g)));
+
+program
+  .command("_viewer <guest>", { hidden: true })
+  .requiredOption("--port <n>", "port to listen on (127.0.0.1)", int)
+  .action(action(async (g: string, o: { port: number }) => {
+    const guest = env.getGuest(g);
+    await serveViewer(`osmatrix: ${g}`, o.port, async () => (guest.backend.vnc ? guest.backend.vnc() : undefined));
+  }));
 
 program
   .command("up <guest>")
@@ -284,7 +293,7 @@ program
 
 program
   .command("screenshot <guest>")
-  .description("Save a PNG of the guest display (dockur and qemu guests)")
+  .description("Save a PNG of the guest display (dockur, qemu and tart guests)")
   .option("-o, --output <file>", "output file", "screenshot.png")
   .action(
     action(async (g: string, o: { output: string }) => {

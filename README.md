@@ -12,7 +12,7 @@
 
 Local **Ubuntu, Windows and macOS** environments plus **local GitHub Actions matrix runs** for coding agents (Claude Code, Cursor, Codex) and for humans. It's one CLI that also serves as an MCP server, and it ships with three agent skills.
 
-- **Guests**: `exec`, file push/pull, **port forwarding** (both directions), screenshots and keyboard/mouse input.
+- **Guests**: `exec`, file push/pull, **port forwarding** (both directions), screenshots and keyboard/mouse input, and a browser viewer for every VM guest that opens on its desktop without a sign-in.
 - **Local CI**: `ci plan` / `ci run` expand workflow matrices. `ubuntu-*` legs run with [act](https://github.com/nektos/act) on the host's Docker. `windows-*` and `macos-*` legs run act **inside** the matching VM, so a Windows leg really runs on Windows.
 - **Cross-platform hosts**: Linux, Windows (WSL2) and macOS; see the [compatibility matrix](#compatibility-matrix). Guests this host can't run can be any machine you can reach over ssh.
 
@@ -183,7 +183,7 @@ How each guest gets there:
   These guests are Intel (x86_64). Homebrew stopped building Intel bottles in August 2026 and its installer no longer supports Intel, so osmatrix installs Homebrew into `/usr/local` (as on GitHub's Intel runner) pinned to brew 6.0.22 and the last homebrew-core commit whose formulae have Intel bottles. `brew install` then pours bottles instead of compiling, at the formula versions of that commit, which are older than on GitHub's runners. The `homebrew` guest setting changes the pins or turns Homebrew off ([reference](skills/osmatrix-setup/references/reference.md)). Guests set up before this get it with `osmatrix provision macos`, then `osmatrix snapshot macos` to keep it in the golden snapshot.
 - **macos (tart)**: clones a cirruslabs image, installs the key through the guest agent, then provisions with Homebrew, set to the brew version GitHub's arm64 runner image for that macOS ships (looked up in actions/runner-images, cached for a day).
 
-The generated guest passwords are stored in the osmatrix data dir under `guests/<name>/credentials.json`, for RDP or the VNC viewer.
+The generated guest passwords are stored in the osmatrix data dir under `guests/<name>/credentials.json`, for RDP. The browser viewer (`osmatrix viewer <guest>`) doesn't need them: guests sign in automatically and don't lock their screen.
 
 ## Everyday use
 
