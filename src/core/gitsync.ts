@@ -427,12 +427,14 @@ export async function cloneWorktree(dir: string, dest: string): Promise<void> {
     release();
   }
   try {
-    const format = (await git(snap.dir, ["--git-dir", snap.dir, "rev-parse", "--show-object-format"])).trim();
-    ensureDir(path.dirname(dest));
-    await git(path.dirname(dest), ["init", "-q", `--object-format=${format}`, dest]);
-    // A fetch from the cache packs what it borrows from the user's object store, so the clone has no
-    // alternates pointing back at it.
+    // The private ref is deleted whatever fails before the snapshot is in dest, so it doesn't keep the
+    // snapshot's objects from being pruned.
     try {
+      const format = (await git(snap.dir, ["--git-dir", snap.dir, "rev-parse", "--show-object-format"])).trim();
+      ensureDir(path.dirname(dest));
+      await git(path.dirname(dest), ["init", "-q", `--object-format=${format}`, dest]);
+      // A fetch from the cache packs what it borrows from the user's object store, so the clone has no
+      // alternates pointing back at it.
       await git(dest, ["fetch", "-q", "--no-tags", snap.dir, `+${own}:${SNAPSHOT_REF}`]);
     } finally {
       // Deleting a ref rewrites packed-refs: a write, under the lock.

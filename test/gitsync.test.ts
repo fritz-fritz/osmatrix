@@ -346,6 +346,12 @@ test("a linked worktree becomes a self-contained clone for host legs", async () 
   await waiting;
   assert.equal(fs.readFileSync(path.join(root, "linked-c-wait", "b.txt"), "utf8"), "b3\n");
 
+  // A clone that can't create its destination leaves no private ref keeping its snapshot from being pruned.
+  const blocker = path.join(root, "linked-blocker");
+  fs.writeFileSync(blocker, "a file, not a directory");
+  await assert.rejects(gs.cloneWorktree(wt, path.join(blocker, "clone")));
+  assert.equal(git(cache, ["--git-dir", cache, "for-each-ref", "--format=%(refname)", "refs/osmatrix/"]).trim(), SNAPSHOT_REF);
+
   // A repository without an origin stays without one.
   git(main, ["remote", "remove", "origin"]);
   const bare = path.join(root, "linked-clone-noorigin");
