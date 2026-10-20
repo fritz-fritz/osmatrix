@@ -132,6 +132,8 @@ export class TartBackend implements Backend {
       /* fall through to tart stop */
     }
     await run(this.tart(), ["stop", this.vm], { timeoutMs: 3 * 60_000 });
+    // The next run decides for itself; one started by hand then gets the "restart it" hint from vnc().
+    fs.rmSync(this.vncRunFile, { force: true });
   }
 
   async snapshot(): Promise<void> {

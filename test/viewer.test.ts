@@ -378,3 +378,17 @@ test("viewer bridge: a guest dropping the connection after its handshake closes 
     quitter.close();
   }
 });
+
+test("viewer server: /status tells the page why the bridge failed, and only with the token", async () => {
+  const vnc = await fakeVnc("right");
+  const { server, port } = await listen(async () => ({ host: "127.0.0.1", port: vnc.port, password: "wrong" }));
+  try {
+    await assert.rejects(browser(port), /closed 1011/);
+    assert.equal((await fetch(`http://127.0.0.1:${port}/status`)).status, 403);
+    const r = await fetch(`http://127.0.0.1:${port}/status?t=${TOKEN}`);
+    assert.match((await r.json()).error, /security handshake failed/);
+  } finally {
+    server.close();
+    vnc.close();
+  }
+});

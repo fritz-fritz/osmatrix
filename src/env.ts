@@ -76,10 +76,16 @@ export async function status(name?: string): Promise<(GuestStatus & { forwards?:
 export async function viewer(name: string): Promise<GuestViewer> {
   const g = getGuest(name);
   // viewerFor checks the guest's status; under the lock, its VNC address is rechecked (once).
-  return viewerFor(g, (n) => ensureViewerServer(n, async () => !!(await g.backend.vnc?.().catch(() => undefined))));
+  return viewerFor(g, (n) => ensureViewerServer(n, async () => !!(await g.backend.vnc?.().catch(notRunning))));
 }
 
 export type GuestViewer = Viewer & { guest: string };
+
+/** A backend's "not running" from vnc() means no display yet; any other error (e.g. "restart it") stands. */
+function notRunning(e: unknown): undefined {
+  if (/is not running/.test((e as Error)?.message ?? "")) return undefined;
+  throw e;
+}
 
 const HOW = "Open it in a browser. It shows the guest's screen, already signed in, and only listens on this machine.";
 
@@ -104,7 +110,8 @@ export async function viewerFor(g: Guest, serve: (name: string) => Promise<strin
 async function withViewerLock<T>(name: string, fn: () => Promise<T>, busyAfterMs?: number): Promise<T> {
   let release: () => void;
   try {
-    release = await acquireLocks([viewerLockKey(name)], viewerLockOwner(name), () => {}, 100, busyAfterMs);
+    // env_viewer polls quickly for a short wait; stops and resets that wait out a long operation, slowly.
+    release = await acquireLocks([viewerLockKey(name)], viewerLockOwner(name), () => {}, busyAfterMs ? 100 : 1000, busyAfterMs);
   } catch (e) {
     if (e instanceof LockTimeout) throw new Error(`${name} is busy (being started, stopped, snapshotted or reset, or another viewer request); ask again in a moment`);
     throw e;
@@ -158,7 +165,8 @@ const viewerUrl = (r: ViewerRecord) => `http://127.0.0.1:${r.port}/#t=${r.token}
 
 async function startViewerServer(name: string): Promise<string> {
   const cur = viewerRecord(name);
-  if (cur && isAlive(cur.pid) && (await isViewer(cur.port, cur.id))) return viewerUrl(cur);
+  // Generous: a server busy relaying a heavy screen can be slow to answer, and replacing it cuts its page.
+  if (cur && isAlive(cur.pid) && (await isViewer(cur.port, cur.id, 5000))) return viewerUrl(cur);
   // Not answering as our server (crashed, wedged, or the pid is another process's after a reboot): drop the
   // record without signalling anything. A server of ours that is merely slow exits by itself once it sees
   // its record gone (see `osmatrix _viewer`).
@@ -191,9 +199,9 @@ async function startViewerServer(name: string): Promise<string> {
 }
 
 /** Whether the viewer server started with this id answers on the port. */
-function isViewer(port: number, id: string): Promise<boolean> {
+function isViewer(port: number, id: string, timeoutMs = 1000): Promise<boolean> {
   return new Promise((resolve) => {
-    const req = http.get({ host: "127.0.0.1", port, path: "/", timeout: 1000 }, (res) => {
+    const req = http.get({ host: "127.0.0.1", port, path: "/", timeout: timeoutMs }, (res) => {
       res.resume();
       resolve(res.headers["x-osmatrix-viewer"] === id);
     });

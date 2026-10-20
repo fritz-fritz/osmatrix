@@ -58,10 +58,17 @@ function connect() {
   const rfb = new RFB(document.getElementById("screen"), (location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/websockify?t=" + encodeURIComponent(token));
   rfb.scaleViewport = true;
   rfb.addEventListener("connect", () => { status.textContent = ""; retry = 1000; failures = 0; });
-  rfb.addEventListener("disconnect", () => {
+  rfb.addEventListener("disconnect", async () => {
     failures++;
-    status.textContent = failures < 4 ? "Disconnected; reconnecting…"
-      : "Can't reach the guest's screen. If it was stopped or restarted, ask for its viewer again (env_viewer, or osmatrix viewer <guest>) and open the new link. Still retrying…";
+    let why = "";
+    try {
+      const r = await fetch("/status?t=" + encodeURIComponent(token), { cache: "no-store" });
+      why = r.ok ? (await r.json()).error : "this link is out of date";
+    } catch {
+      why = "the viewer server isn't running any more";
+    }
+    status.textContent = (why ? "Can't show the guest's screen: " + why + (/[.?!]$/.test(why) ? " " : ". ") : "Disconnected. ") +
+      (failures < 4 ? "Retrying…" : "If the guest was stopped or restarted, ask for its viewer again (env_viewer, or osmatrix viewer <guest>) and open the new link. Still retrying…");
     setTimeout(connect, retry);
     retry = Math.min(retry * 2, 10000);
   });
@@ -110,6 +117,15 @@ export function viewerServer(title: string, target: VncTarget, opts: ViewerOptio
       res.writeHead(400).end();
       return;
     }
+    if (p === "/status") {
+      const url = requestUrl(req)!;
+      if (!tokenMatches(url.searchParams.get("t"), opts.token)) {
+        res.writeHead(403).end();
+        return;
+      }
+      res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" }).end(JSON.stringify({ error: lastFailure }));
+      return;
+    }
     if (p === "/") {
       // No framing: another site embedding the page could trick the user into clicking in the guest.
       res
@@ -154,6 +170,8 @@ export function viewerServer(title: string, target: VncTarget, opts: ViewerOptio
 
 /** Browsers connected through this process's bridges right now. */
 let activeBridges = 0;
+/** Why the last bridge failed, for the page to show (served at /status to holders of the token). */
+let lastFailure = "";
 
 /** Connect a browser's WebSocket to the guest's VNC server, standing in for the guest's security handshake. */
 export async function bridge(ws: WebSocket, target: VncTarget): Promise<void> {
@@ -169,11 +187,16 @@ export async function bridge(ws: WebSocket, target: VncTarget): Promise<void> {
   });
   ws.on("error", () => ws.terminate());
   const fail = (e: unknown) => {
+    lastFailure = String((e as Error)?.message ?? e);
     vnc?.destroy();
     if (!closed) ws.close(1011, closeReason(String((e as Error)?.message ?? e)));
   };
   try {
-    const t = await target();
+    // A hung backend lookup (tart list, say) must not hold the page on "Connecting…" forever.
+    const t = await Promise.race([
+      target(),
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error("looking up the guest's display timed out")), HANDSHAKE_MS).unref()),
+    ]);
     if (closed) return;
     if (!t) throw new Error("the guest has no VNC display right now; is it running?");
     vnc = net.connect({ host: t.host, port: t.port });
@@ -221,6 +244,7 @@ export async function bridge(ws: WebSocket, target: VncTarget): Promise<void> {
           need = 1;
         } else {
           ws.send(Buffer.alloc(4)); // SecurityResult: OK
+          lastFailure = "";
           step = "relay";
           const rest = reader.detach();
           if (rest.length) ws.send(rest);
