@@ -1,6 +1,6 @@
 # osmatrix privacy policy
 
-_Last updated: 2026-10-10_
+_Last updated: 2026-10-20_
 
 osmatrix is an open-source command-line tool and MCP server that runs entirely on your own computer. It is published by FritzTech under the MIT license.
 
@@ -11,7 +11,7 @@ osmatrix has no telemetry or analytics and does not independently transmit your 
 ## What osmatrix stores, on your machine
 
 - **Configuration:** `config.toml` in your user config directory (on Linux, `~/.config/osmatrix`).
-- **Data:** guest state, an SSH key generated for your guests, generated guest passwords (`credentials.json`), compatibility report drafts (`reports/`), logs, a downloaded `act` binary and the cached Rust version of GitHub's runner image (`runner-image.json`), in your user data directory (on Linux, `~/.local/share/osmatrix`).
+- **Data:** guest state, an SSH key generated for your guests, generated guest passwords (`credentials.json`), compatibility report drafts (`reports/`), logs, osmatrix's builds of `act` (`bin/`) and the cached toolchain versions of GitHub's runner images (`runner-image.json`, `runner-images-macos.json`), in your user data directory (on Linux, `~/.local/share/osmatrix`).
 - **Guest disks and snapshots:** in local Docker volumes or tart VMs.
 - **CI run logs:** in `.osmatrix/runs/` inside each repository you test. That directory is git-ignored automatically.
 
@@ -21,10 +21,11 @@ You can delete all of it at any time: `osmatrix destroy <guest> --yes` for each 
 
 osmatrix connects to the network to fetch software that you ask it to set up, and to file a compatibility report when you agree to one:
 
-- `act` releases from GitHub
+- `act`'s source archive and releases from GitHub, and the `golang` image it is built with from Docker Hub
 - the release list and readme of GitHub's runner images (actions/runner-images; a successful lookup is reused for 24 hours, a failed one is retried after 15 minutes), to match the Linux CI image's Rust version, and Rust from rustup.rs
 - container images from Docker Hub
-- Windows Server evaluation media from Microsoft
+- Windows Server evaluation media and the Visual Studio Build Tools installer from Microsoft (the Build Tools unless the guest sets `msvc = false`)
+- macOS base images for tart guests from GitHub's container registry (ghcr.io/cirruslabs)
 - macOS recovery and installer images from Apple
 - guest toolchains from their publishers: Node.js (nodejs.org), Python (python.org), Git for Windows and PowerShell (GitHub), Homebrew and its packages for macOS guests (GitHub and ghcr.io), and the Homebrew version of GitHub's runner images (actions/runner-images on GitHub) for Apple Silicon macOS guests
 - the osmatrix package itself from npm, when started through `npx`

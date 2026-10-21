@@ -137,7 +137,7 @@ export async function startMcp(): Promise<void> {
     "env_status",
     {
       description:
-        "List guests (or one) with state: absent | stopped | booting | needs-ssh-setup | ready, setup progress, active port forwards, and the host ports actually in use (`ports`, `urls`). Ports are assigned at start and can change across restarts; read them from here rather than assuming configured values.",
+        "List guests (or one) with state: absent | stopped | booting | needs-ssh-setup | ready (ssh guests: unmanaged when unreachable), setup progress, active port forwards, and the host ports actually in use (`ports`, `urls`). Ports are assigned at start and can change across restarts; read them from here rather than assuming configured values.",
       inputSchema: { guest: guest.optional() },
     },
     safe(async ({ guest }) => text(await env.status(guest))),
