@@ -62,16 +62,18 @@ Then try: "Check which operating systems this host supports, then plan this repo
 ```bash
 npm install -g osmatrix
 osmatrix init                  # config + ssh key + host check
-osmatrix install-agents        # optional: register MCP server + skills with Claude Code, Cursor and Codex without the plugins
+osmatrix install-agents        # register the MCP server + skills with Claude Code, Cursor and Codex
 ```
 
-`install-agents` writes to these places:
+`install-agents` registers in your home after a global install, and in the project when osmatrix is one of its dependencies (`npm i -D osmatrix`, then `npx osmatrix install-agents`). `--scope user|project` overrides the detection, `--dry-run` shows the plan, `--uninstall` reverses it.
 
-- **Claude Code**: `claude mcp add --scope user`, or `~/.claude.json` when the `claude` CLI isn't on PATH. Also `~/.claude/skills/osmatrix-*`.
-- **Cursor**: `~/.cursor/mcp.json`, plus the shared `~/.agents/skills/osmatrix-*`.
-- **Codex**: `~/.codex/config.toml` `[mcp_servers.osmatrix]`, plus the shared `~/.agents/skills/osmatrix-*`.
+| | Your home (global install) | The project (dependency) |
+|---|---|---|
+| Claude Code | `claude mcp add --scope user`, or `~/.claude.json` when the `claude` CLI isn't on PATH; skills in `~/.claude/skills/` | `.mcp.json` (Claude Code asks once to approve it); skills in `.claude/skills/` |
+| Cursor | `~/.cursor/mcp.json`; skills in `~/.agents/skills/` | `.cursor/mcp.json`; skills in `.agents/skills/` |
+| Codex | `~/.codex/config.toml` `[mcp_servers.osmatrix]`; skills in `~/.agents/skills/` | `.codex/config.toml` (read in trusted projects only); skills in `.agents/skills/` |
 
-Skill directories an earlier osmatrix created under those names (the single `osmatrix` skill of 0.1, say) are replaced; a directory osmatrix didn't create is left alone and reported.
+In a project the server runs `npx -y osmatrix@<major> mcp`, which uses the project's own copy, and the skills are relative links into `node_modules/osmatrix` (`--copy-skill` copies them instead), so the files can be committed. Skill directories an earlier osmatrix created under those names (the single `osmatrix` skill of 0.1, say) are replaced; a directory osmatrix didn't create is left alone and reported.
 
 Options:
 
