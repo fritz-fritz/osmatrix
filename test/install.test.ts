@@ -100,10 +100,11 @@ test("detectScope: project scope when the running osmatrix is that project's nod
 
 test("installAgents --scope project writes the project's files, links its skills relatively, and reverses", async () => {
   const base = mkdtempSync(path.join(tmpdir(), "osmatrix-proj-"));
-  // Reached through a symlinked parent, as macOS's temp directory is (/var -> /private/var): the links
-  // must resolve from the real directory.
-  mkdirSync(path.join(base, "real", "proj"), { recursive: true });
-  symlinkSync(path.join(base, "real"), path.join(base, "link"), "dir");
+  // Reached through a symlinked parent one level shallower than the real directory, as macOS's temp
+  // directory is (/var -> /private/var): the OS resolves the links from the real directory, so a
+  // relative target computed from the unresolved path would be one `..` short and dangle.
+  mkdirSync(path.join(base, "real", "deeper", "proj"), { recursive: true });
+  symlinkSync(path.join(base, "real", "deeper"), path.join(base, "link"), "dir");
   const proj = path.join(base, "link", "proj");
   try {
     const r = await installAgents({ scope: "project", projectRoot: proj });
