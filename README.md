@@ -74,7 +74,7 @@ osmatrix install-agents        # register the MCP server + skills with Claude Co
 | Cursor | `~/.cursor/mcp.json`; skills in `~/.agents/skills/` | `.cursor/mcp.json`; skills in `.agents/skills/` |
 | Codex | `~/.codex/config.toml` `[mcp_servers.osmatrix]`; skills in `~/.agents/skills/` | `.codex/config.toml` (read in trusted projects only); skills in `.agents/skills/` |
 
-In a project the server runs `npx -y osmatrix@<major> mcp`, which uses the project's own copy, and the skills are relative links into `node_modules/osmatrix` (`--copy-skill` copies them instead), so the files can be committed. Skill directories an earlier osmatrix created under those names (the single `osmatrix` skill of 0.1, say) are replaced; a directory osmatrix didn't create is left alone and reported.
+In a project the server runs `npx -y osmatrix@<major> mcp`, which uses the project's own copy, and the skills are relative links into `node_modules/osmatrix` (`--copy-skill` copies them instead), so the files can be committed. On Windows they are junctions, whose targets are absolute: use `--copy-skill` there for a tree that other machines can use. Skill directories an earlier osmatrix created under those names (the single `osmatrix` skill of 0.1, say) are replaced; a directory osmatrix didn't create is left alone and reported.
 
 Options:
 
