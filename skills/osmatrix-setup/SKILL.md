@@ -1,6 +1,6 @@
 ---
 name: osmatrix-setup
-description: Check what this host can run (Docker, KVM, Apple Silicon) and create or repair osmatrix guests - set up Ubuntu, Windows and macOS environments unattended, obtain the user's consent for the macOS licence, register existing machines as ssh guests, read setup progress, and recover a guest stuck during boot or provisioning. Use on first use of osmatrix, when env_status reports a guest as absent or needs-ssh-setup, when host_doctor fails, or when the osmatrix MCP server or its tools are missing from the session.
+description: Check what this host can run (Docker, KVM, Apple Silicon) and create or repair osmatrix guests (MCP tools host_doctor, env_setup, env_reset, host_report) - set up Ubuntu, Windows and macOS environments unattended, obtain the user's consent for the macOS licence, register existing machines as ssh guests, read setup progress, recover a guest stuck during boot or provisioning, and offer a compatibility report. Use on first use of osmatrix, when env_status reports a guest as absent, unmanaged or needs-ssh-setup, when host_doctor fails, or when the osmatrix MCP server or its tools are missing from the session.
 ---
 
 # osmatrix-setup: host prerequisites, creating guests, troubleshooting
@@ -25,6 +25,7 @@ Use the **MCP tools** (`host_doctor`, `env_setup`, ...) when they are available:
 | `stopped` | set up, not running | `env_up` (VMs: 1–3 min) |
 | `booting` | starting | poll `env_status` |
 | `needs-ssh-setup` | `ssh` guest without key access yet | `osmatrix setup-ssh <guest> --user u` (CLI only; asks for the password once) |
+| `unmanaged` | `ssh` guest that isn't reachable (machine down, wrong `host`/`user`/`identity`, firewall) | check the machine and its `[guests.<name>]` entry; osmatrix can't start or repair it |
 | `ready` | usable | use `osmatrix-guests` / `osmatrix-ci` |
 
 Only start the guests a task needs: each VM takes its full RAM (8 GB by default). `host_doctor` lists each guest's `resources` (configured vs minimum and recommended) and notes sizing problems; resize with `env_configure`.

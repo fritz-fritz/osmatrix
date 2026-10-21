@@ -10,7 +10,7 @@
 
 <p align="center"><img src="assets/social-preview.svg" alt="osmatrix social card" width="65%"></p>
 
-Local **Ubuntu, Windows and macOS** environments plus **local GitHub Actions matrix runs** for coding agents (Claude Code, Cursor, Codex) and for humans. It's one CLI that also serves as an MCP server, and it ships with three agent skills.
+Local **Ubuntu, Windows and macOS** environments plus **local GitHub Actions matrix runs** for coding agents (Claude Code, Cursor, Codex) and for humans. It's one CLI that also serves as an MCP server, and it ships with four agent skills: three for the work and one map.
 
 - **Guests**: `exec`, file push/pull, **port forwarding** (both directions), screenshots and keyboard/mouse input, and a browser viewer for every VM guest that opens on its desktop without a sign-in.
 - **Local CI**: `ci plan` / `ci run` expand workflow matrices. `ubuntu-*` legs run with [act](https://github.com/nektos/act) on the host's Docker. `windows-*` and `macos-*` legs run act **inside** the matching VM, so a Windows leg really runs on Windows.
@@ -45,10 +45,11 @@ Requirements:
 - Docker.
 - KVM for the Windows/macOS VMs; on Macs and Windows on ARM, QEMU for Windows; on Apple Silicon, tart for macOS (see the [compatibility matrix](#compatibility-matrix)).
 
-The plugin adds three skills, so an agent loads only the guidance a task needs:
+The plugin adds four skills, so an agent loads only the guidance a task needs:
 
 | Skill | Loads when the task is... |
 |---|---|
+| `osmatrix` | unclear which skill applies, or what osmatrix can do: a short map to the other three |
 | `osmatrix-ci` | running a repo's GitHub Actions workflows locally, debugging a leg that failed on another OS |
 | `osmatrix-guests` | running or debugging code inside a Ubuntu/Windows/macOS guest, reaching a guest app from the host (port forwarding), driving a VM's GUI |
 | `osmatrix-setup` | first use, checking the host, creating or repairing guests, adding an ssh guest |
@@ -124,7 +125,7 @@ Run `osmatrix doctor` to see what this host can do. It also needs an OpenSSH cli
 | macos: tart | 2 / 4 | 4G / 8G | from the image (50G) | ~25G (estimate) |
 
 - VM disks are sparse: the host only stores what the guest has written. Each VM's golden snapshot is another copy (less on copy-on-write filesystems such as btrfs).
-- Each running VM holds its full RAM. Running Windows and macOS together at the defaults takes 16G for the guests alone, so plan on 24G or more of host RAM; on a 16G host, run one VM at a time (`max_vms = 1`).
+- Each running VM holds its full RAM. Running Windows and macOS together at the defaults takes 16G for the guests alone, so plan on 24G or more of host RAM. Below about 24G, `max_vms` defaults to 1, so CI runs one VM leg at a time (set `max_vms = 2` to override).
 - The minimums are what the OS and osmatrix's provisioning still work with. Builds go faster with the defaults or more.
 - Windows guests include the Visual Studio 2022 Build Tools C++ workload (MSVC and the Windows SDK), like GitHub's `windows-latest`. They take about 8G of the guest's disk and add 10–20 minutes to setup. Set `msvc = false` on the guest to skip them (see [Configuration](#configuration)).
 
@@ -171,7 +172,7 @@ osmatrix setup macos --accept-license       # ~30-60 min on first run
 osmatrix status                             # progress shows up as setup.phase
 ```
 
-Agents use `env_setup` and poll `env_status`. Afterwards, `osmatrix reset <guest>` brings a guest back to the golden snapshot in seconds.
+Agents use `env_setup` and poll `env_status`. Afterwards, `osmatrix reset <guest>` brings a guest back to the golden snapshot: the disk restore takes seconds, and a VM then boots again (1–3 min).
 
 How each guest gets there:
 

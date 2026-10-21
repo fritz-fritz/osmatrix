@@ -1,6 +1,6 @@
 ---
 name: osmatrix-guests
-description: Run commands, start background processes, copy files, forward ports in both directions, take screenshots and send keyboard/mouse input in local Ubuntu, Windows and macOS guests. Use when code must be run or debugged on another OS ("test this on Windows/macOS"), when a dev server inside a guest must be reached from host tools (browser, curl, Playwright), when a guest needs a service running on the host, or when a GUI app inside a VM must be driven.
+description: Work inside osmatrix's local Ubuntu, Windows and macOS guests with the MCP tools env_exec, env_push/env_pull, env_forward, env_viewer, env_screenshot and env_input - run commands, start background processes such as dev servers, copy files, forward ports in both directions, show or screenshot a guest's screen and send keyboard/mouse input. Use when code must be run or debugged on another OS ("test this on Windows/macOS"), when a server inside a guest must be reached from host tools (browser, curl, Playwright), when a guest needs a service running on the host, or when a GUI app inside a VM must be driven.
 ---
 
 # osmatrix-guests: work inside Ubuntu, Windows and macOS guests
@@ -27,7 +27,7 @@ Check `env_status` (CLI: `osmatrix status`) for what this host has:
 | `windows` | Windows Server VM (dockur on Linux and Windows x64, the host's QEMU on Intel Macs); Windows 11 on ARM on Apple Silicon and arm64 hosts | PowerShell 7 (`pwsh`) |
 | `macos` | macOS VM (dockur on Linux, the host's QEMU on Intel Macs, tart on Apple Silicon) | zsh/bash |
 
-A guest must be `ready`. `stopped` → `env_up` (VMs take 1–3 min to boot; leave them running while you iterate). `absent`, `needs-ssh-setup`, or a `detail` saying "not set up" → follow `osmatrix-setup`. **Don't start VMs you don't need.**
+A guest must be `ready`. `stopped` → `env_up` (VMs take 1–3 min to boot; leave them running while you iterate). `absent`, `needs-ssh-setup`, `unmanaged` (an `ssh` guest that isn't reachable), or a `detail` saying "not set up" → follow `osmatrix-setup`. **Don't start VMs you don't need.**
 
 A set-up VM whose boot stops making progress (idle disk or a reset loop, well past its usual boot time) fails `env_up`/`env_reset` waits and CI legs with a "looks hung" error instead of waiting out the timeout. Take an `env_screenshot`, then `env_reset` (back to the golden snapshot) or `env_down` it.
 
@@ -36,7 +36,7 @@ A set-up VM whose boot stops making progress (idle disk or a reset loop, well pa
 - `env_exec` — one command per call; returns `exitCode`, `stdout`, `stderr`. Default timeout 600 s (`timeout_seconds` up to 3600). `cwd` is relative to the guest user's home; repos synced by `ci_run`/`env_push` are at `work/<name>`.
 - **Long-running processes** (dev servers, watchers): `env_exec` with `background: true` (CLI: `exec --background`). It returns `pid`, a `log` file path and a `stop` command (kills the whole process tree). Tell the user what you started, and run `stop` when you no longer need it. Don't use `&`, `nohup` or `Start-Process` yourself — on Windows anything started inside the ssh session is killed when the call returns. Read the log with a normal `env_exec` (`Get-Content <log>` / `tail -n 50 <log>`).
 - `env_push` / `env_pull` — copy files. Directories that are git work trees respect `.gitignore`; default destination `work/<basename>`. Copy the user's project or files they named, and pull into the project or a scratch directory. Guests are other machines, so osmatrix refuses the home directory itself, credential stores (`~/.ssh`, `~/.aws`, …) and its own data dir. Pass `allow_sensitive` only when the user explicitly asked for such a path.
-- Windows commands are **PowerShell**: use `;` not `&&` on Windows PowerShell 5, `$env:VAR`, `Get-ChildItem`; `cmd /c "..."` when you need cmd semantics.
+- Windows commands are **PowerShell** (`pwsh` 7 in osmatrix's guests, where `&&` works; an `ssh` guest may default to Windows PowerShell 5, where you need `;`): `$env:VAR`, `Get-ChildItem`; `cmd /c "..."` when you need cmd semantics.
 
 ## Reaching guest apps from the host (port forwarding)
 
