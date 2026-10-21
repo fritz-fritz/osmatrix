@@ -1,7 +1,7 @@
 {
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "osmatrix",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Local Ubuntu, Windows and macOS environments plus local GitHub Actions matrix runs (act) for agents: run commands, sync files, forward ports, screenshots, and test CI legs before pushing.",
   "author": {
     "name": "osmatrix contributors"
