@@ -66,6 +66,11 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     else if (name !== "osmatrix" && !name.startsWith(PREFIX)) problems.push(`${label}: name must be "osmatrix" or start with "${PREFIX}" (skills are installed flat next to other plugins' skills)`);
     if (!description) problems.push(`${label}: no description`);
     else if (description.length > 1024) problems.push(`${label}: description longer than 1024 chars`);
+    // The values are unquoted YAML scalars: a ": " or " #" inside one is a parse error in the clients'
+    // YAML parsers (skills.sh skips the skill), even though the regexes above accept it.
+    for (const [k, v] of [["name", name], ["description", description]]) {
+      if (v && !/^["']/.test(v) && /: | #/.test(v)) problems.push(`${label}: ${k} contains ": " or " #", which is invalid in an unquoted YAML value`);
+    }
     // Relative links must stay inside the skill: nothing else is installed with it.
     for (const [, target] of text.matchAll(/\]\(([^)#\s]+)(?:#[^)]*)?\)/g)) {
       if (/^[a-z]+:/.test(target)) continue;

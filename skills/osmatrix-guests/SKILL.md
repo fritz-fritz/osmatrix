@@ -1,6 +1,6 @@
 ---
 name: osmatrix-guests
-description: Work inside osmatrix's local Ubuntu, Windows and macOS guests (MCP tools env_exec, env_push/env_pull, env_forward, env_viewer, env_screenshot, env_input): run commands, start background processes such as dev servers, copy files, forward ports in both directions, show or screenshot a guest's screen and send keyboard/mouse input. Use when code must be run or debugged on another OS ("test this on Windows/macOS"), when a server inside a guest must be reached from host tools (browser, curl, Playwright), when a guest needs a service running on the host, or when a GUI app inside a VM must be driven.
+description: Work inside osmatrix's local Ubuntu, Windows and macOS guests with the MCP tools env_exec, env_push/env_pull, env_forward, env_viewer, env_screenshot and env_input - run commands, start background processes such as dev servers, copy files, forward ports in both directions, show or screenshot a guest's screen and send keyboard/mouse input. Use when code must be run or debugged on another OS ("test this on Windows/macOS"), when a server inside a guest must be reached from host tools (browser, curl, Playwright), when a guest needs a service running on the host, or when a GUI app inside a VM must be driven.
 ---
 
 # osmatrix-guests: work inside Ubuntu, Windows and macOS guests
