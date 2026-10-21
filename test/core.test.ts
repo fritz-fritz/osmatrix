@@ -170,13 +170,16 @@ test("VM legs keep their own files next to the work tree and pass a derived work
 
 test("cancelling a VM leg stops the run's act process trees in the guest, and only those", { skip: process.platform === "win32" }, async () => {
   const run = "20261018T101010-cd34";
+  // Alive means running: a killed process its parent hasn't reaped (a zombie) still answers kill -0, and
+  // the job containers act runs these tests in have no init to reap orphans.
   const alive = (pid: number) => {
     try {
       process.kill(pid, 0);
-      return true;
     } catch {
       return false;
     }
+    const stat = spawnSync("ps", ["-o", "stat=", "-p", String(pid)], { encoding: "utf8" }).stdout.trim();
+    return stat !== "" && !stat.startsWith("Z");
   };
   // Stand-ins for act: a shell whose command line names the run's directory (as --artifact-server-path
   // does), with a child that doesn't; and the same for another run, which must survive.
