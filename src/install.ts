@@ -172,7 +172,9 @@ export function installSkills(dest: string, copy: boolean, uninstall: boolean, d
     if (!copy) {
       try {
         // Relative links (a project's, into its node_modules) survive the project moving or being cloned.
-        const to = relative ? path.relative(path.dirname(target), source) : source;
+        // Between real paths: the OS resolves the link from the real directory, so a symlinked ancestor
+        // (macOS's /var -> /private/var, say) would otherwise leave it dangling.
+        const to = relative ? path.relative(fs.realpathSync(path.dirname(target)), fs.realpathSync(source)) : source;
         fs.symlinkSync(to, target, process.platform === "win32" ? "junction" : "dir");
         continue;
       } catch {

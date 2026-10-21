@@ -99,7 +99,12 @@ test("detectScope: project scope when the running osmatrix is that project's nod
 });
 
 test("installAgents --scope project writes the project's files, links its skills relatively, and reverses", async () => {
-  const proj = mkdtempSync(path.join(tmpdir(), "osmatrix-proj-"));
+  const base = mkdtempSync(path.join(tmpdir(), "osmatrix-proj-"));
+  // Reached through a symlinked parent, as macOS's temp directory is (/var -> /private/var): the links
+  // must resolve from the real directory.
+  mkdirSync(path.join(base, "real", "proj"), { recursive: true });
+  symlinkSync(path.join(base, "real"), path.join(base, "link"), "dir");
+  const proj = path.join(base, "link", "proj");
   try {
     const r = await installAgents({ scope: "project", projectRoot: proj });
     assert.equal(r.scope, "project");
@@ -121,6 +126,6 @@ test("installAgents --scope project writes the project's files, links its skills
     assert.doesNotMatch(readFileSync(path.join(proj, ".codex", "config.toml"), "utf8"), /mcp_servers\.osmatrix/);
     for (const name of skillNames()) assert.ok(!existsSync(path.join(proj, ".agents", "skills", name)));
   } finally {
-    rmSync(proj, { recursive: true, force: true });
+    rmSync(base, { recursive: true, force: true });
   }
 });
